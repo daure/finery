@@ -249,10 +249,25 @@ These guardrails keep implementations aligned with this architecture without add
 
 ## Testing Strategy
 
-Write high-value, behavior-driven integration tests rather than checking isolated implementations. Every tested module or component keeps its tests in a sibling `tests/` directory; split test files by behavior when multiple concerns emerge. Production files must not contain inline test bodies.
+Use the smallest test suite that gives meaningful confidence. Tests are a risk-control tool, not a deliverable measured by count or coverage percentage. Every test must protect a distinct contract, realistic regression, branching rule, failure path, or integration boundary that is not already covered. If that risk cannot be named, do not write the test.
+
+Prefer a few behavior-driven integration tests over many isolated implementation tests. Do not test trivial getters, pass-throughs, static builders, framework behavior, or every visual/style variation. One representative render test per meaningful screen or component boundary is normally enough; add more only when layout behavior branches materially. Bug fixes need regression tests only when the failure could realistically recur and existing tests would not catch it.
+
+When an existing test already describes the behavior being protected, prefer adding an assertion to that test over creating another test. Create a separate test only when the existing test name would no longer accurately describe its responsibility or combining the behavior would obscure failure diagnosis.
+
+The categories below are candidates, not a mandatory checklist. Select only those justified by the feature's risks. Every tested module or component keeps its tests in a sibling `tests/` directory; split test files by behavior when multiple concerns emerge. Production files must not contain inline test bodies.
 
 1. **Config Merges:** Verify that user configurations combine correctly with default templates.
 2. **Key-to-Action mapping:** Simulate terminal events and assert that they resolve to the expected `Action`.
 3. **State Transitions:** Feed actions to the reducer and check the modified `AppState` invariants.
 4. **Mock Backend Flows:** Exercise service adapters with fake clients to ensure that error/stale results lead to visible UI warnings.
 5. **Deterministic Render Tests:** Assert that important headers, status labels, and help widgets render correctly into a test backend. Avoid assertions on individual terminal style cells or positions.
+
+Before adding a test, ask:
+
+1. What specific failure would this catch?
+2. Is that failure plausible or costly enough to protect against?
+3. Does an existing test already cover it?
+4. Can a higher-level test cover the same risk with less maintenance?
+
+Delete redundant tests when broader tests make them unnecessary. Do not preserve tests solely to maintain coverage numbers.
