@@ -23,6 +23,8 @@ pub(super) struct SourceController {
     generation: u64,
     requested: Option<SourceRequest>,
     loading: usize,
+    refresh_count: usize,
+    refresh_failures: usize,
     mode: Option<ComposerViewMode>,
 }
 
@@ -37,6 +39,8 @@ impl SourceController {
             generation: 0,
             requested: None,
             loading: 0,
+            refresh_count: 0,
+            refresh_failures: 0,
             mode: None,
         }
     }
@@ -102,6 +106,8 @@ impl SourceController {
         self.generation = self.generation.saturating_add(1);
         self.requested = Some(SourceRequest::All);
         self.loading = target_count;
+        self.refresh_count = target_count;
+        self.refresh_failures = 0;
         if targets.is_empty() {
             return 0;
         }
@@ -134,18 +140,30 @@ impl SourceController {
             if generation != self.generation {
                 continue;
             }
+            let refreshing = matches!(self.requested, Some(SourceRequest::All));
             self.loading = self.loading.saturating_sub(1);
-            if self.loading == 0 && matches!(self.requested.as_ref(), Some(SourceRequest::All)) {
-                self.requested = None;
-            }
             match result {
                 Ok(ticket) => self
                     .state
                     .borrow_mut()
                     .dispatch(ComposerAction::SetSource { id, ticket }),
-                Err(error) => self
-                    .service
-                    .report_error(format!("Jira source refresh failed: {error}")),
+                Err(error) => {
+                    if refreshing {
+                        self.refresh_failures = self.refresh_failures.saturating_add(1);
+                    }
+                    self.service
+                        .report_error(format!("Jira source refresh failed: {error}"));
+                }
+            }
+            if refreshing && self.loading == 0 {
+                self.requested = None;
+                if self.refresh_failures == 0 {
+                    self.service
+                        .report_notification(tuicore::Notification::success(
+                            "Refresh complete",
+                            format!("{} tickets refreshed", self.refresh_count),
+                        ));
+                }
             }
             changed = true;
         }

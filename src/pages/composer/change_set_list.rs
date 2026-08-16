@@ -8,9 +8,8 @@ use ratatui::{
 };
 use tuicore::{
     ActivationMode, AnimationSettings, CellContext, Column, EventCtx, EventOutcome, EventRoute,
-    FocusCtx, FocusId, FocusTarget, KeySpec, LayoutCtx, LayoutProposal, LayoutResult,
-    LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlKeyBindings, Panel,
-    RenderCtx, TickResult, TuiEvent, TuiNode,
+    FocusCtx, FocusId, FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
+    LifecycleCtx, ListControl, ListControlEvent, Panel, RenderCtx, TickResult, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -56,7 +55,6 @@ impl ChangeSetListView {
         .title("Change sets")
         .panel(Panel::new().top_left("Change sets").one_row(true))
         .activation_mode(ActivationMode::OnActivateKey)
-        .keybindings(ListControlKeyBindings::default().remove([KeySpec::plain('-')]))
         .confirm_remove("Delete change set?", |row| {
             format!(
                 "Delete {} · {}? This removes its local ticket snapshots.",

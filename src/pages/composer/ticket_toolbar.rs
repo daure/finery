@@ -23,23 +23,17 @@ pub(super) type ToolbarEvents = Rc<RefCell<Vec<ToolbarEvent>>>;
 #[derive(Clone)]
 pub(super) struct ToolbarFeedback {
     refresh: Rc<Cell<bool>>,
-    submit: Rc<Cell<bool>>,
 }
 
 impl ToolbarFeedback {
     pub(super) fn new() -> Self {
         Self {
             refresh: Rc::new(Cell::new(false)),
-            submit: Rc::new(Cell::new(false)),
         }
     }
 
     pub(super) fn request_refresh(&self) {
         self.refresh.set(true);
-    }
-
-    pub(super) fn request_submit(&self) {
-        self.submit.set(true);
     }
 }
 
@@ -75,7 +69,7 @@ pub(super) fn toolbar(
                     .hotkey_focus_enabled(false)
                     .on_press(move || submit_events.borrow_mut().push(ToolbarEvent::Submit)),
                 can_submit,
-                Rc::clone(&feedback.submit),
+                Rc::new(Cell::new(false)),
             ),
             FlexItem::fit_content(),
         );

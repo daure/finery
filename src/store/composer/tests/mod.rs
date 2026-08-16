@@ -177,6 +177,58 @@ fn deleting_ticket_keeps_live_source_read_only_and_visible() {
 }
 
 #[test]
+fn restore_and_reset_return_tickets_to_synced_state() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+
+    state.dispatch(ComposerAction::MarkTicketDeleted("FIN-142".into()));
+    state.dispatch(ComposerAction::RestoreTicket("FIN-142".into()));
+    assert_eq!(
+        state
+            .active_set()
+            .unwrap()
+            .tickets
+            .iter()
+            .find(|change| change.id == "FIN-142")
+            .unwrap()
+            .kind,
+        ChangeKind::Synced
+    );
+
+    let expected_update = state
+        .active_set()
+        .unwrap()
+        .tickets
+        .iter()
+        .find(|change| change.id == "FIN-157")
+        .unwrap()
+        .updated
+        .clone();
+    state.dispatch(ComposerAction::MarkTicketDeleted("FIN-157".into()));
+    state.dispatch(ComposerAction::RestoreTicket("FIN-157".into()));
+    let change = state
+        .active_set()
+        .unwrap()
+        .tickets
+        .iter()
+        .find(|change| change.id == "FIN-157")
+        .unwrap();
+    assert_eq!(change.kind, ChangeKind::Modified);
+    assert_eq!(change.updated, expected_update);
+
+    state.dispatch(ComposerAction::ResetTicket("FIN-157".into()));
+    let change = state
+        .active_set()
+        .unwrap()
+        .tickets
+        .iter()
+        .find(|change| change.id == "FIN-157")
+        .unwrap();
+    assert_eq!(change.kind, ChangeKind::Synced);
+    assert!(change.updated.is_none());
+}
+
+#[test]
 fn removing_ticket_does_not_mark_it_for_jira_deletion() {
     let mut state = ComposerState::demo();
     state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));

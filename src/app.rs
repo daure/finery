@@ -5,7 +5,7 @@ use tuicore::{
     AnimationSettings, Dialog, DialogAction, DialogBackdrop, DialogHost, DialogLayer, EventCtx,
     EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusTarget, KeySpec, LayoutCtx,
     LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, Tab, Tabs, TabsVariant,
-    TickResult, TuiEvent, TuiNode,
+    TickResult, ToastRack, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -23,6 +23,7 @@ pub(crate) struct App {
     open_settings: Rc<Cell<bool>>,
     close_dialog: Rc<Cell<bool>>,
     service: AppService,
+    service_notifications: ToastRack,
 }
 
 pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
@@ -66,6 +67,7 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
         open_settings,
         close_dialog,
         service,
+        service_notifications: ToastRack::new(),
     }
 }
 
@@ -77,15 +79,27 @@ impl App {
         if self.close_dialog.replace(false) {
             self.view.set_active_with_context(false, ctx);
         }
-        for error in self.service.take_errors() {
-            ctx.notify(tuicore::Notification::error(
-                "Background operation failed",
-                error,
-            ));
+        if self.drain_service_notifications() {
+            ctx.request_redraw();
+            ctx.request_tick();
         }
-        for notification in self.service.take_notifications() {
-            ctx.notify(notification);
+    }
+
+    fn drain_service_notifications(&mut self) -> bool {
+        let errors = self.service.take_errors();
+        let notifications = self.service.take_notifications();
+        let has_notifications = !errors.is_empty() || !notifications.is_empty();
+        for error in errors {
+            self.service_notifications
+                .push(tuicore::Notification::error(
+                    "Background operation failed",
+                    error,
+                ));
         }
+        for notification in notifications {
+            self.service_notifications.push(notification);
+        }
+        has_notifications
     }
 }
 
@@ -100,6 +114,7 @@ impl TuiNode for App {
 
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
         self.view.render(frame, area, ctx);
+        self.service_notifications.render(frame, area);
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
@@ -128,7 +143,15 @@ impl TuiNode for App {
     }
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        self.view.tick(dt, settings)
+        let view_tick = self.view.tick(dt, settings);
+        let notifications_added = self.drain_service_notifications();
+        view_tick
+            .merge(self.service_notifications.tick(dt, settings))
+            .merge(if notifications_added {
+                TickResult::CHANGED
+            } else {
+                TickResult::IDLE
+            })
     }
 
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
@@ -147,3 +170,6 @@ impl TuiNode for App {
         self.view.destroy(ctx);
     }
 }
+
+#[cfg(test)]
+mod tests;

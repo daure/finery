@@ -467,7 +467,7 @@ impl PropertyKind {
         match self {
             Self::IssueType => "it",
             Self::Status => "st",
-            Self::Priority => "pri",
+            Self::Priority => "pr",
             Self::Assignee => "ee",
         }
     }

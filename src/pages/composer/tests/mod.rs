@@ -393,6 +393,181 @@ fn new_ticket_dialog_shows_title_guidance() {
 }
 
 #[test]
+fn ticket_action_dialogs_match_the_selected_change_kind() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 1);
+    let source = page.selected_changes();
+    page.set_selected_source(source);
+    page.mark_selected_deleted();
+
+    let tickets = focus(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+    let delete_dialog = render_text(&mut page);
+    assert!(!delete_dialog.contains("Delete (d)"));
+    assert!(delete_dialog.contains("Remove (r)"));
+    assert!(delete_dialog.contains("Cancel (c)"));
+
+    let dialog = target(&mut page, "dialog");
+    page.dispatch_event(
+        &EventRoute::new(dialog.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('x'))),
+        &mut EventCtx::default(),
+    );
+
+    let tickets = focus(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('r'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+    let restore_dialog = render_text(&mut page);
+    assert!(restore_dialog.contains("Restore (r)"));
+    assert!(restore_dialog.contains("Cancel (c)"));
+    assert!(!restore_dialog.contains("Reset (s)"));
+
+    let dialog = target(&mut page, "dialog");
+    page.dispatch_event(
+        &EventRoute::new(dialog.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('r'))),
+        &mut EventCtx::default(),
+    );
+    page.update_selected_kind(TicketKind::Task);
+
+    let tickets = focus(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('r'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+    let reset_dialog = render_text(&mut page);
+    assert!(reset_dialog.contains("Reset (s)"));
+    assert!(reset_dialog.contains("Cancel (c)"));
+    assert!(!reset_dialog.contains("Restore (r)"));
+}
+
+#[test]
+fn ticket_action_hotkeys_open_from_other_composer_controls() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 1);
+
+    let title = focus(&mut page, "input");
+    page.dispatch_event(
+        &EventRoute::new(title.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('r'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+    let no_action_dialog = render_text(&mut page);
+    assert!(no_action_dialog.contains("No restore or reset action is available for this ticket."));
+    assert!(no_action_dialog.contains("Cancel (c)"));
+
+    let dialog = target(&mut page, "dialog");
+    page.dispatch_event(
+        &EventRoute::new(dialog.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('c'))),
+        &mut EventCtx::default(),
+    );
+
+    let title = focus(&mut page, "input");
+    page.dispatch_event(
+        &EventRoute::new(title.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+
+    let dialog_text = render_text(&mut page);
+    assert!(dialog_text.contains("Ticket action"));
+    assert!(dialog_text.contains("Delete (d)"));
+
+    let dialog = target(&mut page, "dialog");
+    page.dispatch_event(
+        &EventRoute::new(dialog.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('x'))),
+        &mut EventCtx::default(),
+    );
+    page.update_selected_kind(TicketKind::Task);
+
+    let title = focus(&mut page, "input");
+    page.dispatch_event(
+        &EventRoute::new(title.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('r'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+    assert!(render_text(&mut page).contains("Reset (s)"));
+}
+
+#[test]
+fn submit_requires_confirmation() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 1);
+    let tickets = focus(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::default(),
+    );
+    let source = page.selected_changes();
+    page.set_selected_source(source);
+
+    let title = focus(&mut page, "input");
+    page.dispatch_event(
+        &EventRoute::new(title.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('s'),
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut EventCtx::default(),
+    );
+
+    let dialog_text = render_text(&mut page);
+    assert!(dialog_text.contains("Submit changes"));
+    assert!(dialog_text.contains("Submit (s)"));
+    assert!(dialog_text.contains("Cancel (c)"));
+}
+
+#[test]
+fn restore_reset_dialog_opens_without_a_selected_ticket() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 0);
+    page.event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('r'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+
+    let dialog_text = render_text(&mut page);
+    assert!(dialog_text.contains("No ticket is selected."));
+    assert!(dialog_text.contains("Cancel (c)"));
+}
+
+#[test]
 fn ctrl_enter_creates_a_ticket_from_the_title_input() {
     tuicore::init();
     let mut page = composer_page();
@@ -539,7 +714,7 @@ fn toolbar_hotkeys_run_without_focusing_their_buttons() {
         &mut submit_ctx,
     );
     assert!(submit_ctx.layout_requested());
-    assert_eq!(submit_ctx.focus_request(), None);
+    assert!(submit_ctx.focus_request().is_some());
 
     let settings = AnimationSettings {
         enabled: false,
@@ -728,7 +903,7 @@ fn responsive_details_use_tabs_when_narrow_and_seventy_thirty_panels_when_wide()
     );
     let (description, properties) = page.detail_panel_areas();
     assert_eq!((description.width, properties.width), (84, 36));
-    for hotkey in ["it", "st", "pri", "ee"] {
+    for hotkey in ["it", "st", "pr", "ee"] {
         assert!(wide.focus_targets().iter().any(|target| {
             target
                 .hotkey_sequences
@@ -792,4 +967,21 @@ fn deleted_ticket_hotkeys_and_escape_return_to_change_sets() {
     let text = render_text(&mut page);
     assert!(text.contains("Customer notifications"));
     assert!(!text.contains("Change sets > Checkout reliability"));
+}
+
+#[test]
+fn change_set_delete_uses_ctrl_x() {
+    tuicore::init();
+    let mut page = composer_page();
+    let change_sets = target(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(change_sets.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+
+    assert!(render_text(&mut page).contains("Delete change set?"));
 }

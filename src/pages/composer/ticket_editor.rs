@@ -200,6 +200,7 @@ pub(super) struct TicketEditor {
     pending_project: Rc<RefCell<Option<String>>>,
     create_dialog_close_requested: Rc<Cell<bool>>,
     ticket_dialog_close_requested: Rc<Cell<bool>>,
+    submit_confirmation_requested: Rc<Cell<bool>>,
     submission: SubmissionController,
     source: SourceController,
 }
@@ -298,6 +299,7 @@ impl TicketEditor {
             .fit_content_max(120, 12)
             .backdrop(DialogBackdrop::dim().amount(0.55));
         let ticket_dialog_close_requested = Rc::new(Cell::new(false));
+        let submit_confirmation_requested = Rc::new(Cell::new(false));
         let close_ticket_dialog = Rc::clone(&ticket_dialog_close_requested);
         let ticket_action_dialog = Dialog::new()
             .top_left("Ticket action")
@@ -341,6 +343,7 @@ impl TicketEditor {
             pending_project,
             create_dialog_close_requested,
             ticket_dialog_close_requested,
+            submit_confirmation_requested,
             submission,
             source,
         }
@@ -517,8 +520,12 @@ impl TicketEditor {
                 .base_mut()
                 .set_active_with_context(false, ctx);
         }
-        if self.ticket_dialog_close_requested.replace(false) {
+        let submit_confirmed = self.submit_confirmation_requested.replace(false);
+        if self.ticket_dialog_close_requested.replace(false) || submit_confirmed {
             self.view.base_mut().set_active_with_context(false, ctx);
+        }
+        if submit_confirmed {
+            self.start_submit();
         }
         let add_events = self.view.base_mut().base_mut().layer_mut().take_events();
         for event in add_events {
@@ -581,7 +588,10 @@ impl TicketEditor {
         let ticket_action = actions.iter().any(|action| {
             matches!(
                 action,
-                ComposerAction::MarkTicketDeleted(_) | ComposerAction::RemoveTicket(_)
+                ComposerAction::MarkTicketDeleted(_)
+                    | ComposerAction::RemoveTicket(_)
+                    | ComposerAction::RestoreTicket(_)
+                    | ComposerAction::ResetTicket(_)
             )
         });
         let persist = actions.iter().any(ComposerAction::affects_persistence);
@@ -702,7 +712,7 @@ impl TicketEditor {
             match event {
                 ToolbarEvent::NewTicket => self.open_new_ticket(ctx),
                 ToolbarEvent::Refresh => self.ensure_source(true, ctx),
-                ToolbarEvent::Submit => self.start_submit(),
+                ToolbarEvent::Submit => self.open_submit_confirmation(ctx),
             }
         }
     }
@@ -741,6 +751,28 @@ impl TicketEditor {
         };
         self.submission.start(changes);
         self.sync();
+    }
+
+    fn open_submit_confirmation(&mut self, ctx: &mut EventCtx<()>) {
+        if !self.can_submit.get() || self.submission.is_submitting() {
+            return;
+        }
+        self.ticket_dialog_close_requested.set(false);
+        self.submit_confirmation_requested.set(false);
+        let confirm_submit = Rc::clone(&self.submit_confirmation_requested);
+        let cancel_submit = Rc::clone(&self.ticket_dialog_close_requested);
+        let dialog = self.view.base_mut().layer_mut();
+        dialog.set_top_left("Submit changes");
+        dialog.set_actions([
+            DialogAction::new("Submit")
+                .hotkey(KeySpec::plain('s'))
+                .on_trigger(move || confirm_submit.set(true)),
+            DialogAction::new("Cancel")
+                .hotkey(KeySpec::plain('c'))
+                .on_trigger(move || cancel_submit.set(true)),
+        ]);
+        dialog.set_content(["Submit selected ticket changes to Jira?"]);
+        self.view.base_mut().set_active_with_context(true, ctx);
     }
 
     fn poll_submission(&mut self, ctx: &mut EventCtx<()>) {
@@ -785,8 +817,7 @@ impl TicketEditor {
             self.toolbar_feedback.request_refresh();
             self.ensure_source(true, ctx);
         } else if KeySpec::shifted('s').matches(*key) && self.can_submit.get() {
-            self.toolbar_feedback.request_submit();
-            self.start_submit();
+            self.open_submit_confirmation(ctx);
         } else {
             return None;
         }
@@ -808,7 +839,7 @@ impl TicketEditor {
         let remove_sink = Rc::clone(&self.pending);
         self.ticket_dialog_close_requested.set(false);
         let mut actions = Vec::new();
-        if change.kind != ChangeKind::Added {
+        if !matches!(change.kind, ChangeKind::Added | ChangeKind::Deleted) {
             let delete_sink = Rc::clone(&self.pending);
             let delete_id = id.clone();
             actions.push(
@@ -836,15 +867,72 @@ impl TicketEditor {
                 .hotkey(KeySpec::plain('c'))
                 .on_trigger(move || cancel_ticket_dialog.set(true)),
         );
-        self.view.base_mut().layer_mut().set_actions(actions);
-        self.view
-            .base_mut()
-            .layer_mut()
-            .set_content([if change.kind == ChangeKind::Added {
+        let dialog = self.view.base_mut().layer_mut();
+        dialog.set_top_left("Ticket action");
+        dialog.set_actions(actions);
+        dialog.set_content([if change.kind == ChangeKind::Added {
             "This ticket does not exist in Jira and can only be removed from the change set."
+        } else if change.kind == ChangeKind::Deleted {
+            "This ticket is already marked for deletion and can only be removed from the change set."
         } else {
             "Mark the Jira ticket for deletion, or remove it from this change set without changing Jira."
         }]);
+        self.view.base_mut().set_active_with_context(true, ctx);
+        true
+    }
+
+    fn open_restore_reset_dialog(&mut self, ctx: &mut EventCtx<()>) -> bool {
+        self.ticket_dialog_close_requested.set(false);
+        let mut actions = Vec::new();
+        let change = self.state.borrow().selected_change().cloned();
+        let message = if let Some(change) = &change {
+            let can_recover = !change.is_submitted() && self.can_change.get();
+            if can_recover && change.kind == ChangeKind::Deleted {
+                let restore_sink = Rc::clone(&self.pending);
+                let restore_id = change.id.clone();
+                actions.push(
+                    DialogAction::new("Restore")
+                        .hotkey(KeySpec::plain('r'))
+                        .on_trigger(move || {
+                            restore_sink
+                                .borrow_mut()
+                                .push(ComposerAction::RestoreTicket(restore_id.clone()));
+                        }),
+                );
+            }
+            if can_recover && change.kind == ChangeKind::Modified {
+                let reset_sink = Rc::clone(&self.pending);
+                let reset_id = change.id.clone();
+                actions.push(
+                    DialogAction::new("Reset")
+                        .hotkey(KeySpec::plain('s'))
+                        .on_trigger(move || {
+                            reset_sink
+                                .borrow_mut()
+                                .push(ComposerAction::ResetTicket(reset_id.clone()));
+                        }),
+                );
+            }
+            if actions.is_empty() {
+                "No restore or reset action is available for this ticket."
+            } else if change.kind == ChangeKind::Deleted {
+                "Restore this ticket to cancel its deletion."
+            } else {
+                "Reset this ticket to discard its local changes."
+            }
+        } else {
+            "No ticket is selected."
+        };
+        let cancel_ticket_dialog = Rc::clone(&self.ticket_dialog_close_requested);
+        actions.push(
+            DialogAction::new("Cancel")
+                .hotkey(KeySpec::plain('c'))
+                .on_trigger(move || cancel_ticket_dialog.set(true)),
+        );
+        let dialog = self.view.base_mut().layer_mut();
+        dialog.set_top_left("Restore or reset");
+        dialog.set_actions(actions);
+        dialog.set_content([message]);
         self.view.base_mut().set_active_with_context(true, ctx);
         true
     }
@@ -858,12 +946,30 @@ impl TicketEditor {
             || self.view.base().is_active()
             || self.view.base().base().is_active()
             || self.view.base().base().base().is_active()
-            || !self.ticket_list_is_focused()
             || !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Char('x'), KeyModifiers::CONTROL).matches(*key))
         {
             return None;
         }
         self.open_ticket_action_dialog(ctx).then(|| {
+            ctx.stop_propagation();
+            EventOutcome::Handled
+        })
+    }
+
+    fn handle_restore_reset_key(
+        &mut self,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> Option<EventOutcome> {
+        if self.view.is_active()
+            || self.view.base().is_active()
+            || self.view.base().base().is_active()
+            || self.view.base().base().base().is_active()
+            || !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Char('r'), KeyModifiers::CONTROL).matches(*key))
+        {
+            return None;
+        }
+        self.open_restore_reset_dialog(ctx).then(|| {
             ctx.stop_propagation();
             EventOutcome::Handled
         })
@@ -960,6 +1066,9 @@ impl TuiNode for TicketEditor {
         if let Some(outcome) = self.handle_ticket_action_key(event, ctx) {
             return outcome;
         }
+        if let Some(outcome) = self.handle_restore_reset_key(event, ctx) {
+            return outcome;
+        }
         let create_dialog_open = self.view.base().base().base().is_active();
         let add_menu_open = self.view.base().base().is_active();
         let ticket_dialog_open = self.view.base().is_active();
@@ -990,6 +1099,9 @@ impl TuiNode for TicketEditor {
             return outcome;
         }
         if let Some(outcome) = self.handle_ticket_action_key(event, ctx) {
+            return outcome;
+        }
+        if let Some(outcome) = self.handle_restore_reset_key(event, ctx) {
             return outcome;
         }
         let create_dialog_open = self.view.base().base().base().is_active();

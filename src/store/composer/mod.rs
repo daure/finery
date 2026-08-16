@@ -120,6 +120,8 @@ pub(crate) enum ComposerAction {
     IncludeTicket(Ticket),
     RemoveTicket(String),
     MarkTicketDeleted(String),
+    RestoreTicket(String),
+    ResetTicket(String),
     UpdateTitle(String),
     UpdateDescription(String),
     UpdateKind(TicketKind),
@@ -331,6 +333,8 @@ impl ComposerState {
             ComposerAction::IncludeTicket(ticket) => self.include_ticket(ticket),
             ComposerAction::RemoveTicket(id) => self.remove_ticket(&id),
             ComposerAction::MarkTicketDeleted(id) => self.mark_deleted(&id),
+            ComposerAction::RestoreTicket(id) => self.restore_ticket(&id),
+            ComposerAction::ResetTicket(id) => self.reset_ticket(&id),
             ComposerAction::UpdateTitle(value) => self.edit_selected(|ticket| ticket.title = value),
             ComposerAction::UpdateDescription(value) => {
                 self.edit_selected(|ticket| ticket.description = value)
@@ -455,8 +459,38 @@ impl ComposerState {
         }
         if change.kind != ChangeKind::Added {
             change.original = None;
-            change.updated = None;
             change.kind = ChangeKind::Deleted;
+            self.view_mode = ComposerViewMode::Changes;
+        }
+    }
+
+    fn restore_ticket(&mut self, id: &str) {
+        let Some(change) = self
+            .active_set_mut()
+            .and_then(|set| set.tickets.iter_mut().find(|change| change.id == id))
+        else {
+            return;
+        };
+        if change.kind == ChangeKind::Deleted && !change.is_submitted() {
+            change.kind = if change.updated.is_some() {
+                ChangeKind::Modified
+            } else {
+                ChangeKind::Synced
+            };
+            self.view_mode = ComposerViewMode::Changes;
+        }
+    }
+
+    fn reset_ticket(&mut self, id: &str) {
+        let Some(change) = self
+            .active_set_mut()
+            .and_then(|set| set.tickets.iter_mut().find(|change| change.id == id))
+        else {
+            return;
+        };
+        if change.kind == ChangeKind::Modified && !change.is_submitted() {
+            change.updated = None;
+            change.kind = ChangeKind::Synced;
             self.view_mode = ComposerViewMode::Changes;
         }
     }
@@ -560,6 +594,8 @@ impl ComposerAction {
                 | Self::SetSelectedTickets(_)
                 | Self::RemoveTicket(_)
                 | Self::MarkTicketDeleted(_)
+                | Self::RestoreTicket(_)
+                | Self::ResetTicket(_)
                 | Self::UpdateTitle(_)
                 | Self::UpdateDescription(_)
                 | Self::UpdateKind(_)
