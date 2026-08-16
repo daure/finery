@@ -20,8 +20,32 @@ pub(super) enum ToolbarEvent {
 
 pub(super) type ToolbarEvents = Rc<RefCell<Vec<ToolbarEvent>>>;
 
+#[derive(Clone)]
+pub(super) struct ToolbarFeedback {
+    refresh: Rc<Cell<bool>>,
+    submit: Rc<Cell<bool>>,
+}
+
+impl ToolbarFeedback {
+    pub(super) fn new() -> Self {
+        Self {
+            refresh: Rc::new(Cell::new(false)),
+            submit: Rc::new(Cell::new(false)),
+        }
+    }
+
+    pub(super) fn request_refresh(&self) {
+        self.refresh.set(true);
+    }
+
+    pub(super) fn request_submit(&self) {
+        self.submit.set(true);
+    }
+}
+
 pub(super) fn toolbar(
     events: ToolbarEvents,
+    feedback: ToolbarFeedback,
     can_change: Rc<Cell<bool>>,
     can_refresh: Rc<Cell<bool>>,
     can_submit: Rc<Cell<bool>>,
@@ -36,8 +60,10 @@ pub(super) fn toolbar(
             BoundButton::new(
                 Button::new("Refresh")
                     .hotkey("shift+r")
+                    .hotkey_focus_enabled(false)
                     .on_press(move || refresh_events.borrow_mut().push(ToolbarEvent::Refresh)),
                 can_refresh,
+                Rc::clone(&feedback.refresh),
             ),
             FlexItem::fit_content(),
         )
@@ -46,8 +72,10 @@ pub(super) fn toolbar(
             BoundButton::new(
                 Button::new("Submit")
                     .hotkey("shift+s")
+                    .hotkey_focus_enabled(false)
                     .on_press(move || submit_events.borrow_mut().push(ToolbarEvent::Submit)),
                 can_submit,
+                Rc::clone(&feedback.submit),
             ),
             FlexItem::fit_content(),
         );
@@ -60,6 +88,7 @@ pub(super) fn toolbar(
                     .hotkey("shift+n")
                     .on_press(move || new_events.borrow_mut().push(ToolbarEvent::NewTicket)),
                 can_change,
+                Rc::new(Cell::new(false)),
             ),
             FlexItem::fit_content(),
         )
@@ -69,13 +98,22 @@ pub(super) fn toolbar(
 struct BoundButton {
     button: Button<()>,
     enabled: Rc<Cell<bool>>,
+    feedback_requested: Rc<Cell<bool>>,
 }
 
 impl BoundButton {
-    fn new(button: Button<()>, enabled: Rc<Cell<bool>>) -> Self {
+    fn new(
+        button: Button<()>,
+        enabled: Rc<Cell<bool>>,
+        feedback_requested: Rc<Cell<bool>>,
+    ) -> Self {
         let mut button = button;
         button.set_disabled(!enabled.get());
-        Self { button, enabled }
+        Self {
+            button,
+            enabled,
+            feedback_requested,
+        }
     }
 
     fn sync(&mut self) -> bool {
@@ -114,11 +152,20 @@ impl TuiNode for BoundButton {
     }
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        self.button.tick(dt, settings).merge(if self.sync() {
+        let feedback = if self.feedback_requested.replace(false) {
+            self.button.press(settings);
             TickResult::CHANGED
         } else {
             TickResult::IDLE
-        })
+        };
+        self.button
+            .tick(dt, settings)
+            .merge(feedback)
+            .merge(if self.sync() {
+                TickResult::CHANGED
+            } else {
+                TickResult::IDLE
+            })
     }
 
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {

@@ -26,6 +26,7 @@ enum SettingChange {
     JiraEmail(String),
     JiraApiToken(String),
     JiraDefaultProject(String),
+    JiraDefaultBoard(String),
     Wpm(String),
     MarkdownBlockPause(String),
 }
@@ -45,6 +46,7 @@ impl SettingsDialog {
         let email_changes = Rc::clone(&changes);
         let token_changes = Rc::clone(&changes);
         let project_changes = Rc::clone(&changes);
+        let board_changes = Rc::clone(&changes);
         let wpm_changes = Rc::clone(&changes);
         let delay_changes = Rc::clone(&changes);
         let root = Flex::column()
@@ -96,6 +98,20 @@ impl SettingsDialog {
                         project_changes
                             .borrow_mut()
                             .push(SettingChange::JiraDefaultProject(value));
+                    }),
+                FlexItem::fixed(3),
+            )
+            .child(
+                "jira-default-board",
+                TextInput::new()
+                    .value(values.jira_default_board.clone())
+                    .numbers_only(true)
+                    .panel("Default Jira board ID")
+                    .placeholder("Auto-select from project")
+                    .on_edit_end(move |value| {
+                        board_changes
+                            .borrow_mut()
+                            .push(SettingChange::JiraDefaultBoard(value));
                     }),
                 FlexItem::fixed(3),
             )
@@ -154,6 +170,10 @@ impl SettingsDialog {
                 }
                 SettingChange::JiraDefaultProject(value) => {
                     settings.jira_default_project = value.trim().to_ascii_uppercase();
+                    changed = true;
+                }
+                SettingChange::JiraDefaultBoard(value) => {
+                    settings.jira_default_board = value.trim().into();
                     changed = true;
                 }
                 SettingChange::Wpm(value) => {

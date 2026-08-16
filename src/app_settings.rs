@@ -8,6 +8,7 @@ pub(crate) const JIRA_BASE_URL_SETTING: &str = "jira.base_url";
 pub(crate) const JIRA_EMAIL_SETTING: &str = "jira.email";
 pub(crate) const JIRA_API_TOKEN_SETTING: &str = "jira.api_token";
 pub(crate) const JIRA_DEFAULT_PROJECT_SETTING: &str = "jira.default_project";
+pub(crate) const JIRA_DEFAULT_BOARD_SETTING: &str = "jira.default_board";
 pub(crate) const SPEED_READER_WPM_SETTING: &str = "reader.wpm";
 pub(crate) const SPEED_READER_BLOCK_DELAY_SETTING: &str = "reader.markdown_block_pause_ms";
 
@@ -17,6 +18,7 @@ pub(crate) struct AppSettings {
     pub(crate) jira_email: String,
     pub(crate) jira_api_token: String,
     pub(crate) jira_default_project: String,
+    pub(crate) jira_default_board: String,
     pub(crate) speed_reader: SpeedReaderSettings,
 }
 
@@ -37,6 +39,7 @@ impl AppSettings {
                 JIRA_DEFAULT_PROJECT_SETTING,
                 "JIRA_DEFAULT_PROJECT",
             ),
+            jira_default_board: value_or_env(JIRA_DEFAULT_BOARD_SETTING, "JIRA_DEFAULT_BOARD"),
             speed_reader: SpeedReaderSettings {
                 wpm: values
                     .get(SPEED_READER_WPM_SETTING)
@@ -50,7 +53,7 @@ impl AppSettings {
         }
     }
 
-    pub(crate) fn values(&self) -> [(&'static str, String); 6] {
+    pub(crate) fn values(&self) -> [(&'static str, String); 7] {
         [
             (JIRA_BASE_URL_SETTING, self.jira_base_url.clone()),
             (JIRA_EMAIL_SETTING, self.jira_email.clone()),
@@ -59,6 +62,7 @@ impl AppSettings {
                 JIRA_DEFAULT_PROJECT_SETTING,
                 self.jira_default_project.clone(),
             ),
+            (JIRA_DEFAULT_BOARD_SETTING, self.jira_default_board.clone()),
             (SPEED_READER_WPM_SETTING, self.speed_reader.wpm.to_string()),
             (
                 SPEED_READER_BLOCK_DELAY_SETTING,

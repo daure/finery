@@ -12,9 +12,9 @@ use ratatui::{
 use tuicore::{
     AnimationSettings, DataView, DataViewTypedEvent, Dialog, DialogAction, DialogBackdrop,
     DialogLayer, EventCtx, EventOutcome, EventRoute, Flex, FocusCtx, FocusId, FocusRequest,
-    FocusTarget, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    Panel, PanelHost, RenderCtx, SpeedReader, Split, TextInput, TextInputKeyBindings, TickResult,
-    TuiEvent, TuiNode, keybindings,
+    FocusTarget, Key, KeyEvent, KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult,
+    LayoutSizeHint, LifecycleCtx, Panel, PanelHost, RenderCtx, SpeedReader, Split, TextInput,
+    TextInputKeyBindings, TickResult, TuiEvent, TuiNode, keybindings,
 };
 
 use crate::{
@@ -30,20 +30,160 @@ use super::{
     fields::{DescriptionAction, PendingDescriptionActions},
     source::SourceController,
     submission::SubmissionController,
-    ticket_rows::{TicketRow, ticket_data_view, ticket_rows},
-    ticket_toolbar::{ToolbarEvent, ToolbarEvents, toolbar},
+    ticket_rows::{TicketRow, set_active_ticket_style, ticket_data_view, ticket_rows},
+    ticket_toolbar::{ToolbarEvent, ToolbarEvents, ToolbarFeedback, toolbar},
+    title_guidance::{TitleFeedback, format_title},
 };
 
 type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
 type TicketList = PanelHost<DataView<TicketRow, String>>;
 type Body = Split<TicketList, DetailPane>;
 type Workspace = Split<Flex<()>, Body>;
-type CreateDialog = tuicore::DialogHost<TextInput, ()>;
+type CreateDialog = tuicore::DialogHost<CreateTicketForm, ()>;
 type CreateLayer = DialogLayer<Workspace, CreateDialog>;
 type AddLayer = DialogLayer<CreateLayer, AddTicketMenu>;
 type TicketEditorView = DialogLayer<AddLayer, Dialog<()>>;
 type DescriptionReader = tuicore::DialogHost<SpeedReader, ()>;
 type EditorView = DialogLayer<TicketEditorView, DescriptionReader>;
+
+struct CreateTicketForm {
+    input: TextInput<()>,
+    feedback: TitleFeedback,
+    on_ctrl_enter: Box<dyn Fn(String)>,
+    input_area: Rect,
+    feedback_area: Rect,
+}
+
+impl CreateTicketForm {
+    fn new(
+        input: TextInput<()>,
+        feedback: TitleFeedback,
+        on_ctrl_enter: impl Fn(String) + 'static,
+    ) -> Self {
+        let mut input = input;
+        input.event(
+            &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+            &mut EventCtx::default(),
+        );
+        Self {
+            input,
+            feedback,
+            on_ctrl_enter: Box::new(on_ctrl_enter),
+            input_area: Rect::default(),
+            feedback_area: Rect::default(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.input.set_value("");
+        self.feedback.clear();
+    }
+
+    fn submit_on_ctrl_enter(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        let TuiEvent::Key(KeyEvent {
+            code: Key::Enter,
+            modifiers: KeyModifiers::CONTROL,
+        }) = event
+        else {
+            return false;
+        };
+        if !self.input.insert_mode() {
+            return false;
+        }
+        (self.on_ctrl_enter)(self.input.current_value().to_owned());
+        ctx.request_redraw();
+        ctx.stop_propagation();
+        true
+    }
+}
+
+impl TuiNode for CreateTicketForm {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        let input = self.input.measure(proposal);
+        let feedback = self.feedback.measure(proposal);
+        LayoutSizeHint::content(
+            input.preferred.width.max(feedback.preferred.width).max(80),
+            input
+                .preferred
+                .height
+                .saturating_add(1)
+                .saturating_add(feedback.preferred.height),
+        )
+        .normalized(proposal)
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        let input_height = self
+            .input
+            .measure(LayoutProposal::unbounded())
+            .preferred
+            .height
+            .min(area.height);
+        self.input_area = Rect::new(area.x, area.y, area.width, input_height);
+        let feedback_y = area.y.saturating_add(input_height.saturating_add(1));
+        self.feedback_area = Rect::new(
+            area.x,
+            feedback_y,
+            area.width,
+            area.bottom().saturating_sub(feedback_y),
+        );
+        self.input.layout(self.input_area, ctx);
+        self.feedback.layout(self.feedback_area, ctx);
+        LayoutResult::new(area)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, _area: Rect, ctx: &mut RenderCtx<'a>) {
+        TuiNode::render(&self.input, frame, self.input_area, ctx);
+        self.feedback.render(frame, self.feedback_area, ctx);
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        if self.submit_on_ctrl_enter(event, ctx) {
+            return EventOutcome::Handled;
+        }
+        self.input.event(event, ctx)
+    }
+
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> EventOutcome {
+        if self.submit_on_ctrl_enter(event, ctx) {
+            return EventOutcome::Handled;
+        }
+        self.input.dispatch_event(route, event, ctx)
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.input.tick(dt, settings)
+    }
+
+    fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.input.focus(target, focused, ctx);
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.input.dispatch_focus(target, focused, ctx);
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.destroy(ctx);
+    }
+}
 
 pub(super) struct TicketEditor {
     state: Rc<RefCell<ComposerState>>,
@@ -53,10 +193,12 @@ pub(super) struct TicketEditor {
     service: AppService,
     view: EditorView,
     toolbar_events: ToolbarEvents,
+    toolbar_feedback: ToolbarFeedback,
     can_change: Rc<Cell<bool>>,
     can_refresh: Rc<Cell<bool>>,
     can_submit: Rc<Cell<bool>>,
     pending_project: Rc<RefCell<Option<String>>>,
+    create_dialog_close_requested: Rc<Cell<bool>>,
     submission: SubmissionController,
     source: SourceController,
 }
@@ -82,12 +224,14 @@ impl TicketEditor {
         );
         let body = Split::vertical(ticket_list, detail).ratio(1, 2);
         let toolbar_events = Rc::new(RefCell::new(Vec::new()));
+        let toolbar_feedback = ToolbarFeedback::new();
         let can_change = Rc::new(Cell::new(true));
         let can_refresh = Rc::new(Cell::new(false));
         let can_submit = Rc::new(Cell::new(false));
         let workspace = Split::vertical(
             toolbar(
                 Rc::clone(&toolbar_events),
+                toolbar_feedback.clone(),
                 Rc::clone(&can_change),
                 Rc::clone(&can_refresh),
                 Rc::clone(&can_submit),
@@ -99,41 +243,53 @@ impl TicketEditor {
         let create_sink = Rc::clone(&pending);
         let pending_project = Rc::new(RefCell::new(None::<String>));
         let create_project = Rc::clone(&pending_project);
+        let title = Rc::new(RefCell::new(String::new()));
+        let title_feedback = TitleFeedback::new(Rc::clone(&title));
+        let title_input = Rc::clone(&title);
+        let create_dialog_close_requested = Rc::new(Cell::new(false));
         let create_keys = TextInputKeyBindings::default();
-        let create_help = format!(
-            "{} create · {} cancel",
-            create_keys
-                .submit
-                .first()
-                .map_or_else(|| "Enter".into(), |key| (*key).label()),
-            create_keys
-                .cancel
-                .first()
-                .map_or_else(|| "Esc".into(), |key| (*key).label()),
-        );
+        let submit_ticket = Rc::new(move |title: String| {
+            let title = format_title(&title);
+            if !title.is_empty()
+                && let Some(project_key) = create_project.borrow().clone()
+            {
+                create_sink
+                    .borrow_mut()
+                    .push(ComposerAction::CreateTicket { title, project_key });
+            }
+        });
+        let input_submit = Rc::clone(&submit_ticket);
+        let ok_submit = Rc::clone(&submit_ticket);
+        let ok_title = Rc::clone(&title);
+        let cancel_action = Rc::clone(&create_dialog_close_requested);
+        let close_action = Rc::clone(&create_dialog_close_requested);
         let create_dialog = Dialog::new()
-            .top_left("Create Jira ticket")
-            .bottom_left(create_help)
-            .host(
+            .top_left("Create ticket")
+            .actions([
+                DialogAction::new("OK")
+                    .hotkey(KeySpec::plain('o'))
+                    .on_trigger(move || ok_submit(ok_title.borrow().clone())),
+                DialogAction::new("Cancel")
+                    .hotkey(KeySpec::plain('c'))
+                    .on_trigger(move || cancel_action.set(true)),
+            ])
+            .close_on_unfocus_from_descendants(true)
+            .on_close(move |_| close_action.set(true))
+            .host(CreateTicketForm::new(
                 TextInput::new()
                     .keybindings(create_keys)
-                    .panel("Title")
                     .placeholder("Ticket title")
-                    .on_submit(move |title| {
-                        if !title.trim().is_empty()
-                            && let Some(project_key) = create_project.borrow().clone()
-                        {
-                            create_sink.borrow_mut().push(ComposerAction::CreateTicket {
-                                title: title.trim().into(),
-                                project_key,
-                            });
-                        }
-                    }),
-            );
+                    .focused(true)
+                    .on_change(move |value| *title_input.borrow_mut() = value)
+                    .on_submit(move |title| input_submit(title)),
+                title_feedback,
+                move |title| submit_ticket(title),
+            ));
         let create_layer = DialogLayer::new(workspace, create_dialog)
             .active(false)
+            .layer_percent(60)
+            .layer_cross_percent(50)
             .fit_content()
-            .fit_content_max(72, 7)
             .backdrop(DialogBackdrop::dim().amount(0.55));
         let add_layer = DialogLayer::new(create_layer, AddTicketMenu::new(service.clone()))
             .active(false)
@@ -174,10 +330,12 @@ impl TicketEditor {
             service,
             view,
             toolbar_events,
+            toolbar_feedback,
             can_change,
             can_refresh,
             can_submit,
             pending_project,
+            create_dialog_close_requested,
             submission,
             source,
         }
@@ -257,6 +415,7 @@ impl TicketEditor {
             .set_top_left(breadcrumb);
         let table = self.table_mut();
         table.set_rows(rows);
+        set_active_ticket_style(table, selected.clone());
         if let Some(selected) = selected {
             table.highlight_id(&selected);
         }
@@ -267,25 +426,12 @@ impl TicketEditor {
         }
         self.can_change
             .set(is_open && !self.submission.is_submitting());
-        self.can_refresh.set(
-            self.state.borrow().remote_queries_allowed()
-                && self
-                    .state
-                    .borrow()
-                    .selected_change()
-                    .and_then(|change| {
-                        change
-                            .submitted
-                            .as_ref()
-                            .and_then(|snapshot| snapshot.updated.as_ref())
-                            .or(change.updated.as_ref())
-                            .or(change.original.as_ref())
-                            .map(|ticket| ticket.key.as_str())
-                            .or(Some(change.id.as_str()))
-                    })
-                    .is_some_and(|key| !key.starts_with("NEW-"))
-                && !self.submission.is_submitting(),
-        );
+        let can_refresh = {
+            let state = self.state.borrow();
+            state.remote_queries_allowed() && state.has_remote_tickets()
+        };
+        self.can_refresh
+            .set(can_refresh && !self.submission.is_submitting());
         let selected = self.table().selected_ids();
         self.can_submit.set(
             is_open
@@ -365,6 +511,13 @@ impl TicketEditor {
 
     fn drain_outputs(&mut self, ctx: &mut EventCtx<()>) {
         self.drain_description_actions(ctx);
+        if self.create_dialog_close_requested.replace(false) {
+            self.view
+                .base_mut()
+                .base_mut()
+                .base_mut()
+                .set_active_with_context(false, ctx);
+        }
         let add_events = self.view.base_mut().base_mut().layer_mut().take_events();
         for event in add_events {
             match event {
@@ -380,7 +533,7 @@ impl TicketEditor {
                         .base_mut()
                         .layer_mut()
                         .child_mut()
-                        .set_value("");
+                        .clear();
                     self.view
                         .base_mut()
                         .base_mut()
@@ -407,10 +560,10 @@ impl TicketEditor {
 
         for event in self.table_mut().drain_events() {
             match event {
-                DataViewTypedEvent::HighlightChanged { row_id } => self
+                DataViewTypedEvent::Activated { row_id } => self
                     .pending
                     .borrow_mut()
-                    .push(ComposerAction::SelectTicket(row_id)),
+                    .push(ComposerAction::SelectTicket(Some(row_id))),
                 DataViewTypedEvent::SelectionChanged { .. } => {}
                 _ => {}
             }
@@ -444,7 +597,7 @@ impl TicketEditor {
             self.view.base_mut().set_active_with_context(false, ctx);
         }
         self.sync();
-        self.source.ensure(false);
+        self.source.ensure_selected();
         ctx.request_layout();
         self.drain_toolbar_events(ctx);
         self.submission.drain_notices(ctx);
@@ -515,7 +668,7 @@ impl TicketEditor {
                 .base_mut()
                 .layer_mut()
                 .child_mut()
-                .set_value("");
+                .clear();
             self.view
                 .base_mut()
                 .base_mut()
@@ -550,7 +703,11 @@ impl TicketEditor {
     }
 
     pub(super) fn ensure_source(&mut self, force: bool, ctx: &mut EventCtx<()>) {
-        self.source.ensure(force);
+        if force {
+            self.source.refresh_all();
+        } else {
+            self.source.ensure_selected();
+        }
         if self.source.is_loading() {
             ctx.request_tick();
         }
@@ -600,6 +757,37 @@ impl TicketEditor {
             return None;
         }
         self.open_add_menu(ctx);
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
+    }
+
+    fn handle_toolbar_hotkey(
+        &mut self,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> Option<EventOutcome> {
+        if self.view.is_active()
+            || self.view.base().is_active()
+            || self.view.base().base().is_active()
+            || self.view.base().base().base().is_active()
+        {
+            return None;
+        }
+        let TuiEvent::Key(key) = event else {
+            return None;
+        };
+        if KeySpec::shifted('r').matches(*key) && self.can_refresh.get() {
+            self.toolbar_feedback.request_refresh();
+            self.ensure_source(true, ctx);
+        } else if KeySpec::shifted('s').matches(*key) && self.can_submit.get() {
+            self.toolbar_feedback.request_submit();
+            self.start_submit();
+        } else {
+            return None;
+        }
+        ctx.request_layout();
+        ctx.request_redraw();
+        ctx.request_tick();
         ctx.stop_propagation();
         Some(EventOutcome::Handled)
     }
@@ -740,6 +928,9 @@ impl TuiNode for TicketEditor {
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
         self.poll_submission(ctx);
+        if let Some(outcome) = self.handle_toolbar_hotkey(event, ctx) {
+            return outcome;
+        }
         if let Some(outcome) = self.handle_add_key(event, ctx) {
             return outcome;
         }
@@ -769,6 +960,9 @@ impl TuiNode for TicketEditor {
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
         self.poll_submission(ctx);
+        if let Some(outcome) = self.handle_toolbar_hotkey(event, ctx) {
+            return outcome;
+        }
         if let Some(outcome) = self.handle_add_key(event, ctx) {
             return outcome;
         }
@@ -793,7 +987,7 @@ impl TuiNode for TicketEditor {
     }
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let changed = self.submission.drain_results();
-        self.source.ensure(false);
+        self.source.ensure_selected();
         let source_changed = self.source.drain();
         if changed || source_changed {
             self.sync();

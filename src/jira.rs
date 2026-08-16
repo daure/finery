@@ -10,6 +10,7 @@ use crate::{
         ChangeKind, SubmissionSnapshot, Ticket, TicketChange, TicketKind,
         jira_adf::{adf_to_markdown, markdown_to_adf},
     },
+    store::work_items::{BacklogSnapshot, Sprint, WorkItem},
 };
 
 const ISSUE_FIELDS: [&str; 7] = [
@@ -21,6 +22,9 @@ const ISSUE_FIELDS: [&str; 7] = [
     "assignee",
     "project",
 ];
+
+const BACKLOG_FIELDS: [&str; 5] = ["summary", "issuetype", "status", "priority", "assignee"];
+const BACKLOG_JQL: &str = "issuetype not in subTaskIssueTypes() AND issuetype != Epic";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct JiraProject {
@@ -65,6 +69,52 @@ pub(crate) struct SubmitFailure {
 #[derive(Deserialize)]
 struct SearchResponse {
     issues: Vec<JiraIssue>,
+}
+
+#[derive(Deserialize)]
+struct AgileBoardPage {
+    values: Vec<AgileBoard>,
+}
+
+#[derive(Deserialize)]
+struct AgileBoard {
+    id: u64,
+    name: String,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct SprintPage {
+    values: Vec<JiraSprint>,
+    #[serde(rename = "isLast")]
+    is_last: bool,
+    #[serde(rename = "startAt")]
+    start_at: usize,
+    #[serde(rename = "maxResults")]
+    max_results: usize,
+}
+
+#[derive(Deserialize)]
+struct JiraSprint {
+    id: u64,
+    name: String,
+    state: String,
+}
+
+#[derive(Deserialize)]
+struct AgileIssuePage {
+    issues: Vec<JiraIssue>,
+    #[serde(default, rename = "isLast")]
+    is_last: bool,
+    #[serde(default, rename = "startAt")]
+    start_at: usize,
+    #[serde(default, rename = "maxResults")]
+    max_results: usize,
+    #[serde(default)]
+    total: usize,
+    #[serde(default, rename = "nextPageToken")]
+    next_page_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -133,6 +183,189 @@ pub(crate) fn search(settings: &AppSettings, query: &str) -> Result<Vec<Ticket>,
     }
     .map_err(|(_, error)| error)?;
     Ok(response.issues.into_iter().map(to_ticket).collect())
+}
+
+pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogSnapshot, String> {
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let board = backlog_board(&client, &base_url, &email, &token, settings)?;
+    let sprints = board_sprints(&client, &base_url, &email, &token, board.id)?;
+    let sprints = sprints
+        .into_iter()
+        .map(|sprint| {
+            sprint_issues(&client, &base_url, &email, &token, sprint.id).map(|work_items| Sprint {
+                id: sprint.id,
+                name: sprint.name,
+                state: sprint.state,
+                work_items,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let work_items = board_backlog(&client, &base_url, &email, &token, board.id)?;
+    Ok(BacklogSnapshot {
+        board_name: board.name,
+        sprints,
+        work_items,
+    })
+}
+
+fn backlog_board(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    settings: &AppSettings,
+) -> Result<AgileBoard, String> {
+    if !settings.jira_default_board.trim().is_empty() {
+        let board_id = settings
+            .jira_default_board
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| "Default Jira board ID must be a whole number".to_string())?;
+        let response = client
+            .get(format!("{base_url}/rest/agile/1.0/board/{board_id}"))
+            .basic_auth(email, Some(token))
+            .send()
+            .map_err(|error| error.to_string())?;
+        return response_json(response);
+    }
+
+    let mut query = vec![("maxResults", "50".to_string())];
+    if !settings.jira_default_project.trim().is_empty() {
+        query.push((
+            "projectKeyOrId",
+            settings.jira_default_project.trim().to_owned(),
+        ));
+    }
+    let response = client
+        .get(format!("{base_url}/rest/agile/1.0/board"))
+        .basic_auth(email, Some(token))
+        .query(&query)
+        .send()
+        .map_err(|error| error.to_string())?;
+    select_backlog_board(response_json::<AgileBoardPage>(response)?.values).ok_or_else(|| {
+        if settings.jira_default_project.trim().is_empty() {
+            "No Jira boards are available; set a default board ID in Settings".into()
+        } else {
+            format!(
+                "No Jira board is available for project {}",
+                settings.jira_default_project.trim()
+            )
+        }
+    })
+}
+
+fn select_backlog_board(mut boards: Vec<AgileBoard>) -> Option<AgileBoard> {
+    let index = boards
+        .iter()
+        .position(|board| board.kind == "scrum")
+        .unwrap_or(0);
+    (!boards.is_empty()).then(|| boards.remove(index))
+}
+
+fn board_sprints(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    board_id: u64,
+) -> Result<Vec<JiraSprint>, String> {
+    let mut start_at = 0;
+    let mut sprints = Vec::new();
+    loop {
+        let response = client
+            .get(format!("{base_url}/rest/agile/1.0/board/{board_id}/sprint"))
+            .basic_auth(email, Some(token))
+            .query(&[
+                ("startAt", start_at.to_string()),
+                ("maxResults", "50".into()),
+                ("state", "active,future".into()),
+            ])
+            .send()
+            .map_err(|error| error.to_string())?;
+        let page = response_json::<SprintPage>(response)?;
+        sprints.extend(page.values);
+        if page.is_last || page.max_results == 0 {
+            return Ok(sprints);
+        }
+        start_at = page.start_at.saturating_add(page.max_results);
+    }
+}
+
+fn sprint_issues(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    sprint_id: u64,
+) -> Result<Vec<WorkItem>, String> {
+    let mut next_page_token = None;
+    let mut work_items = Vec::new();
+    loop {
+        let query = vec![
+            ("maxResults", "100".to_string()),
+            ("fields", BACKLOG_FIELDS.join(",")),
+        ];
+        let mut request = client
+            .get(format!(
+                "{base_url}/rest/software/1.0/sprint/{sprint_id}/issue"
+            ))
+            .basic_auth(email, Some(token))
+            .query(&query);
+        if let Some(page_token) = next_page_token.as_deref() {
+            request = request.query(&[("nextPageToken", page_token)]);
+        }
+        let response = request.send().map_err(|error| error.to_string())?;
+        let page = response_json::<AgileIssuePage>(response)?;
+        work_items.extend(page.issues.into_iter().map(to_work_item));
+        let Some(page_token) = page.next_page_token else {
+            return Ok(work_items);
+        };
+        next_page_token = Some(page_token);
+    }
+}
+
+fn board_backlog(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    board_id: u64,
+) -> Result<Vec<WorkItem>, String> {
+    let mut start_at = 0;
+    let mut work_items = Vec::new();
+    loop {
+        let response = client
+            .get(format!(
+                "{base_url}/rest/agile/1.0/board/{board_id}/backlog"
+            ))
+            .basic_auth(email, Some(token))
+            .query(&board_backlog_query(start_at))
+            .send()
+            .map_err(|error| error.to_string())?;
+        let page = response_json::<AgileIssuePage>(response)?;
+        let loaded = page.issues.len();
+        let complete = backlog_page_complete(&page, loaded);
+        work_items.extend(page.issues.into_iter().map(to_work_item));
+        if complete {
+            return Ok(work_items);
+        }
+        start_at = page.start_at.saturating_add(page.max_results.max(loaded));
+    }
+}
+
+fn backlog_page_complete(page: &AgileIssuePage, loaded: usize) -> bool {
+    page.is_last
+        || loaded == 0
+        || (page.total > 0 && page.start_at.saturating_add(page.max_results) >= page.total)
+}
+
+fn board_backlog_query(start_at: usize) -> [(&'static str, String); 4] {
+    [
+        ("startAt", start_at.to_string()),
+        ("maxResults", "100".into()),
+        ("fields", BACKLOG_FIELDS.join(",")),
+        ("jql", BACKLOG_JQL.into()),
+    ]
 }
 
 pub(crate) fn fetch(settings: &AppSettings, key: &str) -> Result<Ticket, String> {
@@ -830,6 +1063,22 @@ fn to_ticket(issue: JiraIssue) -> Ticket {
             .get("accountId")
             .and_then(Value::as_str)
             .unwrap_or_default()
+            .into(),
+    }
+}
+
+fn to_work_item(issue: JiraIssue) -> WorkItem {
+    let field = |name: &str| issue.fields.get(name).unwrap_or(&Value::Null);
+    WorkItem {
+        key: issue.key.clone(),
+        title: field("summary").as_str().unwrap_or(&issue.key).into(),
+        kind: named_field(field("issuetype")).unwrap_or_else(|| "Issue".into()),
+        status: named_field(field("status")).unwrap_or_default(),
+        priority: named_field(field("priority")).unwrap_or_default(),
+        assignee: field("assignee")
+            .get("displayName")
+            .and_then(Value::as_str)
+            .unwrap_or("Unassigned")
             .into(),
     }
 }

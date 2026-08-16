@@ -97,6 +97,11 @@ impl ChangeSetListView {
                         {
                             self.service.save_change_set(set);
                         }
+                        self.state
+                            .borrow_mut()
+                            .dispatch(ComposerAction::OpenChangeSet(row_id.clone()));
+                        ctx.request_layout();
+                        ctx.request_redraw();
                     }
                 }
                 ListControlEvent::Removed { row_id } => {
@@ -121,7 +126,7 @@ impl ChangeSetListView {
 }
 
 fn rows(state: &ComposerState) -> Vec<ChangeSetRow> {
-    state
+    let mut rows: Vec<_> = state
         .change_sets
         .iter()
         .map(|set| {
@@ -130,13 +135,12 @@ fn rows(state: &ComposerState) -> Vec<ChangeSetRow> {
             ChangeSetRow {
                 id: set.id.clone(),
                 name: set.name.clone(),
-                subtitle: format!(
-                    "{} tickets · {submitted} submitted · {state}",
-                    set.tickets.len()
-                ),
+                subtitle: format!("{submitted}/{} submitted · {state}", set.tickets.len()),
             }
         })
-        .collect()
+        .collect();
+    rows.reverse();
+    rows
 }
 
 fn change_set_column() -> Column<ChangeSetRow, String> {

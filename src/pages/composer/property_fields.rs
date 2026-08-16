@@ -10,18 +10,17 @@ use ratatui::{Frame, layout::Rect};
 use tuicore::{
     AnimationSettings, Dropdown, DropdownSearchMode, DropdownVariant, EventCtx, EventOutcome,
     EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusTarget, LayoutCtx, LayoutProposal,
-    LayoutResult, LayoutSizeHint, LifecycleCtx, Panel, PanelHost, RenderCtx, TickResult, TuiEvent,
-    TuiNode,
+    LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, TickResult, TuiEvent, TuiNode,
 };
 
 use crate::{
     jira::{JiraAssignee, JiraFieldOptions, JiraOption},
     service::AppService,
-    store::composer::{ComposerAction, ComposerState, ComposerViewMode, Ticket, TicketKind},
+    store::composer::{ComposerAction, ComposerState, Ticket, TicketKind},
 };
 
 type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
-type PropertyDropdown = PanelHost<Dropdown<JiraOption, String>>;
+type PropertyDropdown = Dropdown<JiraOption, String>;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -169,20 +168,21 @@ impl PropertyFields {
     }
 }
 
-struct BoundPropertyDropdown {
+pub(super) struct BoundPropertyDropdown {
     state: Rc<RefCell<ComposerState>>,
     shared: Rc<RefCell<SharedOptions>>,
     service: AppService,
     kind: PropertyKind,
     control: PropertyDropdown,
     labels: Rc<RefCell<HashMap<String, String>>>,
-    disabled: bool,
     assignee_sender: Sender<(u64, Result<Vec<JiraAssignee>, String>)>,
     assignee_receiver: Receiver<(u64, Result<Vec<JiraAssignee>, String>)>,
     assignee_generation: u64,
     assignee_ticket: Option<String>,
     assignee_query: String,
     pending_search: Option<Duration>,
+    synced_rows: Vec<JiraOption>,
+    synced_selected_value: Option<String>,
 }
 
 impl BoundPropertyDropdown {
@@ -196,32 +196,31 @@ impl BoundPropertyDropdown {
         let labels = Rc::new(RefCell::new(HashMap::<String, String>::new()));
         let callback_labels = Rc::clone(&labels);
         let sink = Rc::clone(&pending);
-        let control = Panel::new().top_left(kind.label()).host(
-            Dropdown::single(
-                [],
-                |option: &JiraOption| option.id.clone(),
-                |option| option.label.clone(),
-            )
-            .variant(DropdownVariant::Filled)
-            .search_mode(if kind == PropertyKind::Assignee {
-                DropdownSearchMode::External
-            } else {
-                DropdownSearchMode::Fuzzy
-            })
-            .external_loading_message("Fetching users")
-            .hotkey(kind.hotkey())
-            .on_select(move |ids| {
-                let Some(id) = ids.first() else {
-                    return;
-                };
-                let label = callback_labels
-                    .borrow()
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_else(|| id.clone());
-                sink.borrow_mut().push(kind.action(id.clone(), label));
-            }),
-        );
+        let control = Dropdown::single(
+            [],
+            |option: &JiraOption| option.id.clone(),
+            |option| option.label.clone(),
+        )
+        .variant(DropdownVariant::Bordered)
+        .label(kind.label())
+        .search_mode(if kind == PropertyKind::Assignee {
+            DropdownSearchMode::External
+        } else {
+            DropdownSearchMode::Fuzzy
+        })
+        .external_loading_message("Fetching users")
+        .hotkey(kind.hotkey())
+        .on_select(move |ids| {
+            let Some(id) = ids.first() else {
+                return;
+            };
+            let label = callback_labels
+                .borrow()
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| id.clone());
+            sink.borrow_mut().push(kind.action(id.clone(), label));
+        });
         let (assignee_sender, assignee_receiver) = mpsc::channel();
         Self {
             state,
@@ -230,38 +229,64 @@ impl BoundPropertyDropdown {
             kind,
             control,
             labels,
-            disabled: false,
             assignee_sender,
             assignee_receiver,
             assignee_generation: 0,
             assignee_ticket: None,
             assignee_query: String::new(),
             pending_search: None,
+            synced_rows: Vec::new(),
+            synced_selected_value: None,
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn priority_for_test(
+        state: Rc<RefCell<ComposerState>>,
+        pending: PendingActions,
+        service: AppService,
+        priorities: Vec<JiraOption>,
+    ) -> Self {
+        let shared = Rc::new(RefCell::new(SharedOptions {
+            ticket_id: None,
+            values: Some(JiraFieldOptions {
+                issue_types: Vec::new(),
+                statuses: Vec::new(),
+                priorities,
+            }),
+        }));
+        Self::new(state, pending, shared, service, PropertyKind::Priority)
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_priorities_for_test(&mut self, priorities: Vec<JiraOption>) {
+        self.shared.borrow_mut().values.as_mut().unwrap().priorities = priorities;
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_open_for_test(&self) -> bool {
+        self.control.is_open()
+    }
+
+    #[cfg(test)]
+    pub(super) fn selected_for_test(&self) -> Option<String> {
+        self.control.selected_id()
+    }
+
     fn sync(&mut self) -> bool {
-        let (value, footer, disabled) = {
+        let (value, disabled) = {
             let state = self.state.borrow();
             let displayed = state.selected_ticket();
-            let opposite = if state.view_mode == ComposerViewMode::Source {
-                state.selected_changes()
-            } else {
-                state.selected_source()
-            };
             let value = displayed
                 .map_or("", |ticket| self.kind.value(ticket))
                 .to_owned();
-            let opposite_value = opposite.map_or("", |ticket| self.kind.value(ticket));
-            let footer = if state.view_mode == ComposerViewMode::Source {
-                format!("Changes: {opposite_value}")
-            } else {
-                format!("Source: {opposite_value}")
-            };
-            (value, footer, !state.selected_is_editable())
+            (value, !state.selected_is_editable())
         };
-        self.control.panel_mut().set_bottom_left(footer);
-        self.disabled = disabled;
+        let mut changed = false;
+        if self.control.is_disabled() != disabled {
+            self.control.set_disabled(disabled);
+            changed = true;
+        }
         if self.kind != PropertyKind::Assignee {
             let mut options = self.options();
             if !value.is_empty() && !options.iter().any(|option| option.label == value) {
@@ -270,9 +295,11 @@ impl BoundPropertyDropdown {
                     label: value.clone(),
                 });
             }
-            self.set_options(options, &value);
+            changed |= self.set_options(options, &value);
+        } else if !self.synced_rows.is_empty() {
+            changed |= self.set_options(self.synced_rows.clone(), &value);
         }
-        false
+        changed
     }
 
     fn options(&self) -> Vec<JiraOption> {
@@ -294,19 +321,39 @@ impl BoundPropertyDropdown {
         .collect()
     }
 
-    fn set_options(&mut self, options: Vec<JiraOption>, selected_label: &str) {
-        *self.labels.borrow_mut() = options
-            .iter()
-            .map(|option| (option.id.clone(), option.label.clone()))
-            .collect();
-        let selected = options
-            .iter()
-            .find(|option| option.label == selected_label)
-            .map(|option| option.id.clone());
-        self.control.child_mut().set_rows(options);
-        if let Some(selected) = selected {
-            self.control.child_mut().set_selected_one(selected);
+    fn set_options(&mut self, options: Vec<JiraOption>, selected_label: &str) -> bool {
+        let rows_changed = self.synced_rows != options;
+        let selected_changed = self.synced_selected_value.as_deref() != Some(selected_label);
+        if !rows_changed && !selected_changed {
+            return false;
         }
+
+        if selected_changed {
+            self.control.close();
+        }
+        if rows_changed {
+            self.control.set_rows(options.clone());
+            *self.labels.borrow_mut() = options
+                .iter()
+                .map(|option| (option.id.clone(), option.label.clone()))
+                .collect();
+            self.synced_rows = options;
+        }
+        if selected_changed {
+            if !selected_label.is_empty()
+                && let Some(selected) = self
+                    .synced_rows
+                    .iter()
+                    .find(|option| option.label == selected_label)
+                    .map(|option| option.id.clone())
+            {
+                self.control.set_selected_one(selected);
+            } else {
+                self.control.clear_selection();
+            }
+            self.synced_selected_value = Some(selected_label.to_owned());
+        }
+        true
     }
 
     fn sync_assignee_search(&mut self, dt: Duration) -> bool {
@@ -317,22 +364,23 @@ impl BoundPropertyDropdown {
             if self.assignee_ticket.take().is_some() || self.pending_search.take().is_some() {
                 self.assignee_generation = self.assignee_generation.saturating_add(1);
             }
-            self.control.child_mut().set_external_loading(false);
+            self.control.set_external_loading(false);
             return false;
         }
         let ticket = self.state.borrow().selected_changes().cloned();
+        let query = self.control.search_query().to_owned();
+        if self.assignee_ticket.as_deref() != ticket.as_ref().map(|ticket| ticket.key.as_str())
+            || query != self.assignee_query
+        {
+            self.assignee_generation = self.assignee_generation.saturating_add(1);
+            self.assignee_ticket = ticket.as_ref().map(|ticket| ticket.key.clone());
+            self.assignee_query = query;
+            self.pending_search = ticket.as_ref().map(|_| Duration::ZERO);
+            self.control.set_external_loading(ticket.is_some());
+        }
         let Some(ticket) = ticket else {
             return false;
         };
-        let query = self.control.child().search_query().to_owned();
-        if self.assignee_ticket.as_deref() != Some(ticket.key.as_str())
-            || query != self.assignee_query
-        {
-            self.assignee_ticket = Some(ticket.key.clone());
-            self.assignee_query = query;
-            self.pending_search = Some(Duration::ZERO);
-            self.control.child_mut().set_external_loading(true);
-        }
         if let Some(elapsed) = &mut self.pending_search {
             *elapsed += dt;
             if *elapsed >= SEARCH_DEBOUNCE {
@@ -345,7 +393,7 @@ impl BoundPropertyDropdown {
             if generation != self.assignee_generation {
                 continue;
             }
-            self.control.child_mut().set_external_loading(false);
+            self.control.set_external_loading(false);
             match result {
                 Ok(users) => {
                     let selected_ticket = self.state.borrow().selected_ticket().cloned();
@@ -387,7 +435,6 @@ impl BoundPropertyDropdown {
     }
 
     fn start_assignee_search(&mut self, ticket: Ticket) {
-        self.assignee_generation = self.assignee_generation.saturating_add(1);
         let generation = self.assignee_generation;
         let query = self.assignee_query.clone();
         let sender = self.assignee_sender.clone();
@@ -399,7 +446,7 @@ impl BoundPropertyDropdown {
                 let _ = sender.send((generation, result));
             })
         {
-            self.control.child_mut().set_external_loading(false);
+            self.control.set_external_loading(false);
             self.service
                 .report_error(format!("could not search Jira users: {error}"));
         }
@@ -463,25 +510,17 @@ impl PropertyKind {
 
 impl TuiNode for BoundPropertyDropdown {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
-        self.control.measure(proposal)
+        <PropertyDropdown as TuiNode<()>>::measure(&self.control, proposal)
     }
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.sync();
-        let previous = ctx.focus_disabled();
-        ctx.set_focus_disabled(previous || self.disabled);
-        let result = self.control.layout(area, ctx);
-        ctx.set_focus_disabled(previous);
-        result
+        <PropertyDropdown as TuiNode<()>>::layout(&mut self.control, area, ctx)
     }
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
         self.control.render(frame, area, ctx);
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        if self.disabled {
-            EventOutcome::Ignored
-        } else {
-            self.control.event(event, ctx)
-        }
+        self.control.event(event, ctx)
     }
     fn dispatch_event(
         &mut self,
@@ -489,17 +528,17 @@ impl TuiNode for BoundPropertyDropdown {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        if self.disabled {
-            EventOutcome::Ignored
-        } else {
-            self.control.dispatch_event(route, event, ctx)
-        }
+        self.control.dispatch_event(route, event, ctx)
     }
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        self.sync();
-        let changed = self.sync_assignee_search(dt);
-        self.control.tick(dt, settings).merge(if changed {
-            TickResult::CHANGED
+        let sync_changed = self.sync();
+        let changed = self.sync_assignee_search(dt) || sync_changed;
+        <PropertyDropdown as TuiNode<()>>::tick(&mut self.control, dt, settings).merge(if changed {
+            TickResult {
+                changed: true,
+                layout: true,
+                ..TickResult::IDLE
+            }
         } else {
             TickResult::IDLE
         })

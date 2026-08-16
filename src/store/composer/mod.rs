@@ -216,6 +216,14 @@ impl ComposerState {
         self.active_set().is_some_and(|set| !set.closed)
     }
 
+    pub(crate) fn has_remote_tickets(&self) -> bool {
+        self.active_set().is_some_and(|set| {
+            set.tickets
+                .iter()
+                .any(|change| !change.id.starts_with("NEW-"))
+        })
+    }
+
     pub(crate) fn selected_change(&self) -> Option<&TicketChange> {
         let selected = self.selected_ticket.as_deref()?;
         self.active_set()?

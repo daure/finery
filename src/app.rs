@@ -30,7 +30,7 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
     let open_settings = Rc::new(Cell::new(false));
     let close_dialog = Rc::new(Cell::new(false));
     let pages = Tabs::new(vec![
-        Tab::new("Backlog", pages::backlog::page()),
+        Tab::new("Backlog", pages::backlog::page(service.clone())),
         Tab::new("Sprint", pages::sprint::page()),
         Tab::new("Issues", pages::issues::page()),
         Tab::new(

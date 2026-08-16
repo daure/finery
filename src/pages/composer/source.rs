@@ -6,8 +6,14 @@ use std::{
 
 use crate::{
     service::AppService,
-    store::composer::{ComposerAction, ComposerState, ComposerViewMode, Ticket},
+    store::composer::{ComposerAction, ComposerState, ComposerViewMode, Ticket, TicketChange},
 };
+
+#[derive(Clone, PartialEq, Eq)]
+enum SourceRequest {
+    Selected(String),
+    All,
+}
 
 pub(super) struct SourceController {
     state: Rc<RefCell<ComposerState>>,
@@ -15,8 +21,8 @@ pub(super) struct SourceController {
     sender: Sender<(u64, String, Result<Ticket, String>)>,
     receiver: Receiver<(u64, String, Result<Ticket, String>)>,
     generation: u64,
-    requested: Option<String>,
-    loading: bool,
+    requested: Option<SourceRequest>,
+    loading: usize,
     mode: Option<ComposerViewMode>,
 }
 
@@ -30,48 +36,40 @@ impl SourceController {
             receiver,
             generation: 0,
             requested: None,
-            loading: false,
+            loading: 0,
             mode: None,
         }
     }
 
-    pub(super) fn ensure(&mut self, force: bool) {
+    pub(super) fn ensure_selected(&mut self) {
         if !self.state.borrow().remote_queries_allowed() {
-            if self.requested.take().is_some() || self.loading {
+            if self.requested.take().is_some() || self.loading > 0 {
                 self.generation = self.generation.saturating_add(1);
             }
-            self.loading = false;
+            self.loading = 0;
             return;
         }
         let (target, mode_changed) = {
             let state = self.state.borrow();
-            let change = state.selected_change();
             (
-                change.and_then(|change| {
-                    let key = change
-                        .submitted
-                        .as_ref()
-                        .and_then(|snapshot| snapshot.updated.as_ref())
-                        .or(change.updated.as_ref())
-                        .or(change.original.as_ref())
-                        .map(|ticket| ticket.key.as_str())
-                        .unwrap_or(change.id.as_str());
-                    (!key.starts_with("NEW-")).then(|| (change.id.clone(), key.to_owned()))
-                }),
+                state.selected_change().and_then(source_target),
                 self.mode != Some(state.view_mode),
             )
         };
         self.mode = Some(self.state.borrow().view_mode);
         let Some((id, key)) = target else {
             self.requested = None;
-            self.loading = false;
+            self.loading = 0;
             return;
         };
-        if !force && !mode_changed && self.requested.as_deref() == Some(id.as_str()) {
+        if matches!(self.requested.as_ref(), Some(SourceRequest::All)) && self.loading > 0 {
             return;
         }
-        self.requested = Some(id.clone());
-        self.loading = true;
+        if !mode_changed && self.requested == Some(SourceRequest::Selected(id.clone())) {
+            return;
+        }
+        self.requested = Some(SourceRequest::Selected(id.clone()));
+        self.loading = 1;
         self.generation = self.generation.saturating_add(1);
         let generation = self.generation;
         let service = self.service.clone();
@@ -82,14 +80,52 @@ impl SourceController {
                 let _ = sender.send((generation, id, service.fetch_jira(&key)));
             })
         {
-            self.loading = false;
+            self.loading = 0;
             self.service
                 .report_error(format!("could not fetch Jira source: {error}"));
         }
     }
 
+    pub(super) fn refresh_all(&mut self) -> usize {
+        if !self.state.borrow().remote_queries_allowed() {
+            return 0;
+        }
+        let targets = self
+            .state
+            .borrow()
+            .active_set()
+            .into_iter()
+            .flat_map(|set| &set.tickets)
+            .filter_map(source_target)
+            .collect::<Vec<_>>();
+        let target_count = targets.len();
+        self.generation = self.generation.saturating_add(1);
+        self.requested = Some(SourceRequest::All);
+        self.loading = target_count;
+        if targets.is_empty() {
+            return 0;
+        }
+        let generation = self.generation;
+        let service = self.service.clone();
+        let sender = self.sender.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name(format!("finery-jira-source-refresh-{generation}"))
+            .spawn(move || {
+                for (id, key) in targets {
+                    let _ = sender.send((generation, id, service.fetch_jira(&key)));
+                }
+            })
+        {
+            self.loading = 0;
+            self.service
+                .report_error(format!("could not refresh Jira sources: {error}"));
+            return 0;
+        }
+        target_count
+    }
+
     pub(super) fn is_loading(&self) -> bool {
-        self.loading
+        self.loading > 0
     }
 
     pub(super) fn drain(&mut self) -> bool {
@@ -98,7 +134,10 @@ impl SourceController {
             if generation != self.generation {
                 continue;
             }
-            self.loading = false;
+            self.loading = self.loading.saturating_sub(1);
+            if self.loading == 0 && matches!(self.requested.as_ref(), Some(SourceRequest::All)) {
+                self.requested = None;
+            }
             match result {
                 Ok(ticket) => self
                     .state
@@ -112,4 +151,16 @@ impl SourceController {
         }
         changed
     }
+}
+
+fn source_target(change: &TicketChange) -> Option<(String, String)> {
+    let key = change
+        .submitted
+        .as_ref()
+        .and_then(|snapshot| snapshot.updated.as_ref())
+        .or(change.updated.as_ref())
+        .or(change.original.as_ref())
+        .map(|ticket| ticket.key.as_str())
+        .unwrap_or(change.id.as_str());
+    (!key.starts_with("NEW-")).then(|| (change.id.clone(), key.to_owned()))
 }

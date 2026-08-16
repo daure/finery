@@ -1,6 +1,9 @@
 use serde_json::json;
 
-use super::{JiraIssue, options_from_values, search_jql, text_search_jql, to_ticket};
+use super::{
+    AgileBoard, AgileIssuePage, BACKLOG_JQL, JiraIssue, backlog_page_complete, board_backlog_query,
+    options_from_values, search_jql, select_backlog_board, text_search_jql, to_ticket,
+};
 use crate::store::composer::TicketKind;
 
 #[test]
@@ -58,4 +61,43 @@ fn jira_issue_maps_search_fields_and_adf_description() {
     assert_eq!(ticket.description, "Keep basket state.");
     assert_eq!(ticket.assignee, "Ada");
     assert_eq!(ticket.assignee_account_id, "ada-1");
+}
+
+#[test]
+fn backlog_board_falls_back_to_a_project_board_without_scrum_type() {
+    let board = select_backlog_board(vec![AgileBoard {
+        id: 12,
+        name: "KAN".into(),
+        kind: "simple".into(),
+    }]);
+
+    assert_eq!(board.unwrap().id, 12);
+}
+
+#[test]
+fn board_backlog_query_excludes_subtasks_and_epics_hidden_by_the_web_backlog_list() {
+    let query = board_backlog_query(0);
+
+    assert!(
+        query
+            .iter()
+            .any(|(name, value)| *name == "jql" && value == BACKLOG_JQL)
+    );
+}
+
+#[test]
+fn backlog_pagination_continues_when_jira_omits_total() {
+    let page = AgileIssuePage {
+        issues: vec![JiraIssue {
+            key: "FIN-1".into(),
+            fields: json!({}),
+        }],
+        is_last: false,
+        start_at: 0,
+        max_results: 100,
+        total: 0,
+        next_page_token: None,
+    };
+
+    assert!(!backlog_page_complete(&page, page.issues.len()));
 }

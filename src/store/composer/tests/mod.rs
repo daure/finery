@@ -88,6 +88,26 @@ fn closed_change_sets_use_submission_snapshots_and_forbid_remote_queries() {
 }
 
 #[test]
+fn remote_tickets_allow_refresh_even_when_a_new_ticket_is_selected() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    assert!(!state.has_remote_tickets());
+
+    state.dispatch(ComposerAction::CreateTicket {
+        title: "New local ticket".into(),
+        project_key: "FIN".into(),
+    });
+    let new_ticket = state.selected_ticket.clone().unwrap();
+    assert!(!state.has_remote_tickets());
+
+    state.dispatch(ComposerAction::IncludeTicket(
+        super::demo_jira_tickets()[0].clone(),
+    ));
+    state.dispatch(ComposerAction::SelectTicket(Some(new_ticket)));
+    assert!(state.has_remote_tickets());
+}
+
+#[test]
 fn submitted_tickets_keep_snapshots_and_close_set_when_all_are_done() {
     let mut state = ComposerState::demo();
     state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));

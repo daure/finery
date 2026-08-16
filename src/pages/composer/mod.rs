@@ -11,5 +11,6 @@ mod tests;
 mod ticket_editor;
 mod ticket_rows;
 mod ticket_toolbar;
+pub(crate) mod title_guidance;
 
 pub(crate) use page::page;

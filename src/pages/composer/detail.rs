@@ -224,7 +224,12 @@ impl DetailPane {
         let submitted = state
             .selected_change()
             .is_some_and(|change| change.is_submitted());
-        details.set_dashed(deleted || submitted || state.view_mode == ComposerViewMode::Source);
+        details.set_dashed(
+            deleted
+                || submitted
+                || state.view_mode == ComposerViewMode::Source
+                || state.view_mode == ComposerViewMode::Diff,
+        );
     }
 
     fn handle_external_editor(
