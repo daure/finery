@@ -42,6 +42,32 @@ fn included_ticket_uses_live_source_until_first_edit_creates_changes() {
 }
 
 #[test]
+fn added_tickets_are_selected_and_selection_survives_reopening_change_set() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    state.dispatch(ComposerAction::IncludeTicket(
+        super::demo_jira_tickets()[0].clone(),
+    ));
+    state.dispatch(ComposerAction::CreateTicket {
+        title: "New local ticket".into(),
+        project_key: "FIN".into(),
+    });
+
+    assert_eq!(
+        state.active_set().unwrap().selected_ticket_ids,
+        vec!["FIN-142", "NEW-1"]
+    );
+
+    state.dispatch(ComposerAction::CloseChangeSet);
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+
+    assert_eq!(
+        state.active_set().unwrap().selected_ticket_ids,
+        vec!["FIN-142", "NEW-1"]
+    );
+}
+
+#[test]
 fn source_changes_and_diff_modes_use_their_expected_ticket_values() {
     let mut state = ComposerState::demo();
     state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));

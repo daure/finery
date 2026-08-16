@@ -26,6 +26,7 @@ fn change_sets_ticket_snapshots_and_settings_survive_round_trip() {
             id: "CS-1".into(),
             name: "Checkout".into(),
             closed: true,
+            selected_ticket_ids: vec!["OPS-1".into()],
             tickets: vec![TicketChange {
                 id: "OPS-1".into(),
                 original: Some(ticket("OPS-1", "Original")),
@@ -58,6 +59,7 @@ fn deleting_change_set_cascades_ticket_changes() {
             id: "CS-2".into(),
             name: "Disposable".into(),
             closed: false,
+            selected_ticket_ids: vec!["NEW-1".into()],
             tickets: vec![TicketChange {
                 id: "NEW-1".into(),
                 original: None,

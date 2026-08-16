@@ -311,16 +311,27 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     let description = focus(&mut page, "textarea");
     page.dispatch_focus(&description, false, &mut FocusCtx::default());
 
-    let target = focus(&mut page, "data-view");
+    let tickets = focus(&mut page, "data-view");
     page.dispatch_event(
-        &EventRoute::new(target.path),
-        &TuiEvent::Key(KeyEvent::from(Key::Char('-'))),
+        &EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
         &mut EventCtx::default(),
     );
     let dialog_text = render_text(&mut page);
-    assert!(dialog_text.contains("Mark for deletion (d)"));
-    assert!(dialog_text.contains("Remove from change set (r)"));
+    assert!(dialog_text.contains("Delete (d)"));
+    assert!(dialog_text.contains("Remove (r)"));
+    assert!(dialog_text.contains("Cancel (c)"));
 
+    let dialog = target(&mut page, "dialog");
+    page.dispatch_event(
+        &EventRoute::new(dialog.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('x'))),
+        &mut EventCtx::default(),
+    );
+    assert!(!render_text(&mut page).contains("Ticket action"));
     page.event(
         &TuiEvent::Key(KeyEvent::from(Key::Esc)),
         &mut EventCtx::default(),
@@ -336,12 +347,16 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     let target = focus(&mut page, "data-view");
     page.dispatch_event(
         &EventRoute::new(target.path),
-        &TuiEvent::Key(KeyEvent::from(Key::Char('-'))),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
         &mut EventCtx::default(),
     );
     let new_ticket_dialog = render_text(&mut page);
-    assert!(new_ticket_dialog.contains("Remove from change set (r)"));
-    assert!(!new_ticket_dialog.contains("Mark for deletion (d)"));
+    assert!(new_ticket_dialog.contains("Remove (r)"));
+    assert!(new_ticket_dialog.contains("Cancel (c)"));
+    assert!(!new_ticket_dialog.contains("Delete (d)"));
 
     page.event(
         &TuiEvent::Key(KeyEvent::from(Key::Esc)),
@@ -713,7 +728,7 @@ fn responsive_details_use_tabs_when_narrow_and_seventy_thirty_panels_when_wide()
     );
     let (description, properties) = page.detail_panel_areas();
     assert_eq!((description.width, properties.width), (84, 36));
-    for hotkey in ["it", "st", "pri", "as"] {
+    for hotkey in ["it", "st", "pri", "ee"] {
         assert!(wide.focus_targets().iter().any(|target| {
             target
                 .hotkey_sequences

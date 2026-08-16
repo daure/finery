@@ -112,7 +112,7 @@ impl Storage {
             SqlDialect::Postgres => "closed",
         };
         let query = format!(
-            "SELECT public_id, name, {closed_column} FROM change_sets ORDER BY created_at, public_id"
+            "SELECT public_id, name, selected_ticket_ids, {closed_column} FROM change_sets ORDER BY created_at, public_id"
         );
         let rows = sqlx::query(AssertSqlSafe(query.as_str()))
             .fetch_all(&self.pool)
@@ -142,6 +142,9 @@ impl Storage {
                 id,
                 name: row.try_get("name")?,
                 tickets: changes,
+                selected_ticket_ids: serde_json::from_str(
+                    &row.try_get::<String, _>("selected_ticket_ids")?,
+                )?,
                 closed,
             });
         }
@@ -154,14 +157,16 @@ impl Storage {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut transaction = self.pool.begin().await?;
         let upsert = format!(
-            "INSERT INTO change_sets (public_id, name, closed) VALUES ({}, {}, {}) ON CONFLICT (public_id) DO UPDATE SET name = excluded.name, closed = excluded.closed, updated_at = CURRENT_TIMESTAMP",
+            "INSERT INTO change_sets (public_id, name, selected_ticket_ids, closed) VALUES ({}, {}, {}, {}) ON CONFLICT (public_id) DO UPDATE SET name = excluded.name, selected_ticket_ids = excluded.selected_ticket_ids, closed = excluded.closed, updated_at = CURRENT_TIMESTAMP",
             self.dialect.placeholder(1),
             self.dialect.placeholder(2),
-            self.dialect.placeholder(3)
+            self.dialect.placeholder(3),
+            self.dialect.placeholder(4)
         );
         sqlx::query(AssertSqlSafe(upsert.as_str()))
             .bind(&set.id)
             .bind(&set.name)
+            .bind(serde_json::to_string(&set.selected_ticket_ids)?)
             .bind(set.closed)
             .execute(&mut *transaction)
             .await?;

@@ -73,6 +73,8 @@ pub(crate) struct ChangeSet {
     pub name: String,
     pub tickets: Vec<TicketChange>,
     #[serde(default)]
+    pub selected_ticket_ids: Vec<String>,
+    #[serde(default)]
     pub closed: bool,
 }
 
@@ -105,6 +107,7 @@ pub(crate) enum ComposerAction {
     OpenChangeSet(String),
     CloseChangeSet,
     SelectTicket(Option<String>),
+    SetSelectedTickets(Vec<String>),
     SetViewMode(ComposerViewMode),
     SetSource {
         id: String,
@@ -191,11 +194,13 @@ impl ComposerState {
                             submitted: None,
                         },
                     ],
+                    selected_ticket_ids: Vec::new(),
                 },
                 ChangeSet {
                     id: "CS-2".into(),
                     name: "Customer notifications".into(),
                     tickets: Vec::new(),
+                    selected_ticket_ids: Vec::new(),
                     closed: false,
                 },
             ],
@@ -295,6 +300,7 @@ impl ComposerState {
                     id,
                     name,
                     tickets: Vec::new(),
+                    selected_ticket_ids: Vec::new(),
                     closed: false,
                 });
             }
@@ -314,6 +320,7 @@ impl ComposerState {
             }
             ComposerAction::CloseChangeSet => self.close_change_set(),
             ComposerAction::SelectTicket(id) => self.selected_ticket = id,
+            ComposerAction::SetSelectedTickets(ids) => self.set_selected_tickets(ids),
             ComposerAction::SetViewMode(mode) => self.view_mode = mode,
             ComposerAction::SetSource { id, ticket } => {
                 self.sources.insert(id, ticket);
@@ -385,6 +392,7 @@ impl ComposerState {
                 kind: ChangeKind::Added,
                 submitted: None,
             });
+            set.selected_ticket_ids.push(id.clone());
             self.selected_ticket = Some(id);
             self.view_mode = ComposerViewMode::Changes;
         }
@@ -399,6 +407,7 @@ impl ComposerState {
             return;
         }
         if set.tickets.iter().any(|change| change.id == id) {
+            self.select_ticket_for_submission(&id);
             self.selected_ticket = Some(id);
             return;
         }
@@ -413,6 +422,7 @@ impl ComposerState {
             kind: ChangeKind::Synced,
             submitted: None,
         });
+        set.selected_ticket_ids.push(id.clone());
         self.selected_ticket = Some(id);
     }
 
@@ -429,6 +439,7 @@ impl ComposerState {
             return;
         }
         set.tickets.retain(|change| change.id != id);
+        set.selected_ticket_ids.retain(|selected| selected != id);
         self.selected_ticket = set.tickets.first().map(|change| change.id.clone());
     }
 
@@ -460,6 +471,7 @@ impl ComposerState {
         change.original = snapshot.original.clone();
         change.updated = snapshot.updated.clone();
         change.submitted = Some(snapshot);
+        set.selected_ticket_ids.retain(|selected| selected != id);
         set.closed = !set.tickets.is_empty() && set.tickets.iter().all(TicketChange::is_submitted);
         if set.closed {
             self.close_change_set();
@@ -477,6 +489,38 @@ impl ComposerState {
         change.original = None;
         change.updated = Some(updated);
         change.kind = ChangeKind::Modified;
+    }
+
+    fn set_selected_tickets(&mut self, ids: Vec<String>) {
+        let Some(set) = self.active_set_mut() else {
+            return;
+        };
+        set.selected_ticket_ids = ids.into_iter().fold(Vec::new(), |mut selected, id| {
+            if !selected.contains(&id)
+                && set
+                    .tickets
+                    .iter()
+                    .any(|change| change.id == id && !change.is_submitted())
+            {
+                selected.push(id);
+            }
+            selected
+        });
+    }
+
+    fn select_ticket_for_submission(&mut self, id: &str) {
+        if let Some(set) = self.active_set_mut()
+            && set
+                .tickets
+                .iter()
+                .any(|change| change.id == id && !change.is_submitted())
+            && !set
+                .selected_ticket_ids
+                .iter()
+                .any(|selected| selected == id)
+        {
+            set.selected_ticket_ids.push(id.to_owned());
+        }
     }
 
     fn edit_selected(&mut self, edit: impl FnOnce(&mut Ticket)) {
@@ -513,6 +557,7 @@ impl ComposerAction {
             self,
             Self::CreateTicket { .. }
                 | Self::IncludeTicket(_)
+                | Self::SetSelectedTickets(_)
                 | Self::RemoveTicket(_)
                 | Self::MarkTicketDeleted(_)
                 | Self::UpdateTitle(_)

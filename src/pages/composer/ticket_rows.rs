@@ -18,7 +18,14 @@ pub(super) fn ticket_data_view(state: &ComposerState) -> DataView<TicketRow, Str
         .selection_trigger(SelectionTrigger::OnActivate)
         .selection_glyphs(SelectionGlyphs::NERD_FONT)
         .selection_disabled_by(|row| row.submitted)
-        .selection_disabled_glyph("󱋭");
+        .selection_disabled_glyph("󱋭")
+        .selected(
+            state
+                .active_set()
+                .into_iter()
+                .flat_map(|set| set.selected_ticket_ids.clone())
+                .collect::<Vec<_>>(),
+        );
     if let Some(selected) = state.selected_ticket.as_ref() {
         view.highlight_id(selected);
     }

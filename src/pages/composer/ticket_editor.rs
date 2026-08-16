@@ -199,6 +199,7 @@ pub(super) struct TicketEditor {
     can_submit: Rc<Cell<bool>>,
     pending_project: Rc<RefCell<Option<String>>>,
     create_dialog_close_requested: Rc<Cell<bool>>,
+    ticket_dialog_close_requested: Rc<Cell<bool>>,
     submission: SubmissionController,
     source: SourceController,
 }
@@ -296,9 +297,12 @@ impl TicketEditor {
             .fit_content()
             .fit_content_max(120, 12)
             .backdrop(DialogBackdrop::dim().amount(0.55));
+        let ticket_dialog_close_requested = Rc::new(Cell::new(false));
+        let close_ticket_dialog = Rc::clone(&ticket_dialog_close_requested);
         let ticket_action_dialog = Dialog::new()
             .top_left("Ticket action")
-            .content(["Choose what should happen to the selected ticket."]);
+            .content(["Choose what should happen to the selected ticket."])
+            .on_close(move |_| close_ticket_dialog.set(true));
         let ticket_view = DialogLayer::new(add_layer, ticket_action_dialog)
             .active(false)
             .fit_content()
@@ -336,6 +340,7 @@ impl TicketEditor {
             can_submit,
             pending_project,
             create_dialog_close_requested,
+            ticket_dialog_close_requested,
             submission,
             source,
         }
@@ -383,24 +388,22 @@ impl TicketEditor {
     }
 
     pub(super) fn sync(&mut self) {
-        let (breadcrumb, rows, selected, submitted, is_open) = {
+        let (breadcrumb, rows, selected, selected_for_submission, is_open) = {
             let state = self.state.borrow();
             let breadcrumb = state.active_set().map_or_else(
                 || "Change sets".into(),
                 |set| format!("Change sets > {}", set.name),
             );
-            let submitted = state
+            let selected_for_submission = state
                 .active_set()
                 .into_iter()
-                .flat_map(|set| &set.tickets)
-                .filter(|change| change.is_submitted())
-                .map(|change| change.id.clone())
+                .flat_map(|set| set.selected_ticket_ids.clone())
                 .collect::<Vec<_>>();
             (
                 breadcrumb,
                 ticket_rows(&state),
                 state.selected_ticket.clone(),
-                submitted,
+                selected_for_submission,
                 state.active_set().is_some_and(|set| !set.closed),
             )
         };
@@ -416,13 +419,9 @@ impl TicketEditor {
         let table = self.table_mut();
         table.set_rows(rows);
         set_active_ticket_style(table, selected.clone());
+        restore_ticket_selection(table, selected_for_submission);
         if let Some(selected) = selected {
             table.highlight_id(&selected);
-        }
-        for id in submitted {
-            if self.table().is_selected(&id) {
-                self.table_mut().toggle_selected(id);
-            }
         }
         self.can_change
             .set(is_open && !self.submission.is_submitting());
@@ -518,6 +517,9 @@ impl TicketEditor {
                 .base_mut()
                 .set_active_with_context(false, ctx);
         }
+        if self.ticket_dialog_close_requested.replace(false) {
+            self.view.base_mut().set_active_with_context(false, ctx);
+        }
         let add_events = self.view.base_mut().base_mut().layer_mut().take_events();
         for event in add_events {
             match event {
@@ -564,7 +566,10 @@ impl TicketEditor {
                     .pending
                     .borrow_mut()
                     .push(ComposerAction::SelectTicket(Some(row_id))),
-                DataViewTypedEvent::SelectionChanged { .. } => {}
+                DataViewTypedEvent::SelectionChanged { selected, .. } => self
+                    .pending
+                    .borrow_mut()
+                    .push(ComposerAction::SetSelectedTickets(selected)),
                 _ => {}
             }
         }
@@ -801,12 +806,13 @@ impl TicketEditor {
         }
         let id = change.id.clone();
         let remove_sink = Rc::clone(&self.pending);
+        self.ticket_dialog_close_requested.set(false);
         let mut actions = Vec::new();
         if change.kind != ChangeKind::Added {
             let delete_sink = Rc::clone(&self.pending);
             let delete_id = id.clone();
             actions.push(
-                DialogAction::new("Mark for deletion")
+                DialogAction::new("Delete")
                     .hotkey(KeySpec::plain('d'))
                     .on_trigger(move || {
                         delete_sink
@@ -816,13 +822,19 @@ impl TicketEditor {
             );
         }
         actions.push(
-            DialogAction::new("Remove from change set")
+            DialogAction::new("Remove")
                 .hotkey(KeySpec::plain('r'))
                 .on_trigger(move || {
                     remove_sink
                         .borrow_mut()
                         .push(ComposerAction::RemoveTicket(id.clone()));
                 }),
+        );
+        let cancel_ticket_dialog = Rc::clone(&self.ticket_dialog_close_requested);
+        actions.push(
+            DialogAction::new("Cancel")
+                .hotkey(KeySpec::plain('c'))
+                .on_trigger(move || cancel_ticket_dialog.set(true)),
         );
         self.view.base_mut().layer_mut().set_actions(actions);
         self.view
@@ -847,7 +859,7 @@ impl TicketEditor {
             || self.view.base().base().is_active()
             || self.view.base().base().base().is_active()
             || !self.ticket_list_is_focused()
-            || !matches!(event, TuiEvent::Key(key) if KeySpec::plain('-').matches(*key))
+            || !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Char('x'), KeyModifiers::CONTROL).matches(*key))
         {
             return None;
         }
@@ -895,6 +907,17 @@ impl TicketEditor {
         }
         ctx.stop_propagation();
     }
+}
+
+fn restore_ticket_selection(table: &mut DataView<TicketRow, String>, selected: Vec<String>) {
+    if table.selected_ids() == selected {
+        return;
+    }
+    table.clear_selection();
+    for id in selected {
+        table.select_id(id);
+    }
+    table.drain_events();
 }
 
 fn description_reader(
