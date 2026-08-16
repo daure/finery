@@ -13,7 +13,7 @@ use tuicore::{
     TuiNode, keybindings,
 };
 
-use crate::{service::AppService, store::composer::Ticket};
+use crate::{jira::JiraProject, service::AppService, store::composer::Ticket};
 
 const CHOICE_HOST_WIDTH: u16 = 52;
 const CHOICE_FIELD_WIDTH: u16 = 46;
@@ -27,6 +27,7 @@ enum AddItemId {
     New,
     Existing,
     Ticket(String),
+    Project(String),
 }
 
 #[derive(Clone)]
@@ -34,6 +35,7 @@ enum AddItem {
     New,
     Existing,
     Ticket(Ticket),
+    Project(JiraProject),
 }
 
 impl AddItem {
@@ -42,6 +44,7 @@ impl AddItem {
             Self::New => AddItemId::New,
             Self::Existing => AddItemId::Existing,
             Self::Ticket(ticket) => AddItemId::Ticket(ticket.key.clone()),
+            Self::Project(project) => AddItemId::Project(project.key.clone()),
         }
     }
 
@@ -50,13 +53,14 @@ impl AddItem {
             Self::New => "Add new".into(),
             Self::Existing => "Add existing".into(),
             Self::Ticket(ticket) => format!("{} · {}", ticket.key, ticket.title),
+            Self::Project(project) => format!("{} · {}", project.key, project.name),
         }
     }
 }
 
 #[derive(Clone)]
 pub(super) enum AddTicketEvent {
-    CreateNew,
+    CreateNew(String),
     Include(Ticket),
     Closed,
 }
@@ -65,6 +69,7 @@ pub(super) enum AddTicketEvent {
 enum AddMenuMode {
     Choice,
     Existing,
+    Projects,
 }
 
 pub(super) struct AddTicketMenu {
@@ -79,6 +84,9 @@ pub(super) struct AddTicketMenu {
     generation: u64,
     sender: Sender<(u64, Result<Vec<Ticket>, String>)>,
     receiver: Receiver<(u64, Result<Vec<Ticket>, String>)>,
+    project_sender: Sender<(u64, Result<Vec<JiraProject>, String>)>,
+    project_receiver: Receiver<(u64, Result<Vec<JiraProject>, String>)>,
+    project_hint: Option<String>,
     field_area: Rect,
 }
 
@@ -104,6 +112,7 @@ impl AddTicketMenu {
                 }
             });
         let (sender, receiver) = mpsc::channel();
+        let (project_sender, project_receiver) = mpsc::channel();
         Self {
             service,
             dropdown,
@@ -116,18 +125,46 @@ impl AddTicketMenu {
             generation: 0,
             sender,
             receiver,
+            project_sender,
+            project_receiver,
+            project_hint: None,
             field_area: Rect::default(),
         }
     }
 
-    pub(super) fn open(&mut self) {
+    pub(super) fn open(&mut self, project_hint: Option<String>) {
         self.mode = AddMenuMode::Choice;
+        self.project_hint = project_hint;
         self.pending_search = None;
         self.dropdown.set_search_mode(DropdownSearchMode::Fuzzy);
         self.dropdown.set_rows(choice_items());
         self.dropdown.clear_selection();
         self.dropdown.set_search_query("");
         self.dropdown.open();
+    }
+
+    pub(super) fn open_projects(&mut self, ctx: &mut EventCtx<()>) {
+        self.mode = AddMenuMode::Projects;
+        self.dropdown.set_search_mode(DropdownSearchMode::Fuzzy);
+        self.dropdown.set_rows([]);
+        self.dropdown.clear_selection();
+        self.dropdown.set_search_query("");
+        self.dropdown.set_external_loading(true);
+        self.dropdown.open_with_context(ctx);
+        self.generation = self.generation.saturating_add(1);
+        let generation = self.generation;
+        let service = self.service.clone();
+        let sender = self.project_sender.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name(format!("finery-jira-projects-{generation}"))
+            .spawn(move || {
+                let _ = sender.send((generation, service.jira_projects()));
+            })
+        {
+            self.dropdown.set_external_loading(false);
+            self.service
+                .report_error(format!("could not load Jira projects: {error}"));
+        }
     }
 
     pub(super) fn take_events(&mut self) -> Vec<AddTicketEvent> {
@@ -209,17 +246,49 @@ impl AddTicketMenu {
         changed
     }
 
+    fn drain_projects(&mut self) -> bool {
+        if self.mode != AddMenuMode::Projects {
+            return false;
+        }
+        let mut changed = false;
+        while let Ok((generation, result)) = self.project_receiver.try_recv() {
+            if generation != self.generation {
+                continue;
+            }
+            self.dropdown.set_external_loading(false);
+            match result {
+                Ok(projects) => self
+                    .dropdown
+                    .set_rows(projects.into_iter().map(AddItem::Project)),
+                Err(error) => {
+                    self.dropdown.set_rows([]);
+                    self.service
+                        .report_error(format!("Jira project load failed: {error}"));
+                }
+            }
+            changed = true;
+        }
+        changed
+    }
+
     fn drain_selections(&mut self, ctx: &mut EventCtx<()>) {
         let selections = self.selected.borrow_mut().drain(..).collect::<Vec<_>>();
         for selection in selections {
             match selection {
-                AddItemId::New => self.events.push(AddTicketEvent::CreateNew),
+                AddItemId::New => {
+                    if let Some(project) = self.project_hint.clone() {
+                        self.events.push(AddTicketEvent::CreateNew(project));
+                    } else {
+                        self.open_projects(ctx);
+                    }
+                }
                 AddItemId::Existing => self.open_existing(ctx),
                 AddItemId::Ticket(id) => {
                     if let Some(ticket) = self.tickets.iter().find(|ticket| ticket.key == id) {
                         self.events.push(AddTicketEvent::Include(ticket.clone()));
                     }
                 }
+                AddItemId::Project(key) => self.events.push(AddTicketEvent::CreateNew(key)),
             }
         }
     }
@@ -240,6 +309,7 @@ impl AddTicketMenu {
         let outcome = dispatch(self, event, ctx);
         self.drain_selections(ctx);
         self.drain_search();
+        self.drain_projects();
         outcome
     }
 }
@@ -253,6 +323,7 @@ impl TuiNode for AddTicketMenu {
         let width = match self.mode {
             AddMenuMode::Choice => CHOICE_HOST_WIDTH,
             AddMenuMode::Existing => EXISTING_WIDTH,
+            AddMenuMode::Projects => CHOICE_HOST_WIDTH,
         };
         LayoutSizeHint::content(width, MENU_HOST_HEIGHT).normalized(proposal)
     }
@@ -261,6 +332,7 @@ impl TuiNode for AddTicketMenu {
         let requested_width = match self.mode {
             AddMenuMode::Choice => CHOICE_FIELD_WIDTH,
             AddMenuMode::Existing => EXISTING_WIDTH,
+            AddMenuMode::Projects => CHOICE_FIELD_WIDTH,
         };
         let width = requested_width.min(area.width);
         let height = MENU_HOST_HEIGHT.min(area.height);
@@ -302,6 +374,7 @@ impl TuiNode for AddTicketMenu {
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let mut changed = self.drain_search();
+        changed |= self.drain_projects();
         if let Some(elapsed) = &mut self.pending_search {
             *elapsed += dt;
             if *elapsed >= SEARCH_DEBOUNCE {

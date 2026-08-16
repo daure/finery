@@ -26,12 +26,14 @@ fn existing_jira_search_uses_centered_dropdown_popup_without_trigger_field() {
     menu.last_query = "kan".into();
     menu.apply_search_result(Ok(vec![Ticket {
         key: "KAN-28".into(),
+        project_key: "KAN".into(),
         title: "Cart quantity updates preserve item".into(),
         description: String::new(),
         kind: TicketKind::Story,
         status: "To Do".into(),
         priority: "High".into(),
         assignee: "Ada".into(),
+        assignee_account_id: "ada".into(),
     }]));
     let mut open_layout = LayoutCtx::new();
     open_layout.with_overlay_bounds(area, |ctx| {

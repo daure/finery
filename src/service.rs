@@ -12,7 +12,7 @@ use crate::{
     app_settings::AppSettings,
     jira,
     storage::Storage,
-    store::composer::{ChangeSet, Ticket},
+    store::composer::{ChangeSet, Ticket, TicketChange},
 };
 
 #[derive(Clone)]
@@ -92,6 +92,27 @@ impl AppService {
             .map_err(|_| "settings lock is unavailable".to_string())?
             .clone();
         jira::search(&settings, query)
+    }
+
+    pub(crate) fn jira_projects(&self) -> Result<Vec<jira::JiraProject>, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::projects(&settings)
+    }
+
+    pub(crate) fn submit_ticket_changes(
+        &self,
+        changes: &[TicketChange],
+    ) -> Result<jira::SubmitBatchOutcome, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::submit_changes(&settings, changes)
     }
 
     pub(crate) fn take_errors(&self) -> Vec<String> {

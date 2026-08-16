@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use super::{
-    ChangeKind, ComposerAction, ComposerState,
+    ChangeKind, ComposerAction, ComposerState, SubmissionSnapshot,
     jira_adf::{adf_to_markdown, markdown_to_adf},
 };
 
@@ -17,6 +17,32 @@ fn first_edit_preserves_original_and_creates_updated_snapshot() {
     assert_eq!(change.original.as_ref().unwrap().title, original_title);
     assert_eq!(change.updated.as_ref().unwrap().title, "A safer checkout");
     assert_eq!(change.kind, ChangeKind::Modified);
+}
+
+#[test]
+fn submitted_tickets_keep_snapshots_and_close_set_when_all_are_done() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    let tickets = state.active_set().unwrap().tickets.clone();
+
+    for change in tickets {
+        let original = change.original.clone();
+        let updated = change.updated.clone().or_else(|| change.original.clone());
+        state.dispatch(ComposerAction::CompleteSubmission {
+            id: change.id,
+            snapshot: SubmissionSnapshot { original, updated },
+        });
+    }
+
+    let set = state
+        .change_sets
+        .iter()
+        .find(|set| set.id == "CS-1")
+        .unwrap();
+    assert!(set.closed);
+    assert_eq!(set.submitted_count(), set.tickets.len());
+    assert!(set.tickets.iter().all(|ticket| ticket.submitted.is_some()));
+    assert!(state.active_change_set.is_none());
 }
 
 #[test]

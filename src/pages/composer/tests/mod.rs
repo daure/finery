@@ -87,6 +87,9 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     let text = render_text(&mut page);
 
     assert!(text.contains("Change sets > Checkout reliability"));
+    assert!(text.contains("New ticket"));
+    assert!(text.contains("Submit"));
+    assert!(text.contains("󰄱"));
     assert!(text.contains("Keep checkout state across retries"));
     assert!(text.contains("Description"));
     assert!(text.contains("Properties"));
@@ -106,6 +109,19 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     assert!(description_hotkeys.hotkey_sequences.is_empty());
 
     let tickets = focus(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(tickets.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::default(),
+    );
+    let mut layout = LayoutCtx::new();
+    page.layout(Rect::new(0, 0, 120, 40), &mut layout);
+    assert!(
+        layout
+            .focus_targets()
+            .iter()
+            .any(|target| target.hotkey_sequences == ["shift+s"])
+    );
     page.dispatch_focus(&tickets, false, &mut FocusCtx::default());
     let title = focus(&mut page, "input");
     page.dispatch_event(

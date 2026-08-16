@@ -52,6 +52,7 @@ impl ChangeSetListView {
             },
         )
         .column(change_set_column())
+        .row_height(2)
         .title("Change sets")
         .panel(Panel::new().top_left("Change sets").one_row(true))
         .activation_mode(ActivationMode::OnActivateKey)
@@ -124,15 +125,15 @@ fn rows(state: &ComposerState) -> Vec<ChangeSetRow> {
         .change_sets
         .iter()
         .map(|set| {
-            let changed = set
-                .tickets
-                .iter()
-                .filter(|ticket| ticket.kind != crate::store::composer::ChangeKind::Synced)
-                .count();
+            let submitted = set.submitted_count();
+            let state = if set.closed { "closed" } else { "open" };
             ChangeSetRow {
                 id: set.id.clone(),
                 name: set.name.clone(),
-                subtitle: format!("{} tickets · {changed} changes", set.tickets.len()),
+                subtitle: format!(
+                    "{} tickets · {submitted} submitted · {state}",
+                    set.tickets.len()
+                ),
             }
         })
         .collect()

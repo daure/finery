@@ -12,12 +12,16 @@ pub(crate) enum TicketKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Ticket {
     pub key: String,
+    #[serde(default)]
+    pub project_key: String,
     pub title: String,
     pub description: String,
     pub kind: TicketKind,
     pub status: String,
     pub priority: String,
     pub assignee: String,
+    #[serde(default)]
+    pub assignee_account_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +38,14 @@ pub(crate) struct TicketChange {
     pub original: Option<Ticket>,
     pub updated: Option<Ticket>,
     pub kind: ChangeKind,
+    #[serde(default)]
+    pub submitted: Option<SubmissionSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SubmissionSnapshot {
+    pub original: Option<Ticket>,
+    pub updated: Option<Ticket>,
 }
 
 impl TicketChange {
@@ -46,7 +58,11 @@ impl TicketChange {
     }
 
     pub(crate) fn can_edit(&self, updated: bool) -> bool {
-        updated && self.kind != ChangeKind::Deleted
+        updated && self.kind != ChangeKind::Deleted && self.submitted.is_none()
+    }
+
+    pub(crate) fn is_submitted(&self) -> bool {
+        self.submitted.is_some()
     }
 
     fn editable_ticket(&mut self) -> Option<&mut Ticket> {
@@ -68,6 +84,17 @@ pub(crate) struct ChangeSet {
     pub id: String,
     pub name: String,
     pub tickets: Vec<TicketChange>,
+    #[serde(default)]
+    pub closed: bool,
+}
+
+impl ChangeSet {
+    pub(crate) fn submitted_count(&self) -> usize {
+        self.tickets
+            .iter()
+            .filter(|ticket| ticket.is_submitted())
+            .count()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,13 +108,19 @@ pub(crate) struct ComposerState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ComposerAction {
-    CreateChangeSet { id: String, name: String },
+    CreateChangeSet {
+        id: String,
+        name: String,
+    },
     DeleteChangeSet(String),
     OpenChangeSet(String),
     CloseChangeSet,
     SelectTicket(Option<String>),
     ShowUpdated(bool),
-    CreateTicket(String),
+    CreateTicket {
+        title: String,
+        project_key: String,
+    },
     IncludeTicket(Ticket),
     RemoveTicket(String),
     MarkTicketDeleted(String),
@@ -97,6 +130,15 @@ pub(crate) enum ComposerAction {
     UpdateStatus(String),
     UpdatePriority(String),
     UpdateAssignee(String),
+    CompleteSubmission {
+        id: String,
+        snapshot: SubmissionSnapshot,
+    },
+    RefreshAfterFailedSubmission {
+        id: String,
+        original: Ticket,
+        updated: Ticket,
+    },
 }
 
 impl ComposerState {
@@ -125,12 +167,14 @@ impl ComposerState {
                 ChangeSet {
                     id: "CS-1".into(),
                     name: "Checkout reliability".into(),
+                    closed: false,
                     tickets: vec![
                         TicketChange {
                             id: tickets[0].key.clone(),
                             original: Some(tickets[0].clone()),
                             updated: None,
                             kind: ChangeKind::Synced,
+                            submitted: None,
                         },
                         TicketChange {
                             id: tickets[1].key.clone(),
@@ -140,12 +184,14 @@ impl ComposerState {
                                 ..tickets[1].clone()
                             }),
                             kind: ChangeKind::Modified,
+                            submitted: None,
                         },
                         TicketChange {
                             id: tickets[2].key.clone(),
                             original: Some(tickets[2].clone()),
                             updated: None,
                             kind: ChangeKind::Deleted,
+                            submitted: None,
                         },
                     ],
                 },
@@ -153,6 +199,7 @@ impl ComposerState {
                     id: "CS-2".into(),
                     name: "Customer notifications".into(),
                     tickets: Vec::new(),
+                    closed: false,
                 },
             ],
             active_change_set: None,
@@ -191,6 +238,7 @@ impl ComposerState {
                     id,
                     name,
                     tickets: Vec::new(),
+                    closed: false,
                 });
             }
             ComposerAction::DeleteChangeSet(id) => {
@@ -210,7 +258,9 @@ impl ComposerState {
             ComposerAction::CloseChangeSet => self.close_change_set(),
             ComposerAction::SelectTicket(id) => self.selected_ticket = id,
             ComposerAction::ShowUpdated(value) => self.show_updated = value,
-            ComposerAction::CreateTicket(title) => self.create_ticket(title),
+            ComposerAction::CreateTicket { title, project_key } => {
+                self.create_ticket(title, project_key)
+            }
             ComposerAction::IncludeTicket(ticket) => self.include_ticket(ticket),
             ComposerAction::RemoveTicket(id) => self.remove_ticket(&id),
             ComposerAction::MarkTicketDeleted(id) => self.mark_deleted(&id),
@@ -225,9 +275,18 @@ impl ComposerState {
             ComposerAction::UpdatePriority(value) => {
                 self.edit_selected(|ticket| ticket.priority = value)
             }
-            ComposerAction::UpdateAssignee(value) => {
-                self.edit_selected(|ticket| ticket.assignee = value)
+            ComposerAction::UpdateAssignee(value) => self.edit_selected(|ticket| {
+                ticket.assignee = value;
+                ticket.assignee_account_id.clear();
+            }),
+            ComposerAction::CompleteSubmission { id, snapshot } => {
+                self.complete_submission(&id, snapshot)
             }
+            ComposerAction::RefreshAfterFailedSubmission {
+                id,
+                original,
+                updated,
+            } => self.refresh_after_failed_submission(&id, original, updated),
         }
     }
 
@@ -241,17 +300,22 @@ impl ComposerState {
         self.selected_ticket = None;
     }
 
-    fn create_ticket(&mut self, title: String) {
+    fn create_ticket(&mut self, title: String, project_key: String) {
+        if self.active_set().is_some_and(|set| set.closed) {
+            return;
+        }
         let id = format!("NEW-{}", self.next_ticket);
         self.next_ticket += 1;
         let ticket = Ticket {
             key: id.clone(),
+            project_key,
             title,
             description: String::new(),
             kind: TicketKind::Task,
             status: "To Do".into(),
             priority: "Medium".into(),
             assignee: "Unassigned".into(),
+            assignee_account_id: String::new(),
         };
         if let Some(set) = self.active_set_mut() {
             set.tickets.push(TicketChange {
@@ -259,6 +323,7 @@ impl ComposerState {
                 original: None,
                 updated: Some(ticket),
                 kind: ChangeKind::Added,
+                submitted: None,
             });
             self.selected_ticket = Some(id);
             self.show_updated = true;
@@ -270,6 +335,9 @@ impl ComposerState {
         let Some(set) = self.active_set_mut() else {
             return;
         };
+        if set.closed {
+            return;
+        }
         if set.tickets.iter().any(|change| change.id == id) {
             self.selected_ticket = Some(id);
             return;
@@ -279,6 +347,7 @@ impl ComposerState {
             original: Some(ticket),
             updated: None,
             kind: ChangeKind::Synced,
+            submitted: None,
         });
         self.selected_ticket = Some(id);
     }
@@ -287,6 +356,14 @@ impl ComposerState {
         let Some(set) = self.active_set_mut() else {
             return;
         };
+        if set.closed
+            || set
+                .tickets
+                .iter()
+                .any(|change| change.id == id && change.is_submitted())
+        {
+            return;
+        }
         set.tickets.retain(|change| change.id != id);
         self.selected_ticket = set.tickets.first().map(|change| change.id.clone());
     }
@@ -298,11 +375,42 @@ impl ComposerState {
         else {
             return;
         };
+        if change.is_submitted() {
+            return;
+        }
         if change.original.is_some() {
             change.updated = None;
             change.kind = ChangeKind::Deleted;
             self.show_updated = false;
         }
+    }
+
+    fn complete_submission(&mut self, id: &str, snapshot: SubmissionSnapshot) {
+        let Some(set) = self.active_set_mut() else {
+            return;
+        };
+        let Some(change) = set.tickets.iter_mut().find(|change| change.id == id) else {
+            return;
+        };
+        change.original = snapshot.original.clone();
+        change.updated = snapshot.updated.clone();
+        change.submitted = Some(snapshot);
+        set.closed = !set.tickets.is_empty() && set.tickets.iter().all(TicketChange::is_submitted);
+        if set.closed {
+            self.close_change_set();
+        }
+    }
+
+    fn refresh_after_failed_submission(&mut self, id: &str, original: Ticket, updated: Ticket) {
+        let Some(change) = self
+            .active_set_mut()
+            .and_then(|set| set.tickets.iter_mut().find(|change| change.id == id))
+        else {
+            return;
+        };
+        change.original = Some(original);
+        change.updated = Some(updated);
+        change.kind = ChangeKind::Modified;
     }
 
     fn edit_selected(&mut self, edit: impl FnOnce(&mut Ticket)) {
@@ -324,7 +432,7 @@ impl ComposerAction {
     pub(crate) fn affects_persistence(&self) -> bool {
         matches!(
             self,
-            Self::CreateTicket(_)
+            Self::CreateTicket { .. }
                 | Self::IncludeTicket(_)
                 | Self::RemoveTicket(_)
                 | Self::MarkTicketDeleted(_)
@@ -343,39 +451,47 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
     vec![
         Ticket {
             key: "FIN-142".into(),
+            project_key: "FIN".into(),
             title: "Keep checkout state across retries".into(),
             description: "## Outcome\n\nCustomers can retry checkout without losing their basket.\n\n## Acceptance Criteria\n\n- Basket state survives a failed authorization.\n- A successful retry creates one order.".into(),
             kind: TicketKind::Story,
             status: "In Progress".into(),
             priority: "High".into(),
             assignee: "Mina Patel".into(),
+            assignee_account_id: "mina".into(),
         },
         Ticket {
             key: "FIN-157".into(),
+            project_key: "FIN".into(),
             title: "Retry payment authorization".into(),
             description: "## Description\n\nAdd an idempotent retry path for transient gateway errors.".into(),
             kind: TicketKind::Task,
             status: "To Do".into(),
             priority: "Highest".into(),
             assignee: "Ada Mensah".into(),
+            assignee_account_id: "ada".into(),
         },
         Ticket {
             key: "FIN-131".into(),
+            project_key: "FIN".into(),
             title: "Remove legacy payment callback".into(),
             description: "Legacy callback superseded by the event stream.".into(),
             kind: TicketKind::Task,
             status: "Done".into(),
             priority: "Low".into(),
             assignee: "Lin Chen".into(),
+            assignee_account_id: "lin".into(),
         },
         Ticket {
             key: "FIN-166".into(),
+            project_key: "FIN".into(),
             title: "Display authorization failures clearly".into(),
             description: "Show actionable gateway failures without exposing provider internals.".into(),
             kind: TicketKind::Bug,
             status: "Backlog".into(),
             priority: "Medium".into(),
             assignee: "Unassigned".into(),
+            assignee_account_id: String::new(),
         },
     ]
 }

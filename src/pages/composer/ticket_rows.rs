@@ -3,7 +3,9 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span, Text},
 };
-use tuicore::{ActivationMode, CellContext, Column, DataView, SelectionMode};
+use tuicore::{
+    ActivationMode, CellContext, Column, DataView, SelectionGlyphs, SelectionMode, SelectionTrigger,
+};
 
 use crate::store::composer::{ChangeKind, ComposerState, TicketChange, TicketKind};
 
@@ -16,6 +18,7 @@ pub(super) struct TicketRow {
     priority: String,
     status: String,
     pub(super) change: ChangeKind,
+    pub(super) submitted: bool,
 }
 
 pub(super) fn ticket_data_view(state: &ComposerState) -> DataView<TicketRow, String> {
@@ -24,7 +27,9 @@ pub(super) fn ticket_data_view(state: &ComposerState) -> DataView<TicketRow, Str
         .columns(ticket_columns())
         .row_height(2)
         .activation_mode(ActivationMode::Manual)
-        .selection_mode(SelectionMode::None);
+        .selection_mode(SelectionMode::Multi)
+        .selection_trigger(SelectionTrigger::OnActivate)
+        .selection_glyphs(SelectionGlyphs::NERD_FONT);
     if let Some(selected) = state.selected_ticket.as_ref() {
         view.highlight_id(selected);
     }
@@ -50,6 +55,7 @@ fn ticket_row(change: &TicketChange) -> Option<TicketRow> {
         priority: ticket.priority.clone(),
         status: ticket.status.clone(),
         change: change.kind,
+        submitted: change.is_submitted(),
     })
 }
 
@@ -63,6 +69,11 @@ fn ticket_columns() -> Vec<Column<TicketRow, String>> {
             let (kind_icon, kind_color) = ticket_icon(row.kind);
             let (priority_icon, priority_color) = priority_icon(&row.priority);
             let (badge, badge_color) = change_badge(row.change);
+            let text_color = if row.submitted {
+                theme.muted_fg()
+            } else {
+                theme.text_fg()
+            };
             Text::from(vec![
                 Line::from(vec![
                     Span::styled(format!("{kind_icon} "), Style::default().fg(kind_color)),
@@ -70,7 +81,7 @@ fn ticket_columns() -> Vec<Column<TicketRow, String>> {
                         format!("{priority_icon} "),
                         Style::default().fg(priority_color),
                     ),
-                    Span::styled(row.title.clone(), Style::default().fg(theme.text_fg())),
+                    Span::styled(row.title.clone(), Style::default().fg(text_color)),
                 ]),
                 Line::from(vec![
                     Span::styled(
@@ -83,6 +94,10 @@ fn ticket_columns() -> Vec<Column<TicketRow, String>> {
                     Span::styled(row.key.clone(), Style::default().fg(theme.subtle_fg())),
                     Span::styled(" • ", Style::default().fg(theme.subtle_fg())),
                     Span::styled(row.status.clone(), Style::default().fg(theme.subtle_fg())),
+                    Span::styled(
+                        if row.submitted { " · submitted" } else { "" },
+                        Style::default().fg(theme.muted_fg()),
+                    ),
                 ]),
             ])
         },

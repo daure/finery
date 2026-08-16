@@ -107,13 +107,23 @@ impl Storage {
     pub(crate) async fn load_change_sets(
         &self,
     ) -> Result<Vec<ChangeSet>, Box<dyn std::error::Error>> {
-        let rows =
-            sqlx::query("SELECT public_id, name FROM change_sets ORDER BY created_at, public_id")
-                .fetch_all(&self.pool)
-                .await?;
+        let closed_column = match self.dialect {
+            SqlDialect::Sqlite => "CAST(closed AS INTEGER) AS closed",
+            SqlDialect::Postgres => "closed",
+        };
+        let query = format!(
+            "SELECT public_id, name, {closed_column} FROM change_sets ORDER BY created_at, public_id"
+        );
+        let rows = sqlx::query(AssertSqlSafe(query.as_str()))
+            .fetch_all(&self.pool)
+            .await?;
         let mut sets = Vec::with_capacity(rows.len());
         for row in rows {
             let id: String = row.try_get("public_id")?;
+            let closed = match self.dialect {
+                SqlDialect::Sqlite => row.try_get::<i64, _>("closed")? != 0,
+                SqlDialect::Postgres => row.try_get("closed")?,
+            };
             let query = format!(
                 "SELECT payload FROM ticket_changes WHERE change_set_id = {} ORDER BY ticket_id",
                 self.dialect.placeholder(1)
@@ -132,6 +142,7 @@ impl Storage {
                 id,
                 name: row.try_get("name")?,
                 tickets: changes,
+                closed,
             });
         }
         Ok(sets)
@@ -143,13 +154,15 @@ impl Storage {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut transaction = self.pool.begin().await?;
         let upsert = format!(
-            "INSERT INTO change_sets (public_id, name) VALUES ({}, {}) ON CONFLICT (public_id) DO UPDATE SET name = excluded.name, updated_at = CURRENT_TIMESTAMP",
+            "INSERT INTO change_sets (public_id, name, closed) VALUES ({}, {}, {}) ON CONFLICT (public_id) DO UPDATE SET name = excluded.name, closed = excluded.closed, updated_at = CURRENT_TIMESTAMP",
             self.dialect.placeholder(1),
-            self.dialect.placeholder(2)
+            self.dialect.placeholder(2),
+            self.dialect.placeholder(3)
         );
         sqlx::query(AssertSqlSafe(upsert.as_str()))
             .bind(&set.id)
             .bind(&set.name)
+            .bind(set.closed)
             .execute(&mut *transaction)
             .await?;
         let delete = format!(

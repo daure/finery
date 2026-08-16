@@ -1,16 +1,20 @@
-use crate::store::composer::{ChangeKind, ChangeSet, Ticket, TicketChange, TicketKind};
+use crate::store::composer::{
+    ChangeKind, ChangeSet, SubmissionSnapshot, Ticket, TicketChange, TicketKind,
+};
 
 use super::Storage;
 
 fn ticket(key: &str, title: &str) -> Ticket {
     Ticket {
         key: key.into(),
+        project_key: "OPS".into(),
         title: title.into(),
         description: "Description".into(),
         kind: TicketKind::Story,
         status: "To Do".into(),
         priority: "High".into(),
         assignee: "Ada".into(),
+        assignee_account_id: "ada".into(),
     }
 }
 
@@ -21,11 +25,16 @@ fn change_sets_ticket_snapshots_and_settings_survive_round_trip() {
         let set = ChangeSet {
             id: "CS-1".into(),
             name: "Checkout".into(),
+            closed: true,
             tickets: vec![TicketChange {
                 id: "OPS-1".into(),
                 original: Some(ticket("OPS-1", "Original")),
                 updated: Some(ticket("OPS-1", "Updated")),
                 kind: ChangeKind::Modified,
+                submitted: Some(SubmissionSnapshot {
+                    original: Some(ticket("OPS-1", "Original")),
+                    updated: Some(ticket("OPS-1", "Updated")),
+                }),
             }],
         };
 
@@ -48,11 +57,13 @@ fn deleting_change_set_cascades_ticket_changes() {
         let set = ChangeSet {
             id: "CS-2".into(),
             name: "Disposable".into(),
+            closed: false,
             tickets: vec![TicketChange {
                 id: "NEW-1".into(),
                 original: None,
                 updated: Some(ticket("NEW-1", "Local")),
                 kind: ChangeKind::Added,
+                submitted: None,
             }],
         };
         storage.save_change_set(&set).await.unwrap();

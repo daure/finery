@@ -21,10 +21,11 @@ fn jira_issue_maps_search_fields_and_adf_description() {
         key: "OPS-42".into(),
         fields: json!({
             "summary": "Retry checkout",
+            "project": { "key": "OPS" },
             "issuetype": { "name": "Story" },
             "status": { "name": "In Progress" },
             "priority": { "name": "High" },
-            "assignee": { "displayName": "Ada" },
+            "assignee": { "displayName": "Ada", "accountId": "ada-1" },
             "description": {
                 "type": "doc",
                 "version": 1,
@@ -37,8 +38,10 @@ fn jira_issue_maps_search_fields_and_adf_description() {
     });
 
     assert_eq!(ticket.key, "OPS-42");
+    assert_eq!(ticket.project_key, "OPS");
     assert_eq!(ticket.kind, TicketKind::Story);
     assert_eq!(ticket.status, "In Progress");
     assert_eq!(ticket.description, "Keep basket state.");
     assert_eq!(ticket.assignee, "Ada");
+    assert_eq!(ticket.assignee_account_id, "ada-1");
 }

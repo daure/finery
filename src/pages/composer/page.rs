@@ -88,9 +88,10 @@ impl ComposerPage {
     pub(super) fn create_ticket(&mut self, title: &str) {
         self.state
             .borrow_mut()
-            .dispatch(crate::store::composer::ComposerAction::CreateTicket(
-                title.into(),
-            ));
+            .dispatch(crate::store::composer::ComposerAction::CreateTicket {
+                title: title.into(),
+                project_key: "FIN".into(),
+            });
         self.editor.sync();
     }
 
@@ -138,7 +139,19 @@ impl TuiNode for ComposerPage {
     }
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        self.active_mut().tick(dt, settings)
+        let was_open = self.in_change_set();
+        let outcome = self.active_mut().tick(dt, settings);
+        if was_open && !self.in_change_set() {
+            self.change_sets.sync();
+            outcome.merge(TickResult {
+                changed: true,
+                layout: true,
+                active: false,
+                next_tick: None,
+            })
+        } else {
+            outcome
+        }
     }
 
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {

@@ -1,16 +1,19 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::Rc,
     sync::{Arc, RwLock},
     time::Duration,
 };
 
-use ratatui::{Frame, layout::Rect};
+use ratatui::{
+    Frame,
+    layout::{Constraint, Rect},
+};
 use tuicore::{
     AnimationSettings, DataView, DataViewTypedEvent, Dialog, DialogAction, DialogBackdrop,
-    DialogLayer, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusRequest, FocusTarget,
-    KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, Panel,
-    PanelHost, RenderCtx, SpeedReader, Split, TextInput, TextInputKeyBindings, TickResult,
+    DialogLayer, EventCtx, EventOutcome, EventRoute, Flex, FocusCtx, FocusId, FocusRequest,
+    FocusTarget, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
+    Panel, PanelHost, RenderCtx, SpeedReader, Split, TextInput, TextInputKeyBindings, TickResult,
     TuiEvent, TuiNode, keybindings,
 };
 
@@ -25,14 +28,17 @@ use super::{
     add_ticket_menu::{AddTicketEvent, AddTicketMenu},
     detail::DetailPane,
     fields::{DescriptionAction, PendingDescriptionActions},
+    submission::SubmissionController,
     ticket_rows::{TicketRow, ticket_data_view, ticket_rows},
+    ticket_toolbar::{ToolbarEvent, ToolbarEvents, toolbar},
 };
 
 type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
 type TicketList = PanelHost<DataView<TicketRow, String>>;
 type Body = Split<TicketList, DetailPane>;
+type Workspace = Split<Flex<()>, Body>;
 type CreateDialog = tuicore::DialogHost<TextInput, ()>;
-type CreateLayer = DialogLayer<Body, CreateDialog>;
+type CreateLayer = DialogLayer<Workspace, CreateDialog>;
 type AddLayer = DialogLayer<CreateLayer, AddTicketMenu>;
 type TicketEditorView = DialogLayer<AddLayer, Dialog<()>>;
 type DescriptionReader = tuicore::DialogHost<SpeedReader, ()>;
@@ -45,6 +51,11 @@ pub(super) struct TicketEditor {
     settings: Arc<RwLock<AppSettings>>,
     service: AppService,
     view: EditorView,
+    toolbar_events: ToolbarEvents,
+    can_change: Rc<Cell<bool>>,
+    can_submit: Rc<Cell<bool>>,
+    pending_project: Rc<RefCell<Option<String>>>,
+    submission: SubmissionController,
 }
 
 impl TicketEditor {
@@ -66,8 +77,22 @@ impl TicketEditor {
             Rc::clone(&description_actions),
         );
         let body = Split::vertical(ticket_list, detail).ratio(1, 2);
+        let toolbar_events = Rc::new(RefCell::new(Vec::new()));
+        let can_change = Rc::new(Cell::new(true));
+        let can_submit = Rc::new(Cell::new(false));
+        let workspace = Split::vertical(
+            toolbar(
+                Rc::clone(&toolbar_events),
+                Rc::clone(&can_change),
+                Rc::clone(&can_submit),
+            ),
+            body,
+        )
+        .constraints(Constraint::Length(1), Constraint::Min(1));
 
         let create_sink = Rc::clone(&pending);
+        let pending_project = Rc::new(RefCell::new(None::<String>));
+        let create_project = Rc::clone(&pending_project);
         let create_keys = TextInputKeyBindings::default();
         let create_help = format!(
             "{} create · {} cancel",
@@ -89,14 +114,17 @@ impl TicketEditor {
                     .panel("Title")
                     .placeholder("Ticket title")
                     .on_submit(move |title| {
-                        if !title.trim().is_empty() {
-                            create_sink
-                                .borrow_mut()
-                                .push(ComposerAction::CreateTicket(title.trim().into()));
+                        if !title.trim().is_empty()
+                            && let Some(project_key) = create_project.borrow().clone()
+                        {
+                            create_sink.borrow_mut().push(ComposerAction::CreateTicket {
+                                title: title.trim().into(),
+                                project_key,
+                            });
                         }
                     }),
             );
-        let create_layer = DialogLayer::new(body, create_dialog)
+        let create_layer = DialogLayer::new(workspace, create_dialog)
             .active(false)
             .fit_content()
             .fit_content_max(72, 7)
@@ -129,6 +157,7 @@ impl TicketEditor {
         .fit_content()
         .fit_content_max(72, 16)
         .backdrop(DialogBackdrop::dim().amount(0.55));
+        let submission = SubmissionController::new(Rc::clone(&state), service.clone());
 
         Self {
             state,
@@ -137,37 +166,92 @@ impl TicketEditor {
             settings,
             service,
             view,
+            toolbar_events,
+            can_change,
+            can_submit,
+            pending_project,
+            submission,
         }
     }
 
-    pub(super) fn sync(&mut self) {
-        let state = self.state.borrow();
-        let breadcrumb = state.active_set().map_or_else(
-            || "Change sets".into(),
-            |set| format!("Change sets > {}", set.name),
-        );
+    fn table(&self) -> &DataView<TicketRow, String> {
+        self.view
+            .base()
+            .base()
+            .base()
+            .base()
+            .second()
+            .first()
+            .child()
+    }
+
+    fn table_mut(&mut self) -> &mut DataView<TicketRow, String> {
         self.view
             .base_mut()
             .base_mut()
             .base_mut()
             .base_mut()
+            .second_mut()
+            .first_mut()
+            .child_mut()
+    }
+
+    fn detail_mut(&mut self) -> &mut DetailPane {
+        self.view
+            .base_mut()
+            .base_mut()
+            .base_mut()
+            .base_mut()
+            .second_mut()
+            .second_mut()
+    }
+
+    pub(super) fn sync(&mut self) {
+        let (breadcrumb, rows, selected, submitted, is_open) = {
+            let state = self.state.borrow();
+            let breadcrumb = state.active_set().map_or_else(
+                || "Change sets".into(),
+                |set| format!("Change sets > {}", set.name),
+            );
+            let submitted = state
+                .active_set()
+                .into_iter()
+                .flat_map(|set| &set.tickets)
+                .filter(|change| change.is_submitted())
+                .map(|change| change.id.clone())
+                .collect::<Vec<_>>();
+            (
+                breadcrumb,
+                ticket_rows(&state),
+                state.selected_ticket.clone(),
+                submitted,
+                state.active_set().is_some_and(|set| !set.closed),
+            )
+        };
+        self.view
+            .base_mut()
+            .base_mut()
+            .base_mut()
+            .base_mut()
+            .second_mut()
             .first_mut()
             .panel_mut()
             .set_top_left(breadcrumb);
-        let rows = ticket_rows(&state);
-        let selected = state.selected_ticket.clone();
-        let table = self
-            .view
-            .base_mut()
-            .base_mut()
-            .base_mut()
-            .base_mut()
-            .first_mut()
-            .child_mut();
+        let table = self.table_mut();
         table.set_rows(rows);
         if let Some(selected) = selected {
             table.highlight_id(&selected);
         }
+        for id in submitted {
+            if self.table().is_selected(&id) {
+                self.table_mut().toggle_selected(id);
+            }
+        }
+        self.can_change
+            .set(is_open && !self.submission.is_submitting());
+        self.can_submit.set(
+            is_open && !self.submission.is_submitting() && !self.table().selected_ids().is_empty(),
+        );
     }
 
     fn drain_description_actions(&mut self, ctx: &mut EventCtx<()>) {
@@ -179,13 +263,7 @@ impl TicketEditor {
         for action in actions {
             match action {
                 DescriptionAction::Focus { edit } => {
-                    self.view
-                        .base_mut()
-                        .base_mut()
-                        .base_mut()
-                        .base_mut()
-                        .second_mut()
-                        .focus_description(edit, ctx);
+                    self.detail_mut().focus_description(edit, ctx);
                 }
                 DescriptionAction::OpenSpeedReader(description) => {
                     self.view.replace_layer(
@@ -214,7 +292,8 @@ impl TicketEditor {
         let add_events = self.view.base_mut().base_mut().layer_mut().take_events();
         for event in add_events {
             match event {
-                AddTicketEvent::CreateNew => {
+                AddTicketEvent::CreateNew(project_key) => {
+                    *self.pending_project.borrow_mut() = Some(project_key);
                     self.view
                         .base_mut()
                         .base_mut()
@@ -250,26 +329,21 @@ impl TicketEditor {
             }
         }
 
-        let table = self
-            .view
-            .base_mut()
-            .base_mut()
-            .base_mut()
-            .base_mut()
-            .first_mut()
-            .child_mut();
-        for event in table.drain_events() {
-            if let DataViewTypedEvent::HighlightChanged { row_id } = event {
-                self.pending
+        for event in self.table_mut().drain_events() {
+            match event {
+                DataViewTypedEvent::HighlightChanged { row_id } => self
+                    .pending
                     .borrow_mut()
-                    .push(ComposerAction::SelectTicket(row_id));
+                    .push(ComposerAction::SelectTicket(row_id)),
+                DataViewTypedEvent::SelectionChanged { .. } => {}
+                _ => {}
             }
         }
 
         let actions = self.pending.borrow_mut().drain(..).collect::<Vec<_>>();
         let created = actions
             .iter()
-            .any(|action| matches!(action, ComposerAction::CreateTicket(_)));
+            .any(|action| matches!(action, ComposerAction::CreateTicket { .. }));
         let ticket_action = actions.iter().any(|action| {
             matches!(
                 action,
@@ -294,6 +368,8 @@ impl TicketEditor {
             self.view.base_mut().set_active_with_context(false, ctx);
         }
         self.sync();
+        self.drain_toolbar_events(ctx);
+        self.submission.drain_notices(ctx);
         ctx.request_redraw();
     }
 
@@ -303,6 +379,7 @@ impl TicketEditor {
             .base()
             .base()
             .base()
+            .second()
             .first()
             .child()
             .is_focused()
@@ -313,11 +390,109 @@ impl TicketEditor {
     }
 
     fn open_add_menu(&mut self, ctx: &mut EventCtx<()>) {
-        self.view.base_mut().base_mut().layer_mut().open();
+        let project_hint = self.project_hint();
+        self.view
+            .base_mut()
+            .base_mut()
+            .layer_mut()
+            .open(project_hint);
         self.view
             .base_mut()
             .base_mut()
             .set_active_with_context(true, ctx);
+    }
+
+    fn project_hint(&self) -> Option<String> {
+        let state = self.state.borrow();
+        let mut projects = state
+            .active_set()
+            .into_iter()
+            .flat_map(|set| &set.tickets)
+            .filter_map(|change| change.visible_ticket(true))
+            .map(|ticket| ticket.project_key.trim())
+            .filter(|project| !project.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        projects.sort();
+        projects.dedup();
+        if projects.len() == 1 {
+            return projects.pop();
+        }
+        let default = self
+            .settings
+            .read()
+            .expect("settings lock poisoned")
+            .jira_default_project
+            .trim()
+            .to_owned();
+        (!default.is_empty()).then_some(default)
+    }
+
+    fn open_new_ticket(&mut self, ctx: &mut EventCtx<()>) {
+        if let Some(project) = self.project_hint() {
+            *self.pending_project.borrow_mut() = Some(project);
+            self.view
+                .base_mut()
+                .base_mut()
+                .base_mut()
+                .layer_mut()
+                .child_mut()
+                .set_value("");
+            self.view
+                .base_mut()
+                .base_mut()
+                .base_mut()
+                .set_active_with_context(true, ctx);
+        } else {
+            self.view
+                .base_mut()
+                .base_mut()
+                .layer_mut()
+                .open_projects(ctx);
+            self.view
+                .base_mut()
+                .base_mut()
+                .set_active_with_context(true, ctx);
+        }
+    }
+
+    fn drain_toolbar_events(&mut self, ctx: &mut EventCtx<()>) {
+        let events = self
+            .toolbar_events
+            .borrow_mut()
+            .drain(..)
+            .collect::<Vec<_>>();
+        for event in events {
+            match event {
+                ToolbarEvent::NewTicket => self.open_new_ticket(ctx),
+                ToolbarEvent::Submit => self.start_submit(),
+            }
+        }
+    }
+
+    fn start_submit(&mut self) {
+        if self.submission.is_submitting() {
+            return;
+        }
+        let selected = self.table().selected_ids();
+        let changes = self
+            .state
+            .borrow()
+            .active_set()
+            .into_iter()
+            .flat_map(|set| &set.tickets)
+            .filter(|change| selected.contains(&change.id) && !change.is_submitted())
+            .cloned()
+            .collect::<Vec<_>>();
+        self.submission.start(changes);
+        self.sync();
+    }
+
+    fn poll_submission(&mut self, ctx: &mut EventCtx<()>) {
+        if self.submission.drain_results() {
+            self.sync();
+        }
+        self.submission.drain_notices(ctx);
     }
 
     fn handle_add_key(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> Option<EventOutcome> {
@@ -325,6 +500,7 @@ impl TicketEditor {
             || self.view.base().is_active()
             || self.view.base().base().is_active()
             || self.view.base().base().base().is_active()
+            || !self.can_change.get()
             || !self.ticket_list_is_focused()
             || !matches!(event, TuiEvent::Key(key) if KeySpec::plain('+').matches(*key))
         {
@@ -339,6 +515,9 @@ impl TicketEditor {
         let Some(change) = self.state.borrow().selected_change().cloned() else {
             return false;
         };
+        if change.is_submitted() || !self.can_change.get() {
+            return false;
+        }
         let id = change.id.clone();
         let remove_sink = Rc::clone(&self.pending);
         let mut actions = Vec::new();
@@ -463,6 +642,7 @@ impl TuiNode for TicketEditor {
         self.view.render(frame, area, ctx);
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        self.poll_submission(ctx);
         if let Some(outcome) = self.handle_add_key(event, ctx) {
             return outcome;
         }
@@ -491,6 +671,7 @@ impl TuiNode for TicketEditor {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
+        self.poll_submission(ctx);
         if let Some(outcome) = self.handle_add_key(event, ctx) {
             return outcome;
         }
@@ -514,7 +695,22 @@ impl TuiNode for TicketEditor {
         outcome
     }
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        self.view.tick(dt, settings)
+        let changed = self.submission.drain_results();
+        if changed {
+            self.sync();
+        }
+        self.view
+            .tick(dt, settings)
+            .merge(if changed {
+                TickResult::CHANGED
+            } else {
+                TickResult::IDLE
+            })
+            .merge(if self.submission.is_submitting() {
+                TickResult::scheduled_after(Duration::from_millis(50))
+            } else {
+                TickResult::IDLE
+            })
     }
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
         self.view.focus(target, focused, ctx);

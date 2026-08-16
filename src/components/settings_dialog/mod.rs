@@ -25,6 +25,7 @@ enum SettingChange {
     JiraBaseUrl(String),
     JiraEmail(String),
     JiraApiToken(String),
+    JiraDefaultProject(String),
     Wpm(String),
     MarkdownBlockPause(String),
 }
@@ -43,6 +44,7 @@ impl SettingsDialog {
         let url_changes = Rc::clone(&changes);
         let email_changes = Rc::clone(&changes);
         let token_changes = Rc::clone(&changes);
+        let project_changes = Rc::clone(&changes);
         let wpm_changes = Rc::clone(&changes);
         let delay_changes = Rc::clone(&changes);
         let root = Flex::column()
@@ -81,6 +83,19 @@ impl SettingsDialog {
                         token_changes
                             .borrow_mut()
                             .push(SettingChange::JiraApiToken(value));
+                    }),
+                FlexItem::fixed(3),
+            )
+            .child(
+                "jira-default-project",
+                TextInput::new()
+                    .value(values.jira_default_project.clone())
+                    .panel("Default Jira project")
+                    .placeholder("FIN")
+                    .on_edit_end(move |value| {
+                        project_changes
+                            .borrow_mut()
+                            .push(SettingChange::JiraDefaultProject(value));
                     }),
                 FlexItem::fixed(3),
             )
@@ -135,6 +150,10 @@ impl SettingsDialog {
                 }
                 SettingChange::JiraApiToken(value) => {
                     settings.jira_api_token = value.trim().into();
+                    changed = true;
+                }
+                SettingChange::JiraDefaultProject(value) => {
+                    settings.jira_default_project = value.trim().to_ascii_uppercase();
                     changed = true;
                 }
                 SettingChange::Wpm(value) => {
