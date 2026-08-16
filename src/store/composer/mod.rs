@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +34,13 @@ pub(crate) enum ChangeKind {
     Synced,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ComposerViewMode {
+    Source,
+    Changes,
+    Diff,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TicketChange {
     pub id: String,
@@ -49,33 +58,12 @@ pub(crate) struct SubmissionSnapshot {
 }
 
 impl TicketChange {
-    pub(crate) fn visible_ticket(&self, updated: bool) -> Option<&Ticket> {
-        if updated {
-            self.updated.as_ref().or(self.original.as_ref())
-        } else {
-            self.original.as_ref().or(self.updated.as_ref())
-        }
-    }
-
     pub(crate) fn can_edit(&self, updated: bool) -> bool {
         updated && self.kind != ChangeKind::Deleted && self.submitted.is_none()
     }
 
     pub(crate) fn is_submitted(&self) -> bool {
         self.submitted.is_some()
-    }
-
-    fn editable_ticket(&mut self) -> Option<&mut Ticket> {
-        if self.kind == ChangeKind::Deleted {
-            return None;
-        }
-        if self.updated.is_none() {
-            self.updated = self.original.clone();
-        }
-        if self.kind == ChangeKind::Synced {
-            self.kind = ChangeKind::Modified;
-        }
-        self.updated.as_mut()
     }
 }
 
@@ -102,7 +90,8 @@ pub(crate) struct ComposerState {
     pub change_sets: Vec<ChangeSet>,
     pub active_change_set: Option<String>,
     pub selected_ticket: Option<String>,
-    pub show_updated: bool,
+    pub view_mode: ComposerViewMode,
+    pub sources: HashMap<String, Ticket>,
     next_ticket: usize,
 }
 
@@ -116,7 +105,11 @@ pub(crate) enum ComposerAction {
     OpenChangeSet(String),
     CloseChangeSet,
     SelectTicket(Option<String>),
-    ShowUpdated(bool),
+    SetViewMode(ComposerViewMode),
+    SetSource {
+        id: String,
+        ticket: Ticket,
+    },
     CreateTicket {
         title: String,
         project_key: String,
@@ -129,7 +122,10 @@ pub(crate) enum ComposerAction {
     UpdateKind(TicketKind),
     UpdateStatus(String),
     UpdatePriority(String),
-    UpdateAssignee(String),
+    UpdateAssignee {
+        name: String,
+        account_id: String,
+    },
     CompleteSubmission {
         id: String,
         snapshot: SubmissionSnapshot,
@@ -154,7 +150,8 @@ impl ComposerState {
             change_sets,
             active_change_set: None,
             selected_ticket: None,
-            show_updated: true,
+            view_mode: ComposerViewMode::Changes,
+            sources: HashMap::new(),
             next_ticket,
         }
     }
@@ -204,7 +201,8 @@ impl ComposerState {
             ],
             active_change_set: None,
             selected_ticket: None,
-            show_updated: true,
+            view_mode: ComposerViewMode::Changes,
+            sources: HashMap::new(),
             next_ticket: 1,
         }
     }
@@ -212,6 +210,10 @@ impl ComposerState {
     pub(crate) fn active_set(&self) -> Option<&ChangeSet> {
         let active = self.active_change_set.as_deref()?;
         self.change_sets.iter().find(|set| set.id == active)
+    }
+
+    pub(crate) fn remote_queries_allowed(&self) -> bool {
+        self.active_set().is_some_and(|set| !set.closed)
     }
 
     pub(crate) fn selected_change(&self) -> Option<&TicketChange> {
@@ -223,12 +225,59 @@ impl ComposerState {
     }
 
     pub(crate) fn selected_ticket(&self) -> Option<&Ticket> {
-        self.selected_change()?.visible_ticket(self.show_updated)
+        self.ticket_for_change(self.selected_change()?)
+    }
+
+    pub(crate) fn selected_source(&self) -> Option<&Ticket> {
+        self.source_for_change(self.selected_change()?)
+    }
+
+    pub(crate) fn source_for_change<'a>(&'a self, change: &'a TicketChange) -> Option<&'a Ticket> {
+        let snapshot = || change.submitted.as_ref()?.original.as_ref();
+        if !self.remote_queries_allowed() {
+            return snapshot();
+        }
+        self.sources.get(&change.id).or_else(snapshot)
+    }
+
+    pub(crate) fn selected_changes(&self) -> Option<&Ticket> {
+        self.changes_for_change(self.selected_change()?)
+    }
+
+    pub(crate) fn changes_for_change<'a>(&'a self, change: &'a TicketChange) -> Option<&'a Ticket> {
+        change
+            .submitted
+            .as_ref()
+            .and_then(|snapshot| snapshot.updated.as_ref().or(snapshot.original.as_ref()))
+            .or(change.updated.as_ref())
+            .or_else(|| self.sources.get(&change.id))
+            .or(change.original.as_ref())
+    }
+
+    pub(crate) fn ticket_for_change<'a>(&'a self, change: &'a TicketChange) -> Option<&'a Ticket> {
+        match self.view_mode {
+            ComposerViewMode::Source => self
+                .source_for_change(change)
+                .or_else(|| self.changes_for_change(change)),
+            ComposerViewMode::Changes | ComposerViewMode::Diff => self.changes_for_change(change),
+        }
     }
 
     pub(crate) fn selected_is_editable(&self) -> bool {
-        self.selected_change()
-            .is_some_and(|change| change.can_edit(self.show_updated))
+        self.selected_change().is_some_and(|change| {
+            self.view_mode == ComposerViewMode::Changes && change.can_edit(true)
+        })
+    }
+
+    pub(crate) fn changes_ready_for_submit(&self, ids: &[String]) -> bool {
+        !ids.is_empty()
+            && ids.iter().all(|id| {
+                self.active_set()
+                    .and_then(|set| set.tickets.iter().find(|change| &change.id == id))
+                    .is_some_and(|change| {
+                        change.kind == ChangeKind::Added || self.sources.contains_key(id)
+                    })
+            })
     }
 
     pub(crate) fn dispatch(&mut self, action: ComposerAction) {
@@ -253,11 +302,14 @@ impl ComposerState {
                     .active_set()
                     .and_then(|set| set.tickets.first())
                     .map(|change| change.id.clone());
-                self.show_updated = true;
+                self.view_mode = ComposerViewMode::Changes;
             }
             ComposerAction::CloseChangeSet => self.close_change_set(),
             ComposerAction::SelectTicket(id) => self.selected_ticket = id,
-            ComposerAction::ShowUpdated(value) => self.show_updated = value,
+            ComposerAction::SetViewMode(mode) => self.view_mode = mode,
+            ComposerAction::SetSource { id, ticket } => {
+                self.sources.insert(id, ticket);
+            }
             ComposerAction::CreateTicket { title, project_key } => {
                 self.create_ticket(title, project_key)
             }
@@ -275,9 +327,9 @@ impl ComposerState {
             ComposerAction::UpdatePriority(value) => {
                 self.edit_selected(|ticket| ticket.priority = value)
             }
-            ComposerAction::UpdateAssignee(value) => self.edit_selected(|ticket| {
-                ticket.assignee = value;
-                ticket.assignee_account_id.clear();
+            ComposerAction::UpdateAssignee { name, account_id } => self.edit_selected(|ticket| {
+                ticket.assignee = name;
+                ticket.assignee_account_id = account_id;
             }),
             ComposerAction::CompleteSubmission { id, snapshot } => {
                 self.complete_submission(&id, snapshot)
@@ -326,13 +378,13 @@ impl ComposerState {
                 submitted: None,
             });
             self.selected_ticket = Some(id);
-            self.show_updated = true;
+            self.view_mode = ComposerViewMode::Changes;
         }
     }
 
     fn include_ticket(&mut self, ticket: Ticket) {
         let id = ticket.key.clone();
-        let Some(set) = self.active_set_mut() else {
+        let Some(set) = self.active_set() else {
             return;
         };
         if set.closed {
@@ -342,9 +394,13 @@ impl ComposerState {
             self.selected_ticket = Some(id);
             return;
         }
+        self.sources.insert(id.clone(), ticket);
+        let Some(set) = self.active_set_mut() else {
+            return;
+        };
         set.tickets.push(TicketChange {
             id: id.clone(),
-            original: Some(ticket),
+            original: None,
             updated: None,
             kind: ChangeKind::Synced,
             submitted: None,
@@ -378,10 +434,11 @@ impl ComposerState {
         if change.is_submitted() {
             return;
         }
-        if change.original.is_some() {
+        if change.kind != ChangeKind::Added {
+            change.original = None;
             change.updated = None;
             change.kind = ChangeKind::Deleted;
-            self.show_updated = false;
+            self.view_mode = ComposerViewMode::Changes;
         }
     }
 
@@ -402,13 +459,14 @@ impl ComposerState {
     }
 
     fn refresh_after_failed_submission(&mut self, id: &str, original: Ticket, updated: Ticket) {
+        self.sources.insert(id.to_owned(), original);
         let Some(change) = self
             .active_set_mut()
             .and_then(|set| set.tickets.iter_mut().find(|change| change.id == id))
         else {
             return;
         };
-        change.original = Some(original);
+        change.original = None;
         change.updated = Some(updated);
         change.kind = ChangeKind::Modified;
     }
@@ -417,11 +475,24 @@ impl ComposerState {
         let Some(selected) = self.selected_ticket.clone() else {
             return;
         };
-        let Some(ticket) = self
+        let source = self.sources.get(&selected).cloned();
+        let Some(change) = self
             .active_set_mut()
             .and_then(|set| set.tickets.iter_mut().find(|change| change.id == selected))
-            .and_then(TicketChange::editable_ticket)
         else {
+            return;
+        };
+        if change.kind == ChangeKind::Deleted || change.is_submitted() {
+            return;
+        }
+        if change.updated.is_none() {
+            change.updated = source.or_else(|| change.original.clone());
+            change.original = None;
+        }
+        if change.kind == ChangeKind::Synced {
+            change.kind = ChangeKind::Modified;
+        }
+        let Some(ticket) = change.updated.as_mut() else {
             return;
         };
         edit(ticket);
@@ -441,7 +512,7 @@ impl ComposerAction {
                 | Self::UpdateKind(_)
                 | Self::UpdateStatus(_)
                 | Self::UpdatePriority(_)
-                | Self::UpdateAssignee(_)
+                | Self::UpdateAssignee { .. }
         )
     }
 }

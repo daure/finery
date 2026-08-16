@@ -28,6 +28,25 @@ pub(crate) struct JiraProject {
     pub name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JiraOption {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JiraFieldOptions {
+    pub issue_types: Vec<JiraOption>,
+    pub statuses: Vec<JiraOption>,
+    pub priorities: Vec<JiraOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JiraAssignee {
+    pub account_id: String,
+    pub display_name: String,
+}
+
 pub(crate) enum SubmitBatchOutcome {
     Conflict(Vec<String>),
     Completed(Vec<TicketSubmitOutcome>),
@@ -114,6 +133,175 @@ pub(crate) fn search(settings: &AppSettings, query: &str) -> Result<Vec<Ticket>,
     }
     .map_err(|(_, error)| error)?;
     Ok(response.issues.into_iter().map(to_ticket).collect())
+}
+
+pub(crate) fn fetch(settings: &AppSettings, key: &str) -> Result<Ticket, String> {
+    let (client, base_url, email, token) = configured_client(settings)?;
+    fetch_ticket(&client, &base_url, &email, &token, key)
+}
+
+pub(crate) fn field_options(
+    settings: &AppSettings,
+    ticket: &Ticket,
+) -> Result<JiraFieldOptions, String> {
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let issue_types = if ticket.key.starts_with("NEW-") {
+        create_issue_types(&client, &base_url, &email, &token, &ticket.project_key)?
+    } else {
+        edit_issue_types(&client, &base_url, &email, &token, &ticket.key)?
+    };
+    let statuses = if ticket.key.starts_with("NEW-") {
+        vec![JiraOption {
+            id: ticket.status.clone(),
+            label: ticket.status.clone(),
+        }]
+    } else {
+        available_statuses(&client, &base_url, &email, &token, ticket)?
+    };
+    let priorities = priorities(&client, &base_url, &email, &token)?;
+    Ok(JiraFieldOptions {
+        issue_types,
+        statuses,
+        priorities,
+    })
+}
+
+pub(crate) fn assignees(
+    settings: &AppSettings,
+    project_key: &str,
+    query: &str,
+) -> Result<Vec<JiraAssignee>, String> {
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let response = client
+        .get(format!("{base_url}/rest/api/3/user/assignable/search"))
+        .basic_auth(email, Some(token))
+        .query(&[
+            ("project", project_key),
+            ("query", query),
+            ("maxResults", "50"),
+        ])
+        .send()
+        .map_err(|error| error.to_string())?;
+    response_json::<Vec<JiraUser>>(response).map(|users| {
+        users
+            .into_iter()
+            .map(|user| JiraAssignee {
+                account_id: user.account_id,
+                display_name: user.display_name,
+            })
+            .collect()
+    })
+}
+
+fn create_issue_types(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    project_key: &str,
+) -> Result<Vec<JiraOption>, String> {
+    let response = client
+        .get(format!("{base_url}/rest/api/3/issue/createmeta"))
+        .basic_auth(email, Some(token))
+        .query(&[("projectKeys", project_key)])
+        .send()
+        .map_err(|error| error.to_string())?;
+    let value = response_json::<Value>(response)?;
+    Ok(options_from_values(
+        value
+            .pointer("/projects/0/issuetypes")
+            .and_then(Value::as_array),
+    ))
+}
+
+fn edit_issue_types(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    key: &str,
+) -> Result<Vec<JiraOption>, String> {
+    let response = client
+        .get(format!("{base_url}/rest/api/3/issue/{key}/editmeta"))
+        .basic_auth(email, Some(token))
+        .send()
+        .map_err(|error| error.to_string())?;
+    let value = response_json::<Value>(response)?;
+    Ok(options_from_values(
+        value
+            .pointer("/fields/issuetype/allowedValues")
+            .and_then(Value::as_array),
+    ))
+}
+
+fn priorities(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+) -> Result<Vec<JiraOption>, String> {
+    let response = client
+        .get(format!("{base_url}/rest/api/3/priority/search"))
+        .basic_auth(email, Some(token))
+        .query(&[("maxResults", "100")])
+        .send()
+        .map_err(|error| error.to_string())?;
+    let value = response_json::<Value>(response)?;
+    Ok(options_from_values(
+        value.get("values").and_then(Value::as_array),
+    ))
+}
+
+fn available_statuses(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    ticket: &Ticket,
+) -> Result<Vec<JiraOption>, String> {
+    let response = client
+        .get(format!(
+            "{base_url}/rest/api/3/issue/{}/transitions",
+            ticket.key
+        ))
+        .basic_auth(email, Some(token))
+        .send()
+        .map_err(|error| error.to_string())?;
+    let transitions = response_json::<TransitionPage>(response)?;
+    let mut options = vec![JiraOption {
+        id: ticket.status.clone(),
+        label: ticket.status.clone(),
+    }];
+    options.extend(
+        transitions
+            .transitions
+            .into_iter()
+            .map(|transition| JiraOption {
+                id: transition.id,
+                label: transition.to.name,
+            }),
+    );
+    options.sort_by(|left, right| left.label.cmp(&right.label));
+    options.dedup_by(|left, right| left.label == right.label);
+    Ok(options)
+}
+
+fn options_from_values(values: Option<&Vec<Value>>) -> Vec<JiraOption> {
+    values
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            let label = value.get("name")?.as_str()?.to_owned();
+            Some(JiraOption {
+                id: value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&label)
+                    .to_owned(),
+                label,
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn projects(settings: &AppSettings) -> Result<Vec<JiraProject>, String> {
@@ -666,7 +854,7 @@ fn ticket_kind_name(kind: TicketKind) -> &'static str {
         TicketKind::Story => "Story",
         TicketKind::Task => "Task",
         TicketKind::Bug => "Bug",
-        TicketKind::Subtask => "Subtask",
+        TicketKind::Subtask => "Sub-task",
     }
 }
 

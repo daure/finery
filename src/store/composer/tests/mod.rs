@@ -1,22 +1,90 @@
 use serde_json::json;
 
 use super::{
-    ChangeKind, ComposerAction, ComposerState, SubmissionSnapshot,
+    ChangeKind, ComposerAction, ComposerState, ComposerViewMode, SubmissionSnapshot,
     jira_adf::{adf_to_markdown, markdown_to_adf},
 };
 
 #[test]
-fn first_edit_preserves_original_and_creates_updated_snapshot() {
+fn included_ticket_uses_live_source_until_first_edit_creates_changes() {
     let mut state = ComposerState::demo();
-    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
-    let original_title = state.selected_ticket().unwrap().title.clone();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    let ticket = super::demo_jira_tickets()[0].clone();
+    state.dispatch(ComposerAction::IncludeTicket(ticket));
+    let id = state.selected_ticket.clone().unwrap();
+    let change = state.selected_change().unwrap();
+    assert!(change.original.is_none());
+    assert!(change.updated.is_none());
+
+    let mut refreshed = state.selected_changes().unwrap().clone();
+    refreshed.title = "Latest from Jira".into();
+    state.dispatch(ComposerAction::SetSource {
+        id,
+        ticket: refreshed,
+    });
+    assert_eq!(state.selected_changes().unwrap().title, "Latest from Jira");
 
     state.dispatch(ComposerAction::UpdateTitle("A safer checkout".into()));
 
     let change = state.selected_change().unwrap();
-    assert_eq!(change.original.as_ref().unwrap().title, original_title);
+    assert!(change.original.is_none());
     assert_eq!(change.updated.as_ref().unwrap().title, "A safer checkout");
     assert_eq!(change.kind, ChangeKind::Modified);
+
+    let mut newer_source = state.selected_source().unwrap().clone();
+    newer_source.title = "Even newer Jira title".into();
+    let id = state.selected_ticket.clone().unwrap();
+    state.dispatch(ComposerAction::SetSource {
+        id,
+        ticket: newer_source,
+    });
+    assert_eq!(state.selected_changes().unwrap().title, "A safer checkout");
+}
+
+#[test]
+fn source_changes_and_diff_modes_use_their_expected_ticket_values() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    let id = state.selected_ticket.clone().unwrap();
+    let mut source = state.selected_changes().unwrap().clone();
+    source.title = "Latest from Jira".into();
+    state.dispatch(ComposerAction::SetSource { id, ticket: source });
+
+    state.dispatch(ComposerAction::SetViewMode(ComposerViewMode::Source));
+    assert_eq!(state.selected_ticket().unwrap().title, "Latest from Jira");
+    assert!(!state.selected_is_editable());
+
+    state.dispatch(ComposerAction::SetViewMode(ComposerViewMode::Changes));
+    assert_eq!(state.selected_ticket().unwrap().title, "Latest from Jira");
+    assert!(state.selected_is_editable());
+
+    state.dispatch(ComposerAction::SetViewMode(ComposerViewMode::Diff));
+    assert_eq!(state.selected_ticket().unwrap().title, "Latest from Jira");
+    assert!(!state.selected_is_editable());
+}
+
+#[test]
+fn closed_change_sets_use_submission_snapshots_and_forbid_remote_queries() {
+    let mut state = ComposerState::demo();
+    let change = &mut state.change_sets[0].tickets[0];
+    let mut snapshot_source = change.original.clone().unwrap();
+    snapshot_source.title = "Source at submit".into();
+    let mut snapshot_changes = snapshot_source.clone();
+    snapshot_changes.title = "Changes at submit".into();
+    change.submitted = Some(SubmissionSnapshot {
+        original: Some(snapshot_source.clone()),
+        updated: Some(snapshot_changes),
+    });
+    state.change_sets[0].closed = true;
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    let id = state.selected_ticket.clone().unwrap();
+    let mut stale_live_source = snapshot_source;
+    stale_live_source.title = "Later Jira value".into();
+    state.sources.insert(id, stale_live_source);
+    state.dispatch(ComposerAction::SetViewMode(ComposerViewMode::Source));
+
+    assert!(!state.remote_queries_allowed());
+    assert_eq!(state.selected_ticket().unwrap().title, "Source at submit");
 }
 
 #[test]
@@ -46,15 +114,19 @@ fn submitted_tickets_keep_snapshots_and_close_set_when_all_are_done() {
 }
 
 #[test]
-fn deleting_ticket_keeps_original_read_only_and_visible() {
+fn deleting_ticket_keeps_live_source_read_only_and_visible() {
     let mut state = ComposerState::demo();
     state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    let id = state.selected_ticket.clone().unwrap();
+    let source = state.selected_changes().unwrap().clone();
+    state.dispatch(ComposerAction::SetSource { id, ticket: source });
     state.dispatch(ComposerAction::MarkTicketDeleted("FIN-142".into()));
 
     let change = state.selected_change().unwrap();
     assert_eq!(change.kind, ChangeKind::Deleted);
-    assert!(change.original.is_some());
+    assert!(change.original.is_none());
     assert!(change.updated.is_none());
+    assert!(state.selected_changes().is_some());
     assert!(!state.selected_is_editable());
 }
 

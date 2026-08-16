@@ -1,11 +1,19 @@
+use std::time::Duration;
+
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use tuicore::{
-    EventCtx, EventRoute, ExternalEditorResponse, FocusCtx, FocusId, FocusRequest, HotkeyEvent,
-    Key, KeyEvent, KeyModifiers, LayoutCtx, RenderCtx, TuiEvent, TuiNode,
+    AnimationSettings, EventCtx, EventRoute, ExternalEditorResponse, FocusCtx, FocusId,
+    FocusRequest, HotkeyEvent, Key, KeyEvent, KeyModifiers, LayoutCtx, RenderCtx,
+    TabsBodyBorderStyle, TuiEvent, TuiNode,
 };
 
 use super::page::ComposerPage;
-use crate::{service::AppService, store::composer::ComposerState};
+use crate::{
+    service::AppService,
+    store::composer::{ComposerState, ComposerViewMode, TicketKind},
+};
+
+const TEST_WIDTH: u16 = 96;
 
 fn composer_page() -> ComposerPage {
     let service = AppService::for_tests();
@@ -14,7 +22,11 @@ fn composer_page() -> ComposerPage {
 }
 
 fn render_text(page: &mut ComposerPage) -> String {
-    let area = Rect::new(0, 0, 120, 40);
+    render_text_at(page, TEST_WIDTH)
+}
+
+fn render_text_at(page: &mut ComposerPage, width: u16) -> String {
+    let area = Rect::new(0, 0, width, 40);
     page.layout(area, &mut LayoutCtx::new());
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
     terminal
@@ -34,7 +46,7 @@ fn render_text(page: &mut ComposerPage) -> String {
 
 fn open_change_set(page: &mut ComposerPage, navigate_down: usize) -> EventCtx<()> {
     let mut layout = LayoutCtx::new();
-    page.layout(Rect::new(0, 0, 120, 40), &mut layout);
+    page.layout(Rect::new(0, 0, TEST_WIDTH, 40), &mut layout);
     let target = layout.focus_targets().first().unwrap().clone();
     page.dispatch_focus(&target, true, &mut FocusCtx::default());
     for _ in 0..navigate_down {
@@ -62,7 +74,7 @@ fn focus(page: &mut ComposerPage, id: &str) -> tuicore::FocusTarget {
 
 fn target(page: &mut ComposerPage, id: &str) -> tuicore::FocusTarget {
     let mut layout = LayoutCtx::new();
-    page.layout(Rect::new(0, 0, 120, 40), &mut layout);
+    page.layout(Rect::new(0, 0, TEST_WIDTH, 40), &mut layout);
     layout
         .focus_targets()
         .iter()
@@ -89,6 +101,8 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     assert!(text.contains("Change sets > Checkout reliability"));
     assert!(text.contains("New ticket"));
     assert!(text.contains("Submit"));
+    assert!(text.contains("Refresh"));
+    assert!(text.contains("Changes"));
     assert!(text.contains("󰄱"));
     assert!(text.contains("Keep checkout state across retries"));
     assert!(text.contains("Description"));
@@ -108,6 +122,8 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     let description_hotkeys = target(&mut page, "textarea");
     assert!(description_hotkeys.hotkey_sequences.is_empty());
 
+    let source = page.selected_changes();
+    page.set_selected_source(source);
     let tickets = focus(&mut page, "data-view");
     page.dispatch_event(
         &EventRoute::new(tickets.path.clone()),
@@ -115,12 +131,18 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
         &mut EventCtx::default(),
     );
     let mut layout = LayoutCtx::new();
-    page.layout(Rect::new(0, 0, 120, 40), &mut layout);
+    page.layout(Rect::new(0, 0, TEST_WIDTH, 40), &mut layout);
     assert!(
         layout
             .focus_targets()
             .iter()
             .any(|target| target.hotkey_sequences == ["shift+s"])
+    );
+    assert!(
+        layout
+            .focus_targets()
+            .iter()
+            .any(|target| target.hotkey_sequences == ["shift+r"])
     );
     page.dispatch_focus(&tickets, false, &mut FocusCtx::default());
     let title = focus(&mut page, "input");
@@ -165,7 +187,7 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     );
     assert!(render_text(&mut page).contains("600 WPM"));
     let reader = focus(&mut page, "speed-reader");
-    assert_eq!(reader.area.x + reader.area.width / 2, 60);
+    assert_eq!(reader.area.x + reader.area.width / 2, TEST_WIDTH / 2);
     assert_eq!(reader.area.y + reader.area.height / 2, 20);
     page.dispatch_event(
         &EventRoute::new(reader.path),
@@ -304,6 +326,138 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     assert!(add_menu.contains("Add existing"));
     assert!(!add_menu.contains("+ Add ticket"));
     assert!(!add_menu.contains("Select..."));
+}
+
+#[test]
+fn diff_mode_uses_submission_snapshots_and_submitted_rows_use_disabled_glyph() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 0);
+    page.submit_selected_locally();
+    page.set_view_mode(ComposerViewMode::Diff);
+
+    let text = render_text(&mut page);
+
+    assert!(text.contains("󱋭"));
+    assert!(text.contains("Diff"));
+    assert!(!text.contains("Source"));
+    assert!(!text.contains("Changes"));
+}
+
+#[test]
+fn refreshed_source_updates_ticket_row_title_issue_type_and_title_field() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 0);
+    let mut refreshed = page.selected_changes();
+    refreshed.title = "Refreshed KAN-28 title".into();
+    refreshed.kind = TicketKind::Bug;
+    page.set_selected_source(refreshed);
+    page.set_view_mode(ComposerViewMode::Source);
+
+    let text = render_text(&mut page);
+
+    assert!(text.matches("Refreshed KAN-28 title").count() >= 2);
+    assert!(text.contains(""));
+}
+
+#[test]
+fn source_fetch_keeps_scheduler_polling_until_response_arrives() {
+    tuicore::init();
+    let mut page = composer_page();
+    let open = open_change_set(&mut page, 0);
+    assert!(open.tick_requested());
+
+    let mut layout = LayoutCtx::new();
+    page.layout(Rect::new(0, 0, TEST_WIDTH, 40), &mut layout);
+    let refresh = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.hotkey_sequences == ["shift+r"])
+        .unwrap();
+    let mut refresh_ctx = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(refresh.path.clone()),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("shift+r".into())),
+        &mut refresh_ctx,
+    );
+    assert!(refresh_ctx.tick_requested());
+
+    let settings = AnimationSettings {
+        enabled: false,
+        ..AnimationSettings::default()
+    };
+    let tick = page.tick(Duration::ZERO, settings);
+
+    assert!(
+        tick.next_tick
+            .is_some_and(|delay| delay <= Duration::from_millis(50))
+    );
+}
+
+#[test]
+fn local_issue_type_change_updates_ticket_row() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 0);
+
+    page.update_selected_kind(TicketKind::Bug);
+
+    assert!(render_text(&mut page).contains(""));
+}
+
+#[test]
+fn responsive_details_use_tabs_when_narrow_and_seventy_thirty_panels_when_wide() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 0);
+
+    let mut narrow = LayoutCtx::new();
+    page.layout(Rect::new(0, 0, 96, 40), &mut narrow);
+    assert!(
+        narrow
+            .focus_targets()
+            .iter()
+            .any(|target| target.id == FocusId::new("tabs"))
+    );
+
+    let mut wide = LayoutCtx::new();
+    page.layout(Rect::new(0, 0, 120, 40), &mut wide);
+    assert!(
+        !wide
+            .focus_targets()
+            .iter()
+            .any(|target| target.id == FocusId::new("tabs"))
+    );
+    let (description, properties) = page.detail_panel_areas();
+    assert_eq!((description.width, properties.width), (84, 36));
+    for hotkey in ["it", "st", "pri", "as"] {
+        assert!(wide.focus_targets().iter().any(|target| {
+            target
+                .hotkey_sequences
+                .iter()
+                .any(|sequence| sequence == hotkey)
+        }));
+    }
+}
+
+#[test]
+fn mode_control_is_compact_and_source_uses_dashed_narrow_border() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 0);
+    page.set_view_mode(ComposerViewMode::Source);
+    let mut layout = LayoutCtx::new();
+    page.layout(Rect::new(0, 0, TEST_WIDTH, 40), &mut layout);
+
+    let mode = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.hotkey_sequences == ["shift+m"])
+        .unwrap();
+    assert!(mode.area.width < TEST_WIDTH / 2);
+    assert_eq!(page.narrow_border_style(), TabsBodyBorderStyle::Dashed);
+    assert_eq!(page.ticket_detail_areas().0.height, 9);
 }
 
 #[test]

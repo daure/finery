@@ -14,6 +14,7 @@ use tuicore::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ToolbarEvent {
     NewTicket,
+    Refresh,
     Submit,
 }
 
@@ -22,19 +23,21 @@ pub(super) type ToolbarEvents = Rc<RefCell<Vec<ToolbarEvent>>>;
 pub(super) fn toolbar(
     events: ToolbarEvents,
     can_change: Rc<Cell<bool>>,
+    can_refresh: Rc<Cell<bool>>,
     can_submit: Rc<Cell<bool>>,
 ) -> Flex<()> {
     let new_events = Rc::clone(&events);
     let submit_events = events;
-    Flex::row()
-        .justify(MainAlign::SpaceBetween)
+    let refresh_events = Rc::clone(&submit_events);
+    let actions = Flex::row()
+        .gap(1)
         .child(
-            "new-ticket",
+            "refresh",
             BoundButton::new(
-                Button::new("New ticket")
-                    .hotkey("shift+n")
-                    .on_press(move || new_events.borrow_mut().push(ToolbarEvent::NewTicket)),
-                can_change,
+                Button::new("Refresh")
+                    .hotkey("shift+r")
+                    .on_press(move || refresh_events.borrow_mut().push(ToolbarEvent::Refresh)),
+                can_refresh,
             ),
             FlexItem::fit_content(),
         )
@@ -47,7 +50,20 @@ pub(super) fn toolbar(
                 can_submit,
             ),
             FlexItem::fit_content(),
+        );
+    Flex::row()
+        .justify(MainAlign::SpaceBetween)
+        .child(
+            "new-ticket",
+            BoundButton::new(
+                Button::new("New ticket")
+                    .hotkey("shift+n")
+                    .on_press(move || new_events.borrow_mut().push(ToolbarEvent::NewTicket)),
+                can_change,
+            ),
+            FlexItem::fit_content(),
         )
+        .child("actions", actions, FlexItem::fit_content())
 }
 
 struct BoundButton {

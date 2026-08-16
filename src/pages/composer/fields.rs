@@ -6,12 +6,13 @@ use std::{
 
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
-    AnimationSettings, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId,
-    FocusTarget, InputChrome, Language, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
-    LifecycleCtx, RenderCtx, TextInput, TextareaInput, TickResult, Toggle, TuiEvent, TuiNode,
+    AnimationSettings, DiffStyle, DiffViewer, Dropdown, DropdownLabelPosition, DropdownVariant,
+    EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget, InputChrome, Language,
+    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, TextInput,
+    TextareaInput, TickResult, TuiEvent, TuiNode,
 };
 
-use crate::store::composer::{ComposerAction, ComposerState, TicketKind};
+use crate::store::composer::{ComposerAction, ComposerState, ComposerViewMode};
 
 type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
 
@@ -19,6 +20,7 @@ pub(super) type PendingDescriptionActions = Rc<RefCell<Vec<DescriptionAction>>>;
 pub(super) type DescriptionEditRequest = Rc<Cell<bool>>;
 
 pub(super) enum DescriptionAction {
+    ShowChanges,
     Focus { edit: bool },
     OpenExternalEditor(String),
     OpenSpeedReader(String),
@@ -28,20 +30,12 @@ pub(super) enum DescriptionAction {
 #[derive(Clone, Copy)]
 enum TextField {
     Title,
-    Kind,
-    Status,
-    Priority,
-    Assignee,
 }
 
 impl TextField {
     fn label(self) -> &'static str {
         match self {
             Self::Title => "Title",
-            Self::Kind => "Issue type",
-            Self::Status => "Status",
-            Self::Priority => "Priority",
-            Self::Assignee => "Assignee",
         }
     }
 
@@ -51,26 +45,12 @@ impl TextField {
         };
         match self {
             Self::Title => ticket.title.clone(),
-            Self::Kind => format!("{:?}", ticket.kind),
-            Self::Status => ticket.status.clone(),
-            Self::Priority => ticket.priority.clone(),
-            Self::Assignee => ticket.assignee.clone(),
         }
     }
 
     fn action(self, value: String) -> ComposerAction {
         match self {
             Self::Title => ComposerAction::UpdateTitle(value),
-            Self::Kind => ComposerAction::UpdateKind(match value.to_ascii_lowercase().as_str() {
-                "epic" => TicketKind::Epic,
-                "story" => TicketKind::Story,
-                "bug" => TicketKind::Bug,
-                "subtask" | "sub-task" => TicketKind::Subtask,
-                _ => TicketKind::Task,
-            }),
-            Self::Status => ComposerAction::UpdateStatus(value),
-            Self::Priority => ComposerAction::UpdatePriority(value),
-            Self::Assignee => ComposerAction::UpdateAssignee(value),
         }
     }
 }
@@ -109,10 +89,10 @@ impl BoundTextField {
         let state = self.state.borrow();
         let value = self.field.value(&state);
         let editable = state.selected_is_editable();
-        let mode = if state.show_updated {
-            "Updated"
-        } else {
-            "Original · read-only"
+        let mode = match state.view_mode {
+            ComposerViewMode::Source => "Source · read-only",
+            ComposerViewMode::Changes => "Changes",
+            ComposerViewMode::Diff => "Diff · read-only",
         };
         let key = state
             .selected_ticket()
@@ -122,7 +102,8 @@ impl BoundTextField {
         } else {
             InputChrome::panel(self.field.label()).top_right(mode)
         };
-        let value_changed = !self.input.insert_mode() && self.input.current_value() != value;
+        let value_changed =
+            (!self.input.insert_mode() || !editable) && self.input.current_value() != value;
         let changed = value_changed || editable == self.input.is_disabled();
         if value_changed {
             self.input.set_value(value);
@@ -192,6 +173,7 @@ pub(super) struct BoundDescription {
     state: Rc<RefCell<ComposerState>>,
     edit_request: DescriptionEditRequest,
     input: TextareaInput,
+    diff: DiffViewer,
 }
 
 impl BoundDescription {
@@ -213,6 +195,11 @@ impl BoundDescription {
             state,
             edit_request,
             input,
+            diff: DiffViewer::new("", "")
+                .labels("Source", "Changes")
+                .style(DiffStyle::Word)
+                .show_headers(false)
+                .wrap(true),
         };
         bound.sync();
         bound
@@ -223,8 +210,33 @@ impl BoundDescription {
         let value = state
             .selected_ticket()
             .map_or("", |ticket| ticket.description.as_str());
+        let (source, changes) = state.selected_change().map_or(("", ""), |change| {
+            if let Some(snapshot) = change.submitted.as_ref() {
+                (
+                    snapshot
+                        .original
+                        .as_ref()
+                        .map_or("", |ticket| ticket.description.as_str()),
+                    snapshot
+                        .updated
+                        .as_ref()
+                        .map_or("", |ticket| ticket.description.as_str()),
+                )
+            } else {
+                (
+                    state
+                        .selected_source()
+                        .map_or("", |ticket| ticket.description.as_str()),
+                    state
+                        .selected_changes()
+                        .map_or("", |ticket| ticket.description.as_str()),
+                )
+            }
+        });
+        self.diff.set_texts(source, changes);
         let editable = state.selected_is_editable();
-        let value_changed = !self.input.insert_mode() && self.input.current_value() != value;
+        let value_changed =
+            (!self.input.insert_mode() || !editable) && self.input.current_value() != value;
         let changed = value_changed || editable == self.input.is_disabled();
         if value_changed {
             self.input.set_value(value);
@@ -236,7 +248,11 @@ impl BoundDescription {
 
 impl TuiNode for BoundDescription {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
-        self.input.measure(proposal)
+        if self.state.borrow().view_mode == ComposerViewMode::Diff {
+            <DiffViewer as TuiNode<()>>::measure(&self.diff, proposal)
+        } else {
+            self.input.measure(proposal)
+        }
     }
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.sync();
@@ -244,13 +260,25 @@ impl TuiNode for BoundDescription {
             self.input.move_cursor_to_end();
             self.input.set_insert_mode(true);
         }
-        self.input.layout(area, ctx)
+        if self.state.borrow().view_mode == ComposerViewMode::Diff {
+            <DiffViewer as TuiNode<()>>::layout(&mut self.diff, area, ctx)
+        } else {
+            self.input.layout(area, ctx)
+        }
     }
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, _ctx: &mut RenderCtx<'a>) {
-        self.input.render(frame, area);
+        if self.state.borrow().view_mode == ComposerViewMode::Diff {
+            self.diff.render(frame, area);
+        } else {
+            self.input.render(frame, area);
+        }
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        self.input.event(event, ctx)
+        if self.state.borrow().view_mode == ComposerViewMode::Diff {
+            self.diff.event(event, ctx)
+        } else {
+            self.input.event(event, ctx)
+        }
     }
     fn dispatch_event(
         &mut self,
@@ -258,11 +286,20 @@ impl TuiNode for BoundDescription {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        self.input.dispatch_event(route, event, ctx)
+        if self.state.borrow().view_mode == ComposerViewMode::Diff {
+            self.diff.dispatch_event(route, event, ctx)
+        } else {
+            self.input.dispatch_event(route, event, ctx)
+        }
     }
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let changed = self.sync();
-        self.input.tick(dt, settings).merge(if changed {
+        let active = if self.state.borrow().view_mode == ComposerViewMode::Diff {
+            <DiffViewer as TuiNode<()>>::tick(&mut self.diff, dt, settings)
+        } else {
+            self.input.tick(dt, settings)
+        };
+        active.merge(if changed {
             TickResult::CHANGED
         } else {
             TickResult::IDLE
@@ -270,93 +307,96 @@ impl TuiNode for BoundDescription {
     }
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
         self.input.focus(target, focused, ctx);
+        self.diff.focus(target, focused, ctx);
     }
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
         self.input.dispatch_focus(target, focused, ctx);
+        self.diff.dispatch_focus(target, focused, ctx);
     }
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.input.init(ctx);
+        self.diff.init(ctx);
     }
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.input.mount(ctx);
+        self.diff.mount(ctx);
     }
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.diff.unmount(ctx);
         self.input.unmount(ctx);
     }
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.diff.destroy(ctx);
         self.input.destroy(ctx);
     }
 }
 
-pub(super) fn properties_form(
+pub(super) struct BoundViewMode {
     state: Rc<RefCell<ComposerState>>,
-    pending: PendingActions,
-) -> Flex<()> {
-    Flex::column()
-        .child(
-            "kind",
-            BoundTextField::new(Rc::clone(&state), Rc::clone(&pending), TextField::Kind),
-            FlexItem::fixed(3),
-        )
-        .child(
-            "status",
-            BoundTextField::new(Rc::clone(&state), Rc::clone(&pending), TextField::Status),
-            FlexItem::fixed(3),
-        )
-        .child(
-            "priority",
-            BoundTextField::new(Rc::clone(&state), Rc::clone(&pending), TextField::Priority),
-            FlexItem::fixed(3),
-        )
-        .child(
-            "assignee",
-            BoundTextField::new(state, pending, TextField::Assignee),
-            FlexItem::fixed(3),
-        )
+    dropdown: Dropdown<ComposerViewMode, ComposerViewMode>,
 }
 
-pub(super) struct BoundVersionToggle {
-    state: Rc<RefCell<ComposerState>>,
-    toggle: Toggle,
-}
-
-impl BoundVersionToggle {
+impl BoundViewMode {
     pub(super) fn new(state: Rc<RefCell<ComposerState>>, pending: PendingActions) -> Self {
         let sink = Rc::clone(&pending);
-        let toggle = Toggle::new("Original / Updated")
-            .hotkey("v")
-            .on_change(move |value| sink.borrow_mut().push(ComposerAction::ShowUpdated(value)));
-        let mut bound = Self { state, toggle };
+        let dropdown = Dropdown::single(
+            [
+                ComposerViewMode::Source,
+                ComposerViewMode::Changes,
+                ComposerViewMode::Diff,
+            ],
+            |mode| *mode,
+            |mode| match mode {
+                ComposerViewMode::Source => "Source".into(),
+                ComposerViewMode::Changes => "Changes".into(),
+                ComposerViewMode::Diff => "Diff".into(),
+            },
+        )
+        .selected_one(ComposerViewMode::Changes)
+        .variant(DropdownVariant::Filled)
+        .label("View")
+        .label_position(DropdownLabelPosition::Inline)
+        .hotkey("shift+m")
+        .on_select(move |modes| {
+            if let Some(mode) = modes.first() {
+                sink.borrow_mut().push(ComposerAction::SetViewMode(*mode));
+            }
+        });
+        let mut bound = Self { state, dropdown };
         bound.sync();
         bound
     }
 
     fn sync(&mut self) -> bool {
-        let value = self.state.borrow().show_updated;
-        let changed = value != self.toggle.is_checked();
-        self.toggle.set_value(value);
-        self.toggle.set_label(if value {
-            "Original / [Updated]"
-        } else {
-            "[Original] / Updated"
-        });
+        let value = self.state.borrow().view_mode;
+        let changed = self.dropdown.selected_id() != Some(value);
+        if changed {
+            self.dropdown.set_selected_one(value);
+        }
         changed
     }
 }
 
-impl TuiNode for BoundVersionToggle {
+impl TuiNode for BoundViewMode {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
-        self.toggle.measure(proposal)
+        <Dropdown<ComposerViewMode, ComposerViewMode> as TuiNode<()>>::measure(
+            &self.dropdown,
+            proposal,
+        )
     }
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.sync();
-        self.toggle.layout(area, ctx)
+        <Dropdown<ComposerViewMode, ComposerViewMode> as TuiNode<()>>::layout(
+            &mut self.dropdown,
+            area,
+            ctx,
+        )
     }
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, _ctx: &mut RenderCtx<'a>) {
-        self.toggle.render(frame, area);
+        self.dropdown.render(frame, area, _ctx);
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        self.toggle.event(event, ctx)
+        self.dropdown.event(event, ctx)
     }
     fn dispatch_event(
         &mut self,
@@ -364,32 +404,37 @@ impl TuiNode for BoundVersionToggle {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        self.toggle.dispatch_event(route, event, ctx)
+        self.dropdown.dispatch_event(route, event, ctx)
     }
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let changed = self.sync();
-        self.toggle.tick(dt, settings).merge(if changed {
+        <Dropdown<ComposerViewMode, ComposerViewMode> as TuiNode<()>>::tick(
+            &mut self.dropdown,
+            dt,
+            settings,
+        )
+        .merge(if changed {
             TickResult::CHANGED
         } else {
             TickResult::IDLE
         })
     }
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
-        self.toggle.focus(target, focused, ctx);
+        self.dropdown.focus(target, focused, ctx);
     }
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
-        self.toggle.dispatch_focus(target, focused, ctx);
+        self.dropdown.dispatch_focus(target, focused, ctx);
     }
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
-        self.toggle.init(ctx);
+        self.dropdown.init(ctx);
     }
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
-        self.toggle.mount(ctx);
+        self.dropdown.mount(ctx);
     }
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
-        self.toggle.unmount(ctx);
+        self.dropdown.unmount(ctx);
     }
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
-        self.toggle.destroy(ctx);
+        self.dropdown.destroy(ctx);
     }
 }

@@ -5,22 +5,37 @@ use ratatui::{
     layout::{Constraint, Rect},
 };
 use tuicore::{
-    AnimationSettings, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusRequest,
-    FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx,
-    SeasonalEmptyState, Split, Tab, Tabs, TabsBodyBorderStyle, TabsVariant, TickResult, TuiEvent,
-    TuiNode,
+    AnimationSettings, AxisProposal, BorderKind, EventCtx, EventOutcome, EventRoute, Flex,
+    FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, LayoutCtx, LayoutProposal,
+    LayoutResult, LayoutSizeHint, LifecycleCtx, Panel, PanelHost, RenderCtx, SeasonalEmptyState,
+    Split, Tab, Tabs, TabsBodyBorderStyle, TabsVariant, TickResult, TuiEvent, TuiNode,
 };
 
-use crate::store::composer::{ChangeKind, ComposerAction, ComposerState};
+use crate::{
+    service::AppService,
+    store::composer::{ChangeKind, ComposerAction, ComposerState, ComposerViewMode},
+};
 
 use super::fields::{
-    BoundDescription, BoundTextField, BoundVersionToggle, DescriptionAction,
-    DescriptionEditRequest, PendingDescriptionActions, properties_form,
+    BoundDescription, BoundTextField, BoundViewMode, DescriptionAction, DescriptionEditRequest,
+    PendingDescriptionActions,
 };
+use super::property_fields::PropertyFields;
 
 type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
-type TicketFields = Split<BoundTextField, Tabs<()>>;
-type TicketDetail = Split<BoundVersionToggle, TicketFields>;
+type WideDescription = PanelHost<BoundDescription, ()>;
+type WideProperties = PanelHost<PropertyFields, ()>;
+type WideDetails = Split<WideDescription, WideProperties>;
+type TicketFields = Split<BoundTextField, ResponsiveDetails>;
+type TicketDetail = Split<Flex<()>, TicketFields>;
+
+const WIDE_BREAKPOINT: u16 = 100;
+
+struct ResponsiveDetails {
+    narrow: Tabs<()>,
+    wide: WideDetails,
+    is_wide: bool,
+}
 
 pub(super) struct DetailPane {
     state: Rc<RefCell<ComposerState>>,
@@ -36,19 +51,20 @@ impl DetailPane {
         state: Rc<RefCell<ComposerState>>,
         pending: PendingActions,
         description_actions: PendingDescriptionActions,
+        service: AppService,
     ) -> Self {
         let title = BoundTextField::title(Rc::clone(&state), Rc::clone(&pending));
         let description_edit_request = Rc::new(std::cell::Cell::new(false));
-        let description = BoundDescription::new(
+        let narrow_description = BoundDescription::new(
             Rc::clone(&state),
             Rc::clone(&pending),
             Rc::clone(&description_edit_request),
         );
         let tabs = Tabs::new(vec![
-            Tab::new("Description", description).hotkey("shift+d"),
+            Tab::new("Description", narrow_description).hotkey("shift+d"),
             Tab::new(
                 "Properties",
-                properties_form(Rc::clone(&state), Rc::clone(&pending)),
+                PropertyFields::new(Rc::clone(&state), Rc::clone(&pending), service.clone()),
             )
             .hotkey("shift+p"),
         ])
@@ -78,15 +94,65 @@ impl DetailPane {
         )
         .variant(TabsVariant::Underline)
         .bordered(true);
+        let wide_description = Panel::new()
+            .top_left("Description")
+            .hotkey("shift+d")
+            .action_hotkey(
+                "dd",
+                panel_description_action(
+                    Rc::clone(&state),
+                    Rc::clone(&description_actions),
+                    DescriptionTabAction::Focus,
+                ),
+            )
+            .action_hotkey(
+                "do",
+                panel_description_action(
+                    Rc::clone(&state),
+                    Rc::clone(&description_actions),
+                    DescriptionTabAction::Editor,
+                ),
+            )
+            .action_hotkey(
+                "ds",
+                panel_description_action(
+                    Rc::clone(&state),
+                    Rc::clone(&description_actions),
+                    DescriptionTabAction::SpeedReader,
+                ),
+            )
+            .host(BoundDescription::new(
+                Rc::clone(&state),
+                Rc::clone(&pending),
+                Rc::clone(&description_edit_request),
+            ));
+        let wide_properties =
+            Panel::new()
+                .top_left("Properties")
+                .hotkey("shift+p")
+                .host(PropertyFields::new(
+                    Rc::clone(&state),
+                    Rc::clone(&pending),
+                    service.clone(),
+                ));
+        let details = ResponsiveDetails {
+            narrow: tabs,
+            wide: Split::horizontal(wide_description, wide_properties).ratio(70, 30),
+            is_wide: false,
+        };
         let fields =
-            Split::vertical(title, tabs).constraints(Constraint::Length(3), Constraint::Fill(1));
-        let version = BoundVersionToggle::new(Rc::clone(&state), Rc::clone(&pending));
+            Split::vertical(title, details).constraints(Constraint::Length(3), Constraint::Fill(1));
+        let mode = Flex::row().child(
+            "mode",
+            BoundViewMode::new(Rc::clone(&state), Rc::clone(&pending)),
+            FlexItem::fit_content(),
+        );
         Self {
             state,
             description_actions,
             description_edit_request,
             external_editor_pending: false,
-            detail: Split::vertical(version, fields)
+            detail: Split::vertical(mode, fields)
                 .constraints(Constraint::Length(1), Constraint::Fill(1)),
             empty: SeasonalEmptyState::new("No issue selected"),
         }
@@ -116,11 +182,15 @@ impl DetailPane {
             .collect::<Vec<_>>();
         let mut deferred = Vec::new();
         for action in actions {
-            let tabs = self.detail.second_mut().second_mut();
+            let details = self.detail.second_mut().second_mut();
             match action {
+                DescriptionAction::ShowChanges => self
+                    .state
+                    .borrow_mut()
+                    .dispatch(ComposerAction::SetViewMode(ComposerViewMode::Changes)),
                 DescriptionAction::Focus { edit } => {
                     self.description_edit_request.set(edit);
-                    tabs.select_index(0);
+                    details.focus_description();
                     ctx.focus(FocusRequest::Target(FocusId::new("textarea")));
                     ctx.request_layout();
                     ctx.request_redraw();
@@ -137,7 +207,7 @@ impl DetailPane {
 
     pub(super) fn focus_description(&mut self, edit: bool, ctx: &mut EventCtx<()>) {
         self.description_edit_request.set(edit);
-        self.detail.second_mut().second_mut().select_index(0);
+        self.detail.second_mut().second_mut().focus_description();
         ctx.focus(FocusRequest::Target(FocusId::new("textarea")));
         ctx.request_layout();
         ctx.request_redraw();
@@ -149,14 +219,12 @@ impl DetailPane {
         let deleted = state
             .selected_change()
             .is_some_and(|change| change.kind == ChangeKind::Deleted);
-        let tabs = self.detail.second_mut().second_mut();
-        tabs.set_action_hotkey_enabled("dd", !deleted);
-        tabs.set_action_hotkey_enabled("do", editable);
-        tabs.set_body_border_style(if deleted {
-            TabsBodyBorderStyle::Dashed
-        } else {
-            TabsBodyBorderStyle::Solid
-        });
+        let details = self.detail.second_mut().second_mut();
+        details.set_action_hotkeys(!deleted, editable);
+        let submitted = state
+            .selected_change()
+            .is_some_and(|change| change.is_submitted());
+        details.set_dashed(deleted || submitted || state.view_mode == ComposerViewMode::Source);
     }
 
     fn handle_external_editor(
@@ -181,6 +249,147 @@ impl DetailPane {
         ctx.stop_propagation();
         Some(EventOutcome::Handled)
     }
+
+    #[cfg(test)]
+    pub(super) fn detail_panel_areas(&self) -> (Rect, Rect) {
+        self.detail.second().second().wide_areas()
+    }
+
+    #[cfg(test)]
+    pub(super) fn narrow_border_style(&self) -> TabsBodyBorderStyle {
+        self.detail.second().second().narrow_border_style()
+    }
+}
+
+impl ResponsiveDetails {
+    fn active(&self) -> &dyn TuiNode<()> {
+        if self.is_wide {
+            &self.wide
+        } else {
+            &self.narrow
+        }
+    }
+
+    fn active_mut(&mut self) -> &mut dyn TuiNode<()> {
+        if self.is_wide {
+            &mut self.wide
+        } else {
+            &mut self.narrow
+        }
+    }
+
+    fn focus_description(&mut self) {
+        if !self.is_wide {
+            self.narrow.select_index(0);
+        }
+    }
+
+    fn set_action_hotkeys(&mut self, description: bool, editor: bool) {
+        self.narrow.set_action_hotkey_enabled("dd", description);
+        self.narrow.set_action_hotkey_enabled("do", editor);
+    }
+
+    fn set_dashed(&mut self, dashed: bool) {
+        self.narrow.set_body_border_style(if dashed {
+            TabsBodyBorderStyle::Dashed
+        } else {
+            TabsBodyBorderStyle::Solid
+        });
+        let border = if dashed {
+            BorderKind::AsciiDashed
+        } else {
+            tuicore::preset().border()
+        };
+        self.wide.first_mut().panel_mut().set_border(border);
+        self.wide.second_mut().panel_mut().set_border(border);
+    }
+
+    #[cfg(test)]
+    fn wide_areas(&self) -> (Rect, Rect) {
+        self.wide.child_areas()
+    }
+
+    #[cfg(test)]
+    fn narrow_border_style(&self) -> TabsBodyBorderStyle {
+        self.narrow.current_body_border_style()
+    }
+}
+
+fn panel_description_action(
+    state: Rc<RefCell<ComposerState>>,
+    actions: PendingDescriptionActions,
+    action: DescriptionTabAction,
+) -> impl Fn() + 'static {
+    let trigger = description_tab_action(state, actions, action);
+    move || trigger(0)
+}
+
+impl TuiNode for ResponsiveDetails {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        let wide = match proposal.width {
+            AxisProposal::Exact(width) | AxisProposal::AtMost(width) => width >= WIDE_BREAKPOINT,
+            AxisProposal::Unbounded => true,
+        };
+        if wide {
+            self.wide.measure(proposal)
+        } else {
+            self.narrow.measure(proposal)
+        }
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.is_wide = area.width >= WIDE_BREAKPOINT;
+        self.active_mut().layout(area, ctx)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        self.active().render(frame, area, ctx);
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        self.active_mut().event(event, ctx)
+    }
+
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> EventOutcome {
+        self.active_mut().dispatch_event(route, event, ctx)
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.active_mut().tick(dt, settings)
+    }
+
+    fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.active_mut().focus(target, focused, ctx);
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.active_mut().dispatch_focus(target, focused, ctx);
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.narrow.init(ctx);
+        self.wide.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.narrow.mount(ctx);
+        self.wide.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.wide.unmount(ctx);
+        self.narrow.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.wide.destroy(ctx);
+        self.narrow.destroy(ctx);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -196,6 +405,12 @@ fn description_tab_action(
     action: DescriptionTabAction,
 ) -> impl Fn(usize) + 'static {
     move |selected| {
+        if matches!(
+            action,
+            DescriptionTabAction::Focus | DescriptionTabAction::SpeedReader
+        ) {
+            actions.borrow_mut().push(DescriptionAction::ShowChanges);
+        }
         if selected != 0 {
             if action != DescriptionTabAction::Editor || state.borrow().selected_is_editable() {
                 actions
@@ -206,7 +421,7 @@ fn description_tab_action(
         }
         let state = state.borrow();
         let description = state
-            .selected_ticket()
+            .selected_changes()
             .map(|ticket| ticket.description.clone())
             .unwrap_or_default();
         match action {

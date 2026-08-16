@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use super::{JiraIssue, search_jql, text_search_jql, to_ticket};
+use super::{JiraIssue, options_from_values, search_jql, text_search_jql, to_ticket};
 use crate::store::composer::TicketKind;
 
 #[test]
@@ -13,6 +13,20 @@ fn jira_search_handles_recent_results_text_and_exact_keys() {
     let exact = search_jql("OPS-42");
     assert!(exact.contains("key = \"OPS-42\""));
     assert!(exact.ends_with("ORDER BY updated DESC"));
+}
+
+#[test]
+fn jira_metadata_options_keep_ids_and_labels() {
+    let values = vec![
+        json!({ "id": "1", "name": "Story" }),
+        json!({ "id": "2", "name": "Bug" }),
+    ];
+
+    let options = options_from_values(Some(&values));
+
+    assert_eq!(options[0].id, "1");
+    assert_eq!(options[0].label, "Story");
+    assert_eq!(options[1].label, "Bug");
 }
 
 #[test]

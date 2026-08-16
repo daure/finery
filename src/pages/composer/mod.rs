@@ -3,6 +3,8 @@ mod change_set_list;
 mod detail;
 mod fields;
 mod page;
+mod property_fields;
+mod source;
 mod submission;
 #[cfg(test)]
 mod tests;

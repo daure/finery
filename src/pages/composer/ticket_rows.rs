@@ -29,7 +29,9 @@ pub(super) fn ticket_data_view(state: &ComposerState) -> DataView<TicketRow, Str
         .activation_mode(ActivationMode::Manual)
         .selection_mode(SelectionMode::Multi)
         .selection_trigger(SelectionTrigger::OnActivate)
-        .selection_glyphs(SelectionGlyphs::NERD_FONT);
+        .selection_glyphs(SelectionGlyphs::NERD_FONT)
+        .selection_disabled_by(|row| row.submitted)
+        .selection_disabled_glyph("󱋭");
     if let Some(selected) = state.selected_ticket.as_ref() {
         view.highlight_id(selected);
     }
@@ -41,12 +43,12 @@ pub(super) fn ticket_rows(state: &ComposerState) -> Vec<TicketRow> {
         .active_set()
         .into_iter()
         .flat_map(|set| &set.tickets)
-        .filter_map(ticket_row)
+        .filter_map(|change| ticket_row(state, change))
         .collect()
 }
 
-fn ticket_row(change: &TicketChange) -> Option<TicketRow> {
-    let ticket = change.updated.as_ref().or(change.original.as_ref())?;
+fn ticket_row(state: &ComposerState, change: &TicketChange) -> Option<TicketRow> {
+    let ticket = state.ticket_for_change(change)?;
     Some(TicketRow {
         id: change.id.clone(),
         key: ticket.key.clone(),
@@ -66,10 +68,13 @@ fn ticket_columns() -> Vec<Column<TicketRow, String>> {
         Constraint::Percentage(100),
         |row: &TicketRow, _: &CellContext<String>| {
             let theme = tuicore::theme();
-            let (kind_icon, kind_color) = ticket_icon(row.kind);
-            let (priority_icon, priority_color) = priority_icon(&row.priority);
-            let (badge, badge_color) = change_badge(row.change);
+            let (kind_icon, mut kind_color) = ticket_icon(row.kind);
+            let (priority_icon, mut priority_color) = priority_icon(&row.priority);
+            let (badge, mut badge_color) = change_badge(row.change);
             let text_color = if row.submitted {
+                kind_color = theme.muted_fg();
+                priority_color = theme.muted_fg();
+                badge_color = theme.muted_fg();
                 theme.muted_fg()
             } else {
                 theme.text_fg()
@@ -90,10 +95,10 @@ fn ticket_columns() -> Vec<Column<TicketRow, String>> {
                             .fg(badge_color)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled("• ", Style::default().fg(theme.subtle_fg())),
-                    Span::styled(row.key.clone(), Style::default().fg(theme.subtle_fg())),
-                    Span::styled(" • ", Style::default().fg(theme.subtle_fg())),
-                    Span::styled(row.status.clone(), Style::default().fg(theme.subtle_fg())),
+                    Span::styled("• ", Style::default().fg(text_color)),
+                    Span::styled(row.key.clone(), Style::default().fg(text_color)),
+                    Span::styled(" • ", Style::default().fg(text_color)),
+                    Span::styled(row.status.clone(), Style::default().fg(text_color)),
                     Span::styled(
                         if row.submitted { " · submitted" } else { "" },
                         Style::default().fg(theme.muted_fg()),

@@ -28,6 +28,7 @@ use super::{
     add_ticket_menu::{AddTicketEvent, AddTicketMenu},
     detail::DetailPane,
     fields::{DescriptionAction, PendingDescriptionActions},
+    source::SourceController,
     submission::SubmissionController,
     ticket_rows::{TicketRow, ticket_data_view, ticket_rows},
     ticket_toolbar::{ToolbarEvent, ToolbarEvents, toolbar},
@@ -53,9 +54,11 @@ pub(super) struct TicketEditor {
     view: EditorView,
     toolbar_events: ToolbarEvents,
     can_change: Rc<Cell<bool>>,
+    can_refresh: Rc<Cell<bool>>,
     can_submit: Rc<Cell<bool>>,
     pending_project: Rc<RefCell<Option<String>>>,
     submission: SubmissionController,
+    source: SourceController,
 }
 
 impl TicketEditor {
@@ -75,15 +78,18 @@ impl TicketEditor {
             Rc::clone(&state),
             Rc::clone(&pending),
             Rc::clone(&description_actions),
+            service.clone(),
         );
         let body = Split::vertical(ticket_list, detail).ratio(1, 2);
         let toolbar_events = Rc::new(RefCell::new(Vec::new()));
         let can_change = Rc::new(Cell::new(true));
+        let can_refresh = Rc::new(Cell::new(false));
         let can_submit = Rc::new(Cell::new(false));
         let workspace = Split::vertical(
             toolbar(
                 Rc::clone(&toolbar_events),
                 Rc::clone(&can_change),
+                Rc::clone(&can_refresh),
                 Rc::clone(&can_submit),
             ),
             body,
@@ -158,6 +164,7 @@ impl TicketEditor {
         .fit_content_max(72, 16)
         .backdrop(DialogBackdrop::dim().amount(0.55));
         let submission = SubmissionController::new(Rc::clone(&state), service.clone());
+        let source = SourceController::new(Rc::clone(&state), service.clone());
 
         Self {
             state,
@@ -168,9 +175,11 @@ impl TicketEditor {
             view,
             toolbar_events,
             can_change,
+            can_refresh,
             can_submit,
             pending_project,
             submission,
+            source,
         }
     }
 
@@ -203,6 +212,15 @@ impl TicketEditor {
             .base_mut()
             .base_mut()
             .second_mut()
+            .second_mut()
+    }
+
+    fn body_mut(&mut self) -> &mut Body {
+        self.view
+            .base_mut()
+            .base_mut()
+            .base_mut()
+            .base_mut()
             .second_mut()
     }
 
@@ -249,9 +267,60 @@ impl TicketEditor {
         }
         self.can_change
             .set(is_open && !self.submission.is_submitting());
-        self.can_submit.set(
-            is_open && !self.submission.is_submitting() && !self.table().selected_ids().is_empty(),
+        self.can_refresh.set(
+            self.state.borrow().remote_queries_allowed()
+                && self
+                    .state
+                    .borrow()
+                    .selected_change()
+                    .and_then(|change| {
+                        change
+                            .submitted
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.updated.as_ref())
+                            .or(change.updated.as_ref())
+                            .or(change.original.as_ref())
+                            .map(|ticket| ticket.key.as_str())
+                            .or(Some(change.id.as_str()))
+                    })
+                    .is_some_and(|key| !key.starts_with("NEW-"))
+                && !self.submission.is_submitting(),
         );
+        let selected = self.table().selected_ids();
+        self.can_submit.set(
+            is_open
+                && !self.submission.is_submitting()
+                && self.state.borrow().changes_ready_for_submit(&selected),
+        );
+    }
+
+    #[cfg(test)]
+    pub(super) fn detail_panel_areas(&self) -> (Rect, Rect) {
+        self.view
+            .base()
+            .base()
+            .base()
+            .base()
+            .second()
+            .second()
+            .detail_panel_areas()
+    }
+
+    #[cfg(test)]
+    pub(super) fn ticket_detail_areas(&self) -> (Rect, Rect) {
+        self.view.base().base().base().base().second().child_areas()
+    }
+
+    #[cfg(test)]
+    pub(super) fn narrow_border_style(&self) -> tuicore::TabsBodyBorderStyle {
+        self.view
+            .base()
+            .base()
+            .base()
+            .base()
+            .second()
+            .second()
+            .narrow_border_style()
     }
 
     fn drain_description_actions(&mut self, ctx: &mut EventCtx<()>) {
@@ -262,6 +331,13 @@ impl TicketEditor {
             .collect::<Vec<_>>();
         for action in actions {
             match action {
+                DescriptionAction::ShowChanges => {
+                    self.state
+                        .borrow_mut()
+                        .dispatch(ComposerAction::SetViewMode(
+                            crate::store::composer::ComposerViewMode::Changes,
+                        ))
+                }
                 DescriptionAction::Focus { edit } => {
                     self.detail_mut().focus_description(edit, ctx);
                 }
@@ -368,6 +444,8 @@ impl TicketEditor {
             self.view.base_mut().set_active_with_context(false, ctx);
         }
         self.sync();
+        self.source.ensure(false);
+        ctx.request_layout();
         self.drain_toolbar_events(ctx);
         self.submission.drain_notices(ctx);
         ctx.request_redraw();
@@ -408,7 +486,7 @@ impl TicketEditor {
             .active_set()
             .into_iter()
             .flat_map(|set| &set.tickets)
-            .filter_map(|change| change.visible_ticket(true))
+            .filter_map(|change| state.ticket_for_change(change))
             .map(|ticket| ticket.project_key.trim())
             .filter(|project| !project.is_empty())
             .map(str::to_owned)
@@ -465,8 +543,16 @@ impl TicketEditor {
         for event in events {
             match event {
                 ToolbarEvent::NewTicket => self.open_new_ticket(ctx),
+                ToolbarEvent::Refresh => self.ensure_source(true, ctx),
                 ToolbarEvent::Submit => self.start_submit(),
             }
+        }
+    }
+
+    pub(super) fn ensure_source(&mut self, force: bool, ctx: &mut EventCtx<()>) {
+        self.source.ensure(force);
+        if self.source.is_loading() {
+            ctx.request_tick();
         }
     }
 
@@ -475,15 +561,22 @@ impl TicketEditor {
             return;
         }
         let selected = self.table().selected_ids();
-        let changes = self
-            .state
-            .borrow()
-            .active_set()
-            .into_iter()
-            .flat_map(|set| &set.tickets)
-            .filter(|change| selected.contains(&change.id) && !change.is_submitted())
-            .cloned()
-            .collect::<Vec<_>>();
+        let changes = {
+            let state = self.state.borrow();
+            state
+                .active_set()
+                .into_iter()
+                .flat_map(|set| &set.tickets)
+                .filter(|change| selected.contains(&change.id) && !change.is_submitted())
+                .cloned()
+                .filter_map(|mut change| {
+                    if change.kind != ChangeKind::Added {
+                        change.original = Some(state.sources.get(&change.id)?.clone());
+                    }
+                    Some(change)
+                })
+                .collect::<Vec<_>>()
+        };
         self.submission.start(changes);
         self.sync();
     }
@@ -635,6 +728,10 @@ impl TuiNode for TicketEditor {
         self.view.measure(proposal)
     }
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        let body_height = area.height.saturating_sub(1);
+        let ticket_height = (body_height / 3).saturating_sub(4).max(1);
+        self.body_mut()
+            .set_constraints(Constraint::Length(ticket_height), Constraint::Fill(1));
         self.sync();
         self.view.layout(area, ctx)
     }
@@ -696,17 +793,24 @@ impl TuiNode for TicketEditor {
     }
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let changed = self.submission.drain_results();
-        if changed {
+        self.source.ensure(false);
+        let source_changed = self.source.drain();
+        if changed || source_changed {
             self.sync();
         }
         self.view
             .tick(dt, settings)
-            .merge(if changed {
+            .merge(if changed || source_changed {
                 TickResult::CHANGED
             } else {
                 TickResult::IDLE
             })
             .merge(if self.submission.is_submitting() {
+                TickResult::scheduled_after(Duration::from_millis(50))
+            } else {
+                TickResult::IDLE
+            })
+            .merge(if self.source.is_loading() {
                 TickResult::scheduled_after(Duration::from_millis(50))
             } else {
                 TickResult::IDLE

@@ -19,6 +19,7 @@ use crate::{
 pub(crate) struct AppService {
     settings: Arc<RwLock<AppSettings>>,
     errors: Arc<Mutex<Vec<String>>>,
+    notifications: Arc<Mutex<Vec<tuicore::Notification>>>,
     persistence: Sender<PersistenceCommand>,
 }
 
@@ -37,12 +38,14 @@ impl AppService {
         let settings = AppSettings::resolve(&stored_settings);
         let change_sets = runtime.block_on(storage.load_change_sets())?;
         let errors = Arc::new(Mutex::new(Vec::new()));
+        let notifications = Arc::new(Mutex::new(Vec::new()));
         let persistence =
             start_persistence_worker(storage, Arc::clone(&runtime), Arc::clone(&errors))?;
         Ok((
             Self {
                 settings: Arc::new(RwLock::new(settings)),
                 errors,
+                notifications,
                 persistence,
             },
             change_sets,
@@ -54,11 +57,13 @@ impl AppService {
         let runtime = Arc::new(Runtime::new().unwrap());
         let storage = runtime.block_on(Storage::connect_for_tests()).unwrap();
         let errors = Arc::new(Mutex::new(Vec::new()));
+        let notifications = Arc::new(Mutex::new(Vec::new()));
         let persistence =
             start_persistence_worker(storage, Arc::clone(&runtime), Arc::clone(&errors)).unwrap();
         Self {
             settings: Arc::new(RwLock::new(AppSettings::default())),
             errors,
+            notifications,
             persistence,
         }
     }
@@ -103,6 +108,40 @@ impl AppService {
         jira::projects(&settings)
     }
 
+    pub(crate) fn fetch_jira(&self, key: &str) -> Result<Ticket, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::fetch(&settings, key)
+    }
+
+    pub(crate) fn jira_field_options(
+        &self,
+        ticket: &Ticket,
+    ) -> Result<jira::JiraFieldOptions, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::field_options(&settings, ticket)
+    }
+
+    pub(crate) fn search_jira_assignees(
+        &self,
+        project_key: &str,
+        query: &str,
+    ) -> Result<Vec<jira::JiraAssignee>, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::assignees(&settings, project_key, query)
+    }
+
     pub(crate) fn submit_ticket_changes(
         &self,
         changes: &[TicketChange],
@@ -126,6 +165,19 @@ impl AppService {
         if let Ok(mut errors) = self.errors.lock() {
             errors.push(error);
         }
+    }
+
+    pub(crate) fn report_notification(&self, notification: tuicore::Notification) {
+        if let Ok(mut notifications) = self.notifications.lock() {
+            notifications.push(notification);
+        }
+    }
+
+    pub(crate) fn take_notifications(&self) -> Vec<tuicore::Notification> {
+        self.notifications
+            .lock()
+            .map(|mut notifications| std::mem::take(&mut *notifications))
+            .unwrap_or_default()
     }
 
     pub(crate) fn flush(&self) -> Result<(), Box<dyn std::error::Error>> {

@@ -80,6 +80,7 @@ impl ComposerPage {
         ctx.request_layout();
         ctx.request_redraw();
         if is_open {
+            self.editor.ensure_source(false, ctx);
             TicketEditor::focus_tickets(ctx);
         }
     }
@@ -102,6 +103,65 @@ impl ComposerPage {
             crate::store::composer::ComposerAction::MarkTicketDeleted(selected),
         );
         self.editor.sync();
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_view_mode(&mut self, mode: crate::store::composer::ComposerViewMode) {
+        self.state
+            .borrow_mut()
+            .dispatch(crate::store::composer::ComposerAction::SetViewMode(mode));
+        self.editor.sync();
+    }
+
+    #[cfg(test)]
+    pub(super) fn submit_selected_locally(&mut self) {
+        let change = self.state.borrow().selected_change().cloned().unwrap();
+        let original = change.original.clone();
+        let updated = change.updated.clone().or_else(|| original.clone());
+        self.state.borrow_mut().dispatch(
+            crate::store::composer::ComposerAction::CompleteSubmission {
+                id: change.id,
+                snapshot: crate::store::composer::SubmissionSnapshot { original, updated },
+            },
+        );
+        self.editor.sync();
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_selected_source(&mut self, ticket: crate::store::composer::Ticket) {
+        let id = self.state.borrow().selected_ticket.clone().unwrap();
+        self.state
+            .borrow_mut()
+            .dispatch(crate::store::composer::ComposerAction::SetSource { id, ticket });
+        self.editor.sync();
+    }
+
+    #[cfg(test)]
+    pub(super) fn update_selected_kind(&mut self, kind: crate::store::composer::TicketKind) {
+        self.state
+            .borrow_mut()
+            .dispatch(crate::store::composer::ComposerAction::UpdateKind(kind));
+        self.editor.sync();
+    }
+
+    #[cfg(test)]
+    pub(super) fn selected_changes(&self) -> crate::store::composer::Ticket {
+        self.state.borrow().selected_changes().cloned().unwrap()
+    }
+
+    #[cfg(test)]
+    pub(super) fn detail_panel_areas(&self) -> (Rect, Rect) {
+        self.editor.detail_panel_areas()
+    }
+
+    #[cfg(test)]
+    pub(super) fn ticket_detail_areas(&self) -> (Rect, Rect) {
+        self.editor.ticket_detail_areas()
+    }
+
+    #[cfg(test)]
+    pub(super) fn narrow_border_style(&self) -> tuicore::TabsBodyBorderStyle {
+        self.editor.narrow_border_style()
     }
 }
 

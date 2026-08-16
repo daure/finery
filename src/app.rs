@@ -78,7 +78,13 @@ impl App {
             self.view.set_active_with_context(false, ctx);
         }
         for error in self.service.take_errors() {
-            ctx.notify(tuicore::Notification::error("Persistence failed", error));
+            ctx.notify(tuicore::Notification::error(
+                "Background operation failed",
+                error,
+            ));
+        }
+        for notification in self.service.take_notifications() {
+            ctx.notify(notification);
         }
     }
 }

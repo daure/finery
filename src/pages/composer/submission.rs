@@ -18,7 +18,12 @@ pub(super) struct SubmissionController {
     sender: Sender<Result<SubmitBatchOutcome, String>>,
     receiver: Receiver<Result<SubmitBatchOutcome, String>>,
     submitting: bool,
-    notices: Vec<(bool, String, String)>,
+    notices: Vec<(NoticeKind, String, String)>,
+}
+
+enum NoticeKind {
+    Warning,
+    Error,
 }
 
 impl SubmissionController {
@@ -53,7 +58,7 @@ impl SubmissionController {
         {
             self.submitting = false;
             self.notices.push((
-                true,
+                NoticeKind::Error,
                 "Submit failed".into(),
                 format!("Could not start Jira submit: {error}"),
             ));
@@ -68,9 +73,9 @@ impl SubmissionController {
             match result {
                 Err(error) => self
                     .notices
-                    .push((true, "Submit failed".into(), error)),
+                    .push((NoticeKind::Error, "Submit failed".into(), error)),
                 Ok(SubmitBatchOutcome::Conflict(keys)) => self.notices.push((
-                    false,
+                    NoticeKind::Warning,
                     "Submit cancelled".into(),
                     format!(
                         "Jira changed since this change set was composed: {}. Refresh those tickets before retrying.",
@@ -84,20 +89,23 @@ impl SubmissionController {
     }
 
     pub(super) fn drain_notices(&mut self, ctx: &mut EventCtx<()>) {
-        for (error, title, message) in self.notices.drain(..) {
-            if error {
-                ctx.notify(tuicore::Notification::error(title, message));
-            } else {
-                ctx.notify(tuicore::Notification::warning(title, message));
-            }
+        for (kind, title, message) in self.notices.drain(..) {
+            ctx.notify(match kind {
+                NoticeKind::Warning => tuicore::Notification::warning(title, message),
+                NoticeKind::Error => tuicore::Notification::error(title, message),
+            });
         }
     }
 
     fn apply_outcomes(&mut self, outcomes: Vec<TicketSubmitOutcome>) {
         let active_id = self.state.borrow().active_change_set.clone();
+        let mut submitted = Vec::new();
         for outcome in outcomes {
             match outcome.result {
                 Ok(snapshot) => {
+                    if let Some(ticket) = snapshot.updated.as_ref().or(snapshot.original.as_ref()) {
+                        submitted.push((ticket.key.clone(), ticket.title.clone()));
+                    }
                     self.state
                         .borrow_mut()
                         .dispatch(ComposerAction::CompleteSubmission {
@@ -116,8 +124,11 @@ impl SubmissionController {
                             },
                         );
                     }
-                    self.notices
-                        .push((true, format!("{} failed", outcome.id), failure.message));
+                    self.notices.push((
+                        NoticeKind::Error,
+                        format!("{} failed", outcome.id),
+                        failure.message,
+                    ));
                 }
             }
         }
@@ -130,6 +141,21 @@ impl SubmissionController {
                 .cloned()
         }) {
             self.service.save_change_set(set);
+        }
+        match submitted.as_slice() {
+            [] => {}
+            [(key, title)] => self
+                .service
+                .report_notification(tuicore::Notification::success(
+                    "Ticket submitted",
+                    format!("{key} · {title}"),
+                )),
+            submitted => self
+                .service
+                .report_notification(tuicore::Notification::success(
+                    "Tickets submitted",
+                    format!("{} tickets submitted", submitted.len()),
+                )),
         }
     }
 }
