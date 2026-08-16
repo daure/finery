@@ -13,7 +13,10 @@ use tuicore::{
     RenderCtx, TickResult, TuiEvent, TuiNode,
 };
 
-use crate::store::composer::{ComposerAction, ComposerState};
+use crate::{
+    service::AppService,
+    store::composer::{ComposerAction, ComposerState},
+};
 
 #[derive(Clone)]
 struct ChangeSetRow {
@@ -24,11 +27,12 @@ struct ChangeSetRow {
 
 pub(super) struct ChangeSetListView {
     state: Rc<RefCell<ComposerState>>,
+    service: AppService,
     control: ListControl<ChangeSetRow, String>,
 }
 
 impl ChangeSetListView {
-    pub(super) fn new(state: Rc<RefCell<ComposerState>>) -> Self {
+    pub(super) fn new(state: Rc<RefCell<ComposerState>>, service: AppService) -> Self {
         let rows = rows(&state.borrow());
         let control = ListControl::new(
             rows,
@@ -58,7 +62,17 @@ impl ChangeSetListView {
                 row.id, row.name
             )
         });
-        Self { state, control }
+        Self {
+            state,
+            service,
+            control,
+        }
+    }
+
+    pub(super) fn sync(&mut self) {
+        self.control
+            .data_view_mut()
+            .set_rows(rows(&self.state.borrow()));
     }
 
     fn drain_events(&mut self, ctx: &mut EventCtx<()>) {
@@ -72,12 +86,23 @@ impl ChangeSetListView {
                                 id: row.id.clone(),
                                 name: row.name.clone(),
                             });
+                        if let Some(set) = self
+                            .state
+                            .borrow()
+                            .change_sets
+                            .iter()
+                            .find(|set| set.id == row.id)
+                            .cloned()
+                        {
+                            self.service.save_change_set(set);
+                        }
                     }
                 }
                 ListControlEvent::Removed { row_id } => {
                     self.state
                         .borrow_mut()
-                        .dispatch(ComposerAction::DeleteChangeSet(row_id));
+                        .dispatch(ComposerAction::DeleteChangeSet(row_id.clone()));
+                    self.service.delete_change_set(row_id);
                 }
                 _ => {}
             }

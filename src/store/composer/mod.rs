@@ -1,4 +1,6 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum TicketKind {
     Epic,
     Story,
@@ -7,7 +9,7 @@ pub(crate) enum TicketKind {
     Subtask,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Ticket {
     pub key: String,
     pub title: String,
@@ -18,7 +20,7 @@ pub(crate) struct Ticket {
     pub assignee: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ChangeKind {
     Added,
     Modified,
@@ -26,7 +28,7 @@ pub(crate) enum ChangeKind {
     Synced,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TicketChange {
     pub id: String,
     pub original: Option<Ticket>,
@@ -61,7 +63,7 @@ impl TicketChange {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ChangeSet {
     pub id: String,
     pub name: String,
@@ -98,6 +100,24 @@ pub(crate) enum ComposerAction {
 }
 
 impl ComposerState {
+    pub(crate) fn from_change_sets(change_sets: Vec<ChangeSet>) -> Self {
+        let next_ticket = change_sets
+            .iter()
+            .flat_map(|set| &set.tickets)
+            .filter_map(|change| change.id.strip_prefix("NEW-")?.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        Self {
+            change_sets,
+            active_change_set: None,
+            selected_ticket: None,
+            show_updated: true,
+            next_ticket,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn demo() -> Self {
         let tickets = demo_jira_tickets();
         Self {
@@ -300,6 +320,25 @@ impl ComposerState {
     }
 }
 
+impl ComposerAction {
+    pub(crate) fn affects_persistence(&self) -> bool {
+        matches!(
+            self,
+            Self::CreateTicket(_)
+                | Self::IncludeTicket(_)
+                | Self::RemoveTicket(_)
+                | Self::MarkTicketDeleted(_)
+                | Self::UpdateTitle(_)
+                | Self::UpdateDescription(_)
+                | Self::UpdateKind(_)
+                | Self::UpdateStatus(_)
+                | Self::UpdatePriority(_)
+                | Self::UpdateAssignee(_)
+        )
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
     vec![
         Ticket {

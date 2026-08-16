@@ -1,5 +1,3 @@
-use std::{cell::Cell, rc::Rc};
-
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use tuicore::{
     EventCtx, EventRoute, ExternalEditorResponse, FocusCtx, FocusId, FocusRequest, HotkeyEvent,
@@ -7,10 +5,12 @@ use tuicore::{
 };
 
 use super::page::ComposerPage;
-use crate::speed_reader_settings::SpeedReaderSettings;
+use crate::{service::AppService, store::composer::ComposerState};
 
 fn composer_page() -> ComposerPage {
-    ComposerPage::new(Rc::new(Cell::new(SpeedReaderSettings::default())))
+    let service = AppService::for_tests();
+    let settings = service.settings();
+    ComposerPage::new(ComposerState::demo().change_sets, service, settings)
 }
 
 fn render_text(page: &mut ComposerPage) -> String {
@@ -287,6 +287,7 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     assert!(add_menu.contains("Add new"));
     assert!(add_menu.contains("Add existing"));
     assert!(!add_menu.contains("+ Add ticket"));
+    assert!(!add_menu.contains("Select..."));
 }
 
 #[test]

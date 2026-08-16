@@ -1,6 +1,7 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     rc::Rc,
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
@@ -11,12 +12,20 @@ use tuicore::{
     TuiEvent, TuiNode,
 };
 
-use crate::{speed_reader_settings::SpeedReaderSettings, store::composer::ComposerState};
+use crate::{
+    app_settings::AppSettings,
+    service::AppService,
+    store::composer::{ChangeSet, ComposerState},
+};
 
 use super::{change_set_list::ChangeSetListView, ticket_editor::TicketEditor};
 
-pub(crate) fn page(settings: Rc<Cell<SpeedReaderSettings>>) -> ComposerPage {
-    ComposerPage::new(settings)
+pub(crate) fn page(
+    change_sets: Vec<ChangeSet>,
+    service: AppService,
+    settings: Arc<RwLock<AppSettings>>,
+) -> ComposerPage {
+    ComposerPage::new(change_sets, service, settings)
 }
 
 pub(crate) struct ComposerPage {
@@ -26,11 +35,15 @@ pub(crate) struct ComposerPage {
 }
 
 impl ComposerPage {
-    pub(super) fn new(settings: Rc<Cell<SpeedReaderSettings>>) -> Self {
-        let state = Rc::new(RefCell::new(ComposerState::demo()));
+    pub(super) fn new(
+        change_sets: Vec<ChangeSet>,
+        service: AppService,
+        settings: Arc<RwLock<AppSettings>>,
+    ) -> Self {
+        let state = Rc::new(RefCell::new(ComposerState::from_change_sets(change_sets)));
         Self {
-            change_sets: ChangeSetListView::new(Rc::clone(&state)),
-            editor: TicketEditor::new(Rc::clone(&state), settings),
+            change_sets: ChangeSetListView::new(Rc::clone(&state), service.clone()),
+            editor: TicketEditor::new(Rc::clone(&state), settings, service),
             state,
         }
     }
@@ -61,6 +74,9 @@ impl ComposerPage {
             return;
         }
         self.editor.sync();
+        if !is_open {
+            self.change_sets.sync();
+        }
         ctx.request_layout();
         ctx.request_redraw();
         if is_open {

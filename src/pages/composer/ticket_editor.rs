@@ -1,6 +1,7 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     rc::Rc,
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
@@ -14,6 +15,8 @@ use tuicore::{
 };
 
 use crate::{
+    app_settings::AppSettings,
+    service::AppService,
     speed_reader_settings::SpeedReaderSettings,
     store::composer::{ChangeKind, ComposerAction, ComposerState},
 };
@@ -39,14 +42,16 @@ pub(super) struct TicketEditor {
     state: Rc<RefCell<ComposerState>>,
     pending: PendingActions,
     description_actions: PendingDescriptionActions,
-    speed_reader_settings: Rc<Cell<SpeedReaderSettings>>,
+    settings: Arc<RwLock<AppSettings>>,
+    service: AppService,
     view: EditorView,
 }
 
 impl TicketEditor {
     pub(super) fn new(
         state: Rc<RefCell<ComposerState>>,
-        speed_reader_settings: Rc<Cell<SpeedReaderSettings>>,
+        settings: Arc<RwLock<AppSettings>>,
+        service: AppService,
     ) -> Self {
         let pending = Rc::new(RefCell::new(Vec::new()));
         let description_actions = Rc::new(RefCell::new(Vec::new()));
@@ -96,10 +101,10 @@ impl TicketEditor {
             .fit_content()
             .fit_content_max(72, 7)
             .backdrop(DialogBackdrop::dim().amount(0.55));
-        let add_layer = DialogLayer::new(create_layer, AddTicketMenu::new())
+        let add_layer = DialogLayer::new(create_layer, AddTicketMenu::new(service.clone()))
             .active(false)
             .fit_content()
-            .fit_content_max(52, 12)
+            .fit_content_max(120, 12)
             .backdrop(DialogBackdrop::dim().amount(0.55));
         let ticket_action_dialog = Dialog::new()
             .top_left("Ticket action")
@@ -114,7 +119,10 @@ impl TicketEditor {
             description_reader(
                 "",
                 Rc::clone(&description_actions),
-                speed_reader_settings.get(),
+                settings
+                    .read()
+                    .expect("settings lock poisoned")
+                    .speed_reader,
             ),
         )
         .active(false)
@@ -126,7 +134,8 @@ impl TicketEditor {
             state,
             pending,
             description_actions,
-            speed_reader_settings,
+            settings,
+            service,
             view,
         }
     }
@@ -183,7 +192,10 @@ impl TicketEditor {
                         description_reader(
                             description,
                             Rc::clone(&self.description_actions),
-                            self.speed_reader_settings.get(),
+                            self.settings
+                                .read()
+                                .expect("settings lock poisoned")
+                                .speed_reader,
                         ),
                         ctx,
                     );
@@ -264,8 +276,12 @@ impl TicketEditor {
                 ComposerAction::MarkTicketDeleted(_) | ComposerAction::RemoveTicket(_)
             )
         });
+        let persist = actions.iter().any(ComposerAction::affects_persistence);
         for action in actions {
             self.state.borrow_mut().dispatch(action);
+        }
+        if persist && let Some(set) = self.state.borrow().active_set().cloned() {
+            self.service.save_change_set(set);
         }
         if created {
             self.view

@@ -11,7 +11,8 @@ use tuicore::{
 use crate::{
     components::{self, settings_dialog::SettingsDialog},
     pages,
-    speed_reader_settings::SpeedReaderSettings,
+    service::AppService,
+    store::composer::ChangeSet,
 };
 
 type SettingsHost = DialogHost<SettingsDialog, ()>;
@@ -21,17 +22,21 @@ pub(crate) struct App {
     view: AppView,
     open_settings: Rc<Cell<bool>>,
     close_dialog: Rc<Cell<bool>>,
+    service: AppService,
 }
 
-pub(crate) fn root() -> App {
-    let settings = Rc::new(Cell::new(SpeedReaderSettings::default()));
+pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
+    let settings = service.settings();
     let open_settings = Rc::new(Cell::new(false));
     let close_dialog = Rc::new(Cell::new(false));
     let pages = Tabs::new(vec![
         Tab::new("Backlog", pages::backlog::page()),
         Tab::new("Sprint", pages::sprint::page()),
         Tab::new("Issues", pages::issues::page()),
-        Tab::new("Composer", pages::composer::page(Rc::clone(&settings))),
+        Tab::new(
+            "Composer",
+            pages::composer::page(change_sets, service.clone(), settings.clone()),
+        ),
     ])
     .variant(TabsVariant::OneRow);
     let base = Flex::column()
@@ -50,7 +55,7 @@ pub(crate) fn root() -> App {
             .on_trigger(move || close_action.set(true))])
         .close_on_unfocus_from_descendants(true)
         .on_close(move |_| close_event.set(true))
-        .host(SettingsDialog::new(settings));
+        .host(SettingsDialog::new(settings, service.clone()));
     let view = DialogLayer::new(base, dialog)
         .active(false)
         .fit_content()
@@ -60,6 +65,7 @@ pub(crate) fn root() -> App {
         view,
         open_settings,
         close_dialog,
+        service,
     }
 }
 
@@ -70,6 +76,9 @@ impl App {
         }
         if self.close_dialog.replace(false) {
             self.view.set_active_with_context(false, ctx);
+        }
+        for error in self.service.take_errors() {
+            ctx.notify(tuicore::Notification::error("Persistence failed", error));
         }
     }
 }

@@ -1,22 +1,30 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     rc::Rc,
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
     AnimationSettings, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId,
-    FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx,
-    TextInput, TickResult, TuiEvent, TuiNode,
+    FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
+    PasswordInput, RenderCtx, TextInput, TickResult, TuiEvent, TuiNode,
 };
 
-use crate::speed_reader_settings::{
-    MAX_MARKDOWN_BLOCK_PAUSE_MS, MAX_SPEED_READER_WPM, MIN_SPEED_READER_WPM, SpeedReaderSettings,
-    parse_markdown_block_pause, parse_speed_reader_wpm,
+use crate::{
+    app_settings::AppSettings,
+    service::AppService,
+    speed_reader_settings::{
+        MAX_MARKDOWN_BLOCK_PAUSE_MS, MAX_SPEED_READER_WPM, MIN_SPEED_READER_WPM,
+        parse_markdown_block_pause, parse_speed_reader_wpm,
+    },
 };
 
 enum SettingChange {
+    JiraBaseUrl(String),
+    JiraEmail(String),
+    JiraApiToken(String),
     Wpm(String),
     MarkdownBlockPause(String),
 }
@@ -24,33 +32,73 @@ enum SettingChange {
 pub(crate) struct SettingsDialog {
     root: Flex<()>,
     changes: Rc<RefCell<Vec<SettingChange>>>,
-    settings: Rc<Cell<SpeedReaderSettings>>,
+    settings: Arc<RwLock<AppSettings>>,
+    service: AppService,
 }
 
 impl SettingsDialog {
-    pub(crate) fn new(settings: Rc<Cell<SpeedReaderSettings>>) -> Self {
-        let values = settings.get();
+    pub(crate) fn new(settings: Arc<RwLock<AppSettings>>, service: AppService) -> Self {
+        let values = settings.read().expect("settings lock poisoned").clone();
         let changes = Rc::new(RefCell::new(Vec::new()));
+        let url_changes = Rc::clone(&changes);
+        let email_changes = Rc::clone(&changes);
+        let token_changes = Rc::clone(&changes);
         let wpm_changes = Rc::clone(&changes);
         let delay_changes = Rc::clone(&changes);
-        let root = Flex::row()
-            .gap(1)
+        let root = Flex::column()
+            .child(
+                "jira-base-url",
+                TextInput::new()
+                    .value(values.jira_base_url.clone())
+                    .panel("Jira URL")
+                    .placeholder("https://example.atlassian.net")
+                    .focused(true)
+                    .on_edit_end(move |value| {
+                        url_changes
+                            .borrow_mut()
+                            .push(SettingChange::JiraBaseUrl(value));
+                    }),
+                FlexItem::fixed(3),
+            )
+            .child(
+                "jira-email",
+                TextInput::new()
+                    .value(values.jira_email.clone())
+                    .panel("Jira email")
+                    .on_edit_end(move |value| {
+                        email_changes
+                            .borrow_mut()
+                            .push(SettingChange::JiraEmail(value));
+                    }),
+                FlexItem::fixed(3),
+            )
+            .child(
+                "jira-api-token",
+                PasswordInput::new()
+                    .value(values.jira_api_token.clone())
+                    .panel("Jira API token")
+                    .on_edit_end(move |value| {
+                        token_changes
+                            .borrow_mut()
+                            .push(SettingChange::JiraApiToken(value));
+                    }),
+                FlexItem::fixed(3),
+            )
             .child(
                 "speed-reader-wpm",
                 TextInput::new()
-                    .value(values.wpm.to_string())
+                    .value(values.speed_reader.wpm.to_string())
                     .numbers_only(true)
                     .panel("Reader WPM")
-                    .focused(true)
                     .on_edit_end(move |value| {
                         wpm_changes.borrow_mut().push(SettingChange::Wpm(value));
                     }),
-                FlexItem::fill(1),
+                FlexItem::fixed(3),
             )
             .child(
                 "markdown-block-pause",
                 TextInput::new()
-                    .value(values.markdown_block_pause.as_millis().to_string())
+                    .value(values.block_delay().as_millis().to_string())
                     .numbers_only(true)
                     .panel("Reader block delay (ms)")
                     .on_edit_end(move |value| {
@@ -58,18 +106,37 @@ impl SettingsDialog {
                             .borrow_mut()
                             .push(SettingChange::MarkdownBlockPause(value));
                     }),
-                FlexItem::fill(1),
+                FlexItem::fixed(3),
             );
         Self {
             root,
             changes,
             settings,
+            service,
         }
     }
 
     fn apply_changes(&self, ctx: &mut EventCtx<()>) {
+        let mut settings = self
+            .settings
+            .read()
+            .expect("settings lock poisoned")
+            .clone();
+        let mut changed = false;
         for change in self.changes.borrow_mut().drain(..) {
             match change {
+                SettingChange::JiraBaseUrl(value) => {
+                    settings.jira_base_url = value.trim().trim_end_matches('/').into();
+                    changed = true;
+                }
+                SettingChange::JiraEmail(value) => {
+                    settings.jira_email = value.trim().into();
+                    changed = true;
+                }
+                SettingChange::JiraApiToken(value) => {
+                    settings.jira_api_token = value.trim().into();
+                    changed = true;
+                }
                 SettingChange::Wpm(value) => {
                     let Some(wpm) = parse_speed_reader_wpm(&value) else {
                         ctx.notify(tuicore::Notification::warning(
@@ -80,10 +147,8 @@ impl SettingsDialog {
                         ));
                         continue;
                     };
-                    self.settings.set(SpeedReaderSettings {
-                        wpm,
-                        ..self.settings.get()
-                    });
+                    settings.speed_reader.wpm = wpm;
+                    changed = true;
                 }
                 SettingChange::MarkdownBlockPause(value) => {
                     let Some(markdown_block_pause) = parse_markdown_block_pause(&value) else {
@@ -95,12 +160,13 @@ impl SettingsDialog {
                         ));
                         continue;
                     };
-                    self.settings.set(SpeedReaderSettings {
-                        markdown_block_pause,
-                        ..self.settings.get()
-                    });
+                    settings.speed_reader.markdown_block_pause = markdown_block_pause;
+                    changed = true;
                 }
             }
+        }
+        if changed {
+            self.service.save_settings(settings);
         }
     }
 }
