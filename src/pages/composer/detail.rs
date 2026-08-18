@@ -12,6 +12,7 @@ use tuicore::{
 };
 
 use crate::{
+    app_settings::ComposerKeyBinding,
     service::AppService,
     store::composer::{ChangeKind, ComposerAction, ComposerState, ComposerViewMode},
 };
@@ -52,6 +53,7 @@ impl DetailPane {
         pending: PendingActions,
         description_actions: PendingDescriptionActions,
         service: AppService,
+        view_key: ComposerKeyBinding,
     ) -> Self {
         let title = BoundTextField::title(Rc::clone(&state), Rc::clone(&pending));
         let description_edit_request = Rc::new(std::cell::Cell::new(false));
@@ -144,7 +146,7 @@ impl DetailPane {
             Split::vertical(title, details).constraints(Constraint::Length(3), Constraint::Fill(1));
         let mode = Flex::row().child(
             "mode",
-            BoundViewMode::new(Rc::clone(&state), Rc::clone(&pending)),
+            BoundViewMode::new(Rc::clone(&state), Rc::clone(&pending), view_key),
             FlexItem::fit_content(),
         );
         Self {
@@ -244,11 +246,9 @@ impl DetailPane {
             return None;
         }
         self.external_editor_pending = false;
-        let adf = crate::store::composer::jira_adf::markdown_to_adf(&response.value);
-        let markdown = crate::store::composer::jira_adf::adf_to_markdown(&adf);
         self.state
             .borrow_mut()
-            .dispatch(ComposerAction::UpdateDescription(markdown));
+            .dispatch(ComposerAction::UpdateDescription(response.value.clone()));
         ctx.request_layout();
         ctx.request_redraw();
         ctx.stop_propagation();

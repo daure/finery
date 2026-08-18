@@ -80,8 +80,7 @@ impl ComposerPage {
         ctx.request_layout();
         ctx.request_redraw();
         if is_open {
-            self.editor.ensure_source(false, ctx);
-            TicketEditor::focus_tickets(ctx);
+            self.editor.on_open(ctx);
         }
     }
 
@@ -94,6 +93,11 @@ impl ComposerPage {
                 project_key: "FIN".into(),
             });
         self.editor.sync();
+    }
+
+    #[cfg(test)]
+    pub(super) fn open_new_ticket(&mut self, ctx: &mut EventCtx<()>) {
+        self.editor.open_new_ticket_for_test(ctx);
     }
 
     #[cfg(test)]
@@ -163,6 +167,16 @@ impl ComposerPage {
     pub(super) fn narrow_border_style(&self) -> tuicore::TabsBodyBorderStyle {
         self.editor.narrow_border_style()
     }
+
+    #[cfg(test)]
+    pub(super) fn create_kind_menu_is_open(&self) -> bool {
+        self.editor.create_kind_menu_is_open()
+    }
+
+    #[cfg(test)]
+    pub(super) fn create_dialog_is_open(&self) -> bool {
+        self.editor.create_dialog_is_open()
+    }
 }
 
 impl TuiNode for ComposerPage {
@@ -230,6 +244,9 @@ impl TuiNode for ComposerPage {
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.change_sets.mount(ctx);
         self.editor.mount(ctx);
+        if self.in_change_set() {
+            self.editor.on_open_lifecycle(ctx);
+        }
     }
 
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {

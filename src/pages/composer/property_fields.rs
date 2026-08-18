@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::Rc,
     sync::mpsc::{self, Receiver, Sender},
     time::Duration,
@@ -16,7 +16,7 @@ use tuicore::{
 use crate::{
     jira::{JiraAssignee, JiraFieldOptions, JiraOption},
     service::AppService,
-    store::composer::{ComposerAction, ComposerState, Ticket, TicketKind},
+    store::composer::{ComposerAction, ComposerState, PlacementTarget, Ticket, TicketKind},
 };
 
 type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
@@ -26,6 +26,7 @@ const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PropertyKind {
     IssueType,
+    Parent,
     Status,
     Priority,
     Assignee,
@@ -63,6 +64,17 @@ impl PropertyFields {
                     Rc::clone(&shared),
                     service.clone(),
                     PropertyKind::IssueType,
+                ),
+                FlexItem::fixed(3),
+            )
+            .child(
+                "parent",
+                BoundPropertyDropdown::new(
+                    Rc::clone(&state),
+                    Rc::clone(&pending),
+                    Rc::clone(&shared),
+                    service.clone(),
+                    PropertyKind::Parent,
                 ),
                 FlexItem::fixed(3),
             )
@@ -196,6 +208,7 @@ impl BoundPropertyDropdown {
         let labels = Rc::new(RefCell::new(HashMap::<String, String>::new()));
         let callback_labels = Rc::clone(&labels);
         let sink = Rc::clone(&pending);
+        let callback_state = Rc::clone(&state);
         let control = Dropdown::single(
             [],
             |option: &JiraOption| option.id.clone(),
@@ -219,7 +232,28 @@ impl BoundPropertyDropdown {
                 .get(id)
                 .cloned()
                 .unwrap_or_else(|| id.clone());
-            sink.borrow_mut().push(kind.action(id.clone(), label));
+            if kind == PropertyKind::Parent {
+                let Some(ticket_id) = callback_state.borrow().selected_ticket.clone() else {
+                    return;
+                };
+                let placement = if id == "__root" {
+                    PlacementTarget::Root
+                } else {
+                    PlacementTarget::ChildOf(id.clone())
+                };
+                if callback_state
+                    .borrow()
+                    .validate_placement(&ticket_id, &placement)
+                    .is_ok()
+                {
+                    sink.borrow_mut().push(ComposerAction::ReparentTicket {
+                        id: ticket_id,
+                        placement,
+                    });
+                }
+            } else {
+                sink.borrow_mut().push(kind.action(id.clone(), label));
+            }
         });
         let (assignee_sender, assignee_receiver) = mpsc::channel();
         Self {
@@ -259,6 +293,40 @@ impl BoundPropertyDropdown {
     }
 
     #[cfg(test)]
+    pub(super) fn assignee_for_test(
+        state: Rc<RefCell<ComposerState>>,
+        pending: PendingActions,
+        service: AppService,
+        assignees: Vec<JiraOption>,
+    ) -> Self {
+        let mut control = Self::new(
+            state,
+            pending,
+            Rc::new(RefCell::new(SharedOptions::default())),
+            service,
+            PropertyKind::Assignee,
+        );
+        control.synced_rows = assignees;
+        control.control.set_rows(control.synced_rows.clone());
+        control
+    }
+
+    #[cfg(test)]
+    pub(super) fn parent_for_test(
+        state: Rc<RefCell<ComposerState>>,
+        pending: PendingActions,
+        service: AppService,
+    ) -> Self {
+        Self::new(
+            state,
+            pending,
+            Rc::new(RefCell::new(SharedOptions::default())),
+            service,
+            PropertyKind::Parent,
+        )
+    }
+
+    #[cfg(test)]
     pub(super) fn set_priorities_for_test(&mut self, priorities: Vec<JiraOption>) {
         self.shared.borrow_mut().values.as_mut().unwrap().priorities = priorities;
     }
@@ -273,13 +341,24 @@ impl BoundPropertyDropdown {
         self.control.selected_id()
     }
 
+    #[cfg(test)]
+    pub(super) fn sync_for_test(&mut self) {
+        self.sync();
+    }
+
     fn sync(&mut self) -> bool {
         let (value, disabled) = {
             let state = self.state.borrow();
             let displayed = state.selected_ticket();
-            let value = displayed
-                .map_or("", |ticket| self.kind.value(ticket))
-                .to_owned();
+            let value = if self.kind == PropertyKind::Parent {
+                state
+                    .selected_parent_id()
+                    .unwrap_or_else(|| "__root".into())
+            } else if self.kind == PropertyKind::Assignee {
+                displayed.map_or_else(String::new, |ticket| ticket.assignee_account_id.clone())
+            } else {
+                displayed.map_or_else(String::new, |ticket| self.kind.value(ticket))
+            };
             (value, !state.selected_is_editable())
         };
         let mut changed = false;
@@ -289,10 +368,14 @@ impl BoundPropertyDropdown {
         }
         if self.kind != PropertyKind::Assignee {
             let mut options = self.options();
-            if !value.is_empty() && !options.iter().any(|option| option.label == value) {
+            if !value.is_empty() && !options.iter().any(|option| option.id == value) {
                 options.push(JiraOption {
                     id: value.clone(),
-                    label: value.clone(),
+                    label: if self.kind == PropertyKind::Parent {
+                        format!("{value} (unavailable)")
+                    } else {
+                        value.clone()
+                    },
                 });
             }
             changed |= self.set_options(options, &value);
@@ -303,15 +386,32 @@ impl BoundPropertyDropdown {
     }
 
     fn options(&self) -> Vec<JiraOption> {
+        if self.kind == PropertyKind::Parent {
+            return self.parent_options();
+        }
         let shared = self.shared.borrow();
         let Some(values) = shared.values.as_ref() else {
-            return Vec::new();
+            return if self.kind == PropertyKind::IssueType {
+                self.kind_options()
+            } else {
+                Vec::new()
+            };
         };
         match self.kind {
-            PropertyKind::IssueType => values.issue_types.clone(),
+            PropertyKind::IssueType => values
+                .issue_types
+                .iter()
+                .filter(|option| {
+                    self.kind_options()
+                        .iter()
+                        .any(|legal| legal.label == option.label)
+                })
+                .cloned()
+                .collect(),
             PropertyKind::Status => values.statuses.clone(),
             PropertyKind::Priority => values.priorities.clone(),
             PropertyKind::Assignee => Vec::new(),
+            PropertyKind::Parent => Vec::new(),
         }
         .into_iter()
         .map(|option| JiraOption {
@@ -319,6 +419,67 @@ impl BoundPropertyDropdown {
             label: option.label,
         })
         .collect()
+    }
+
+    fn kind_options(&self) -> Vec<JiraOption> {
+        self.state
+            .borrow()
+            .legal_kinds_for_selected()
+            .into_iter()
+            .map(|kind| JiraOption {
+                id: self.kind_name(kind).into(),
+                label: self.kind_name(kind).into(),
+            })
+            .collect()
+    }
+
+    fn parent_options(&self) -> Vec<JiraOption> {
+        let state = self.state.borrow();
+        let Some(ticket) = state.selected_ticket() else {
+            return Vec::new();
+        };
+        let selected_id = state.selected_ticket.clone();
+        let mut options = Vec::new();
+        if state.legal_child_kinds(None).contains(&ticket.kind) {
+            options.push(JiraOption {
+                id: "__root".into(),
+                label: "Root".into(),
+            });
+        }
+        let mut parent_ids = HashSet::new();
+        options.extend(
+            state
+                .parent_candidates(ticket.kind)
+                .into_iter()
+                .filter(|candidate| Some(&candidate.id) != selected_id.as_ref())
+                .filter_map(|candidate| {
+                    state
+                        .changes_for_change(candidate)
+                        .map(|parent| JiraOption {
+                            id: candidate.id.clone(),
+                            label: format!("{} · {}", parent.key, parent.title),
+                        })
+                })
+                .filter(|option| {
+                    selected_id.as_deref().is_some_and(|id| {
+                        state
+                            .validate_placement(id, &PlacementTarget::ChildOf(option.id.clone()))
+                            .is_ok()
+                    })
+                })
+                .filter(|option| parent_ids.insert(option.id.clone())),
+        );
+        options
+    }
+
+    fn kind_name(&self, kind: TicketKind) -> &'static str {
+        match kind {
+            TicketKind::Epic => "Epic",
+            TicketKind::Story => "Story",
+            TicketKind::Task => "Task",
+            TicketKind::Bug => "Bug",
+            TicketKind::Subtask => "Sub-task",
+        }
     }
 
     fn set_options(&mut self, options: Vec<JiraOption>, selected_label: &str) -> bool {
@@ -341,13 +502,12 @@ impl BoundPropertyDropdown {
         }
         if selected_changed {
             if !selected_label.is_empty()
-                && let Some(selected) = self
+                && self
                     .synced_rows
                     .iter()
-                    .find(|option| option.label == selected_label)
-                    .map(|option| option.id.clone())
+                    .any(|option| option.id == selected_label)
             {
-                self.control.set_selected_one(selected);
+                self.control.set_selected_one(selected_label.to_owned());
             } else {
                 self.control.clear_selection();
             }
@@ -457,6 +617,7 @@ impl PropertyKind {
     fn label(self) -> &'static str {
         match self {
             Self::IssueType => "Issue type",
+            Self::Parent => "Parent",
             Self::Status => "Status",
             Self::Priority => "Priority",
             Self::Assignee => "Assignee",
@@ -466,24 +627,26 @@ impl PropertyKind {
     fn hotkey(self) -> &'static str {
         match self {
             Self::IssueType => "it",
+            Self::Parent => "pa",
             Self::Status => "st",
             Self::Priority => "pr",
             Self::Assignee => "ee",
         }
     }
 
-    fn value(self, ticket: &Ticket) -> &str {
+    fn value(self, ticket: &Ticket) -> String {
         match self {
             Self::IssueType => match ticket.kind {
-                TicketKind::Epic => "Epic",
-                TicketKind::Story => "Story",
-                TicketKind::Task => "Task",
-                TicketKind::Bug => "Bug",
-                TicketKind::Subtask => "Sub-task",
+                TicketKind::Epic => "Epic".into(),
+                TicketKind::Story => "Story".into(),
+                TicketKind::Task => "Task".into(),
+                TicketKind::Bug => "Bug".into(),
+                TicketKind::Subtask => "Sub-task".into(),
             },
-            Self::Status => &ticket.status,
-            Self::Priority => &ticket.priority,
-            Self::Assignee => &ticket.assignee,
+            Self::Parent => ticket.parent_key.clone().unwrap_or_else(|| "Root".into()),
+            Self::Status => ticket.status.clone(),
+            Self::Priority => ticket.priority.clone(),
+            Self::Assignee => ticket.assignee.clone(),
         }
     }
 
@@ -504,6 +667,7 @@ impl PropertyKind {
                 name: label,
                 account_id: id,
             },
+            Self::Parent => unreachable!("parent selections are handled by the dropdown"),
         }
     }
 }

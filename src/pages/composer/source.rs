@@ -157,13 +157,6 @@ impl SourceController {
             }
             if refreshing && self.loading == 0 {
                 self.requested = None;
-                if self.refresh_failures == 0 {
-                    self.service
-                        .report_notification(tuicore::Notification::success(
-                            "Refresh complete",
-                            format!("{} tickets refreshed", self.refresh_count),
-                        ));
-                }
             }
             changed = true;
         }

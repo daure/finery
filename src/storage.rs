@@ -125,7 +125,7 @@ impl Storage {
                 SqlDialect::Postgres => row.try_get("closed")?,
             };
             let query = format!(
-                "SELECT payload FROM ticket_changes WHERE change_set_id = {} ORDER BY ticket_id",
+                "SELECT sibling_order, payload FROM ticket_changes WHERE change_set_id = {} ORDER BY sibling_order, ticket_id",
                 self.dialect.placeholder(1)
             );
             let changes = sqlx::query(AssertSqlSafe(query.as_str()))
@@ -135,7 +135,10 @@ impl Storage {
                 .into_iter()
                 .map(|row| {
                     let payload: String = row.try_get("payload")?;
-                    Ok(serde_json::from_str::<TicketChange>(&payload)?)
+                    let mut change = serde_json::from_str::<TicketChange>(&payload)?;
+                    change.sibling_order =
+                        usize::try_from(row.try_get::<i64, _>("sibling_order")?)?;
+                    Ok(change)
                 })
                 .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
             sets.push(ChangeSet {
@@ -179,15 +182,17 @@ impl Storage {
             .execute(&mut *transaction)
             .await?;
         let insert = format!(
-            "INSERT INTO ticket_changes (change_set_id, ticket_id, payload) VALUES ({}, {}, {})",
+            "INSERT INTO ticket_changes (change_set_id, ticket_id, sibling_order, payload) VALUES ({}, {}, {}, {})",
             self.dialect.placeholder(1),
             self.dialect.placeholder(2),
-            self.dialect.placeholder(3)
+            self.dialect.placeholder(3),
+            self.dialect.placeholder(4)
         );
         for change in &set.tickets {
             sqlx::query(AssertSqlSafe(insert.as_str()))
                 .bind(&set.id)
                 .bind(&change.id)
+                .bind(i64::try_from(change.sibling_order)?)
                 .bind(serde_json::to_string(change)?)
                 .execute(&mut *transaction)
                 .await?;

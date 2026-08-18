@@ -4,7 +4,7 @@ use tuicore::{EventCtx, FocusCtx, FocusId, FocusRequest, LayoutCtx, RenderCtx, T
 use super::{AddTicketMenu, EXISTING_WIDTH};
 use crate::{
     service::AppService,
-    store::composer::{Ticket, TicketKind},
+    store::composer::{PlacementTarget, Ticket, TicketKind},
 };
 
 #[test]
@@ -17,7 +17,12 @@ fn existing_jira_search_uses_centered_dropdown_popup_without_trigger_field() {
         menu.layout(area, ctx);
     });
     let mut open = EventCtx::default();
-    menu.open_existing(&mut open);
+    menu.open_existing(
+        None,
+        PlacementTarget::Root,
+        vec![TicketKind::Story],
+        &mut open,
+    );
     assert!(matches!(
         open.focus_request(),
         Some(FocusRequest::TargetAt { id, .. }) if id == &FocusId::new("input")
@@ -34,6 +39,8 @@ fn existing_jira_search_uses_centered_dropdown_popup_without_trigger_field() {
         priority: "High".into(),
         assignee: "Ada".into(),
         assignee_account_id: "ada".into(),
+        parent_key: None,
+        parent_kind: None,
     }]));
     let mut open_layout = LayoutCtx::new();
     open_layout.with_overlay_bounds(area, |ctx| {
@@ -75,4 +82,43 @@ fn existing_jira_search_uses_centered_dropdown_popup_without_trigger_field() {
     assert!(!text.contains("Select..."), "rendered: {text:?}");
     assert!(!text.contains("Search Jira"), "rendered: {text:?}");
     assert!(!text.contains("No results"), "rendered: {text:?}");
+}
+
+#[test]
+fn existing_search_keeps_legal_result_beyond_first_ten() {
+    let mut menu = AddTicketMenu::new(AppService::for_tests());
+    menu.legal_kinds = vec![TicketKind::Story];
+    let mut tickets = (0..10)
+        .map(|index| Ticket {
+            key: format!("FIN-{index}"),
+            project_key: "FIN".into(),
+            title: "Task".into(),
+            description: String::new(),
+            kind: TicketKind::Task,
+            status: "To Do".into(),
+            priority: "Medium".into(),
+            assignee: "Unassigned".into(),
+            assignee_account_id: String::new(),
+            parent_key: None,
+            parent_kind: None,
+        })
+        .collect::<Vec<_>>();
+    tickets.push(Ticket {
+        key: "FIN-legal".into(),
+        project_key: "FIN".into(),
+        title: "Story".into(),
+        description: String::new(),
+        kind: TicketKind::Story,
+        status: "To Do".into(),
+        priority: "Medium".into(),
+        assignee: "Unassigned".into(),
+        assignee_account_id: String::new(),
+        parent_key: None,
+        parent_kind: None,
+    });
+
+    menu.apply_search_result(Ok(tickets));
+
+    assert_eq!(menu.tickets.len(), 1);
+    assert_eq!(menu.tickets[0].key, "FIN-legal");
 }

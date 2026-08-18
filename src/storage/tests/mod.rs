@@ -4,6 +4,8 @@ use crate::store::composer::{
 
 use super::Storage;
 
+mod ticket_order;
+
 fn ticket(key: &str, title: &str) -> Ticket {
     Ticket {
         key: key.into(),
@@ -15,6 +17,8 @@ fn ticket(key: &str, title: &str) -> Ticket {
         priority: "High".into(),
         assignee: "Ada".into(),
         assignee_account_id: "ada".into(),
+        parent_key: None,
+        parent_kind: None,
     }
 }
 
@@ -36,6 +40,7 @@ fn change_sets_ticket_snapshots_and_settings_survive_round_trip() {
                     original: Some(ticket("OPS-1", "Original")),
                     updated: Some(ticket("OPS-1", "Updated")),
                 }),
+                sibling_order: 0,
             }],
         };
 
@@ -66,6 +71,7 @@ fn deleting_change_set_cascades_ticket_changes() {
                 updated: Some(ticket("NEW-1", "Local")),
                 kind: ChangeKind::Added,
                 submitted: None,
+                sibling_order: 0,
             }],
         };
         storage.save_change_set(&set).await.unwrap();

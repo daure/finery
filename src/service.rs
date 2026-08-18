@@ -36,7 +36,8 @@ impl AppService {
         let runtime = Arc::new(Runtime::new()?);
         let storage = runtime.block_on(Storage::connect_from_env())?;
         let stored_settings = runtime.block_on(storage.load_settings())?;
-        let settings = AppSettings::resolve(&stored_settings);
+        let settings = AppSettings::resolve(&stored_settings)
+            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
         let change_sets = runtime.block_on(storage.load_change_sets())?;
         let errors = Arc::new(Mutex::new(Vec::new()));
         let notifications = Arc::new(Mutex::new(Vec::new()));

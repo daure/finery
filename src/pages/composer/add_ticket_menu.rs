@@ -13,7 +13,11 @@ use tuicore::{
     TuiNode, keybindings,
 };
 
-use crate::{jira::JiraProject, service::AppService, store::composer::Ticket};
+use crate::{
+    jira::JiraProject,
+    service::AppService,
+    store::composer::{PlacementTarget, Ticket, TicketKind},
+};
 
 const CHOICE_HOST_WIDTH: u16 = 52;
 const CHOICE_FIELD_WIDTH: u16 = 46;
@@ -60,8 +64,14 @@ impl AddItem {
 
 #[derive(Clone)]
 pub(super) enum AddTicketEvent {
-    CreateNew(String),
-    Include(Ticket),
+    CreateNew {
+        project_key: String,
+        placement: PlacementTarget,
+    },
+    Include {
+        ticket: Ticket,
+        placement: PlacementTarget,
+    },
     Closed,
 }
 
@@ -87,6 +97,8 @@ pub(super) struct AddTicketMenu {
     project_sender: Sender<(u64, Result<Vec<JiraProject>, String>)>,
     project_receiver: Receiver<(u64, Result<Vec<JiraProject>, String>)>,
     project_hint: Option<String>,
+    placement: PlacementTarget,
+    legal_kinds: Vec<TicketKind>,
     field_area: Rect,
 }
 
@@ -128,19 +140,34 @@ impl AddTicketMenu {
             project_sender,
             project_receiver,
             project_hint: None,
+            placement: PlacementTarget::Root,
+            legal_kinds: Vec::new(),
             field_area: Rect::default(),
         }
     }
 
-    pub(super) fn open(&mut self, project_hint: Option<String>) {
-        self.mode = AddMenuMode::Choice;
+    pub(super) fn open_existing(
+        &mut self,
+        project_hint: Option<String>,
+        placement: PlacementTarget,
+        legal_kinds: Vec<TicketKind>,
+        ctx: &mut EventCtx<()>,
+    ) {
+        self.placement = placement;
+        self.legal_kinds = legal_kinds;
         self.project_hint = project_hint;
-        self.pending_search = None;
-        self.dropdown.set_search_mode(DropdownSearchMode::Fuzzy);
-        self.dropdown.set_rows(choice_items());
-        self.dropdown.clear_selection();
-        self.dropdown.set_search_query("");
-        self.dropdown.open();
+        self.open_existing_search(ctx);
+    }
+
+    pub(super) fn open_new_project_selector(
+        &mut self,
+        placement: PlacementTarget,
+        legal_kinds: Vec<TicketKind>,
+        ctx: &mut EventCtx<()>,
+    ) {
+        self.placement = placement;
+        self.legal_kinds = legal_kinds;
+        self.open_projects(ctx);
     }
 
     pub(super) fn open_projects(&mut self, ctx: &mut EventCtx<()>) {
@@ -171,7 +198,7 @@ impl AddTicketMenu {
         std::mem::take(&mut self.events)
     }
 
-    fn open_existing(&mut self, ctx: &mut EventCtx<()>) {
+    fn open_existing_search(&mut self, ctx: &mut EventCtx<()>) {
         self.mode = AddMenuMode::Existing;
         self.pending_search = None;
         self.dropdown.set_search_mode(DropdownSearchMode::External);
@@ -208,6 +235,10 @@ impl AddTicketMenu {
         self.dropdown.set_external_loading(false);
         match result {
             Ok(tickets) => {
+                let tickets = tickets
+                    .into_iter()
+                    .filter(|ticket| self.legal_kinds.contains(&ticket.kind))
+                    .collect::<Vec<_>>();
                 self.tickets = tickets.clone();
                 self.dropdown
                     .set_rows(tickets.into_iter().map(AddItem::Ticket));
@@ -277,18 +308,27 @@ impl AddTicketMenu {
             match selection {
                 AddItemId::New => {
                     if let Some(project) = self.project_hint.clone() {
-                        self.events.push(AddTicketEvent::CreateNew(project));
+                        self.events.push(AddTicketEvent::CreateNew {
+                            project_key: project,
+                            placement: self.placement.clone(),
+                        });
                     } else {
                         self.open_projects(ctx);
                     }
                 }
-                AddItemId::Existing => self.open_existing(ctx),
+                AddItemId::Existing => self.open_existing_search(ctx),
                 AddItemId::Ticket(id) => {
                     if let Some(ticket) = self.tickets.iter().find(|ticket| ticket.key == id) {
-                        self.events.push(AddTicketEvent::Include(ticket.clone()));
+                        self.events.push(AddTicketEvent::Include {
+                            ticket: ticket.clone(),
+                            placement: self.placement.clone(),
+                        });
                     }
                 }
-                AddItemId::Project(key) => self.events.push(AddTicketEvent::CreateNew(key)),
+                AddItemId::Project(key) => self.events.push(AddTicketEvent::CreateNew {
+                    project_key: key,
+                    placement: self.placement.clone(),
+                }),
             }
         }
     }

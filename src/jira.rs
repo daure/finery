@@ -13,7 +13,7 @@ use crate::{
     store::work_items::{BacklogSnapshot, Sprint, WorkItem},
 };
 
-const ISSUE_FIELDS: [&str; 7] = [
+const ISSUE_FIELDS: [&str; 8] = [
     "summary",
     "description",
     "issuetype",
@@ -21,6 +21,7 @@ const ISSUE_FIELDS: [&str; 7] = [
     "priority",
     "assignee",
     "project",
+    "parent",
 ];
 
 const BACKLOG_FIELDS: [&str; 5] = ["summary", "issuetype", "status", "priority", "assignee"];
@@ -434,17 +435,32 @@ fn create_issue_types(
     project_key: &str,
 ) -> Result<Vec<JiraOption>, String> {
     let response = client
-        .get(format!("{base_url}/rest/api/3/issue/createmeta"))
+        .get(format!(
+            "{base_url}/rest/api/3/issue/createmeta/{project_key}/issuetypes"
+        ))
         .basic_auth(email, Some(token))
-        .query(&[("projectKeys", project_key)])
+        .query(&[("maxResults", "100")])
         .send()
         .map_err(|error| error.to_string())?;
     let value = response_json::<Value>(response)?;
-    Ok(options_from_values(
-        value
-            .pointer("/projects/0/issuetypes")
-            .and_then(Value::as_array),
-    ))
+    Ok(create_issue_types_from_value(&value))
+}
+
+fn create_issue_types_from_value(value: &Value) -> Vec<JiraOption> {
+    options_from_values(value.get("values").and_then(Value::as_array))
+}
+
+fn create_issue_type(issue_types: Vec<JiraOption>, ticket: &Ticket) -> Result<JiraOption, String> {
+    issue_types
+        .into_iter()
+        .find(|issue_type| ticket_kind(&issue_type.label) == ticket.kind)
+        .ok_or_else(|| {
+            format!(
+                "Project {} cannot create {} issues",
+                ticket.project_key,
+                ticket_kind_name(ticket.kind)
+            )
+        })
 }
 
 fn edit_issue_types(
@@ -569,6 +585,7 @@ pub(crate) fn submit_changes(
     settings: &AppSettings,
     changes: &[TicketChange],
 ) -> Result<SubmitBatchOutcome, String> {
+    commit_order(changes)?;
     let (client, base_url, email, token) = configured_client(settings)?;
     let existing_keys = changes
         .iter()
@@ -596,14 +613,132 @@ pub(crate) fn submit_changes(
         ));
     }
 
-    let outcomes = changes
-        .iter()
-        .map(|change| TicketSubmitOutcome {
+    submit_ordered_changes(changes, |change| {
+        submit_change(&client, &base_url, &email, &token, change, &current)
+    })
+    .map(SubmitBatchOutcome::Completed)
+}
+
+fn submit_ordered_changes(
+    changes: &[TicketChange],
+    mut submit: impl FnMut(&TicketChange) -> Result<SubmissionSnapshot, SubmitFailure>,
+) -> Result<Vec<TicketSubmitOutcome>, String> {
+    let order = commit_order(changes)?;
+    let mut created_keys = HashMap::<String, String>::new();
+    let mut failed = std::collections::HashSet::new();
+    let mut outcomes = Vec::with_capacity(changes.len());
+    for index in order {
+        let change = &changes[index];
+        let parent = change_parent(change);
+        if let Some(parent) = parent.as_deref()
+            && failed.contains(parent)
+        {
+            failed.insert(change.id.clone());
+            outcomes.push(TicketSubmitOutcome {
+                id: change.id.clone(),
+                result: Err(submit_failure(format!(
+                    "Commit skipped: parent {parent} failed"
+                ))),
+            });
+            continue;
+        }
+        let mut resolved = change.clone();
+        if let Some(ticket) = resolved.updated.as_mut()
+            && let Some(parent) = ticket.parent_key.as_mut()
+            && let Some(key) = created_keys.get(parent)
+        {
+            *parent = key.clone();
+        }
+        let result = submit(&resolved);
+        if let Ok(snapshot) = &result
+            && let Some(ticket) = snapshot.updated.as_ref().or(snapshot.original.as_ref())
+            && change.id.starts_with("NEW-")
+        {
+            created_keys.insert(change.id.clone(), ticket.key.clone());
+        }
+        if result.is_err() {
+            failed.insert(change.id.clone());
+        }
+        outcomes.push(TicketSubmitOutcome {
             id: change.id.clone(),
-            result: submit_change(&client, &base_url, &email, &token, change, &current),
-        })
-        .collect();
-    Ok(SubmitBatchOutcome::Completed(outcomes))
+            result,
+        });
+    }
+    Ok(outcomes)
+}
+
+fn commit_order(changes: &[TicketChange]) -> Result<Vec<usize>, String> {
+    let indexes = changes
+        .iter()
+        .enumerate()
+        .map(|(index, change)| (change.id.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    for change in changes {
+        if let Some(parent) = change_parent(change)
+            && parent.starts_with("NEW-")
+            && !indexes.contains_key(parent.as_str())
+        {
+            return Err(format!(
+                "Commit blocked: {} needs unsent local parent {parent} selected",
+                change.id
+            ));
+        }
+    }
+    let mut visiting = vec![false; changes.len()];
+    let mut visited = vec![false; changes.len()];
+    let mut ordered = Vec::with_capacity(changes.len());
+    for index in 0..changes.len() {
+        visit_commit_change(
+            index,
+            changes,
+            &indexes,
+            &mut visiting,
+            &mut visited,
+            &mut ordered,
+        )?;
+    }
+    Ok(ordered)
+}
+
+fn visit_commit_change(
+    index: usize,
+    changes: &[TicketChange],
+    indexes: &HashMap<&str, usize>,
+    visiting: &mut [bool],
+    visited: &mut [bool],
+    ordered: &mut Vec<usize>,
+) -> Result<(), String> {
+    if visited[index] {
+        return Ok(());
+    }
+    if visiting[index] {
+        return Err("Commit blocked: local parent relationship contains a cycle".into());
+    }
+    visiting[index] = true;
+    if let Some(parent) = change_parent(&changes[index])
+        && let Some(parent_index) = indexes.get(parent.as_str())
+    {
+        visit_commit_change(*parent_index, changes, indexes, visiting, visited, ordered)?;
+    }
+    visiting[index] = false;
+    visited[index] = true;
+    ordered.push(index);
+    Ok(())
+}
+
+fn change_parent(change: &TicketChange) -> Option<String> {
+    change
+        .updated
+        .as_ref()
+        .or(change.original.as_ref())
+        .and_then(|ticket| ticket.parent_key.clone())
+}
+
+fn submit_failure(message: String) -> SubmitFailure {
+    SubmitFailure {
+        message,
+        refresh: None,
+    }
 }
 
 fn configured_client(settings: &AppSettings) -> Result<(Client, String, String, String), String> {
@@ -638,7 +773,7 @@ fn submit_change(
                 .and_then(|ticket| current.get(&ticket.key))
                 .cloned()
                 .ok_or_else(|| SubmitFailure {
-                    message: "Jira ticket was not found during submit".into(),
+                    message: "Jira ticket was not found during commit".into(),
                     refresh: None,
                 })?;
             Ok(SubmissionSnapshot {
@@ -747,16 +882,22 @@ fn create_issue(
 ) -> Result<Ticket, SubmitFailure> {
     if desired.project_key.trim().is_empty() {
         return Err(SubmitFailure {
-            message: "Choose a Jira project before submitting the new ticket".into(),
+            message: "Choose a Jira project before committing the new ticket".into(),
             refresh: None,
         });
     }
-    if desired.kind == TicketKind::Subtask {
+    if desired.kind == TicketKind::Subtask && desired.parent_key.is_none() {
         return Err(SubmitFailure {
-            message: "A subtask needs a parent and cannot be created from this composer yet".into(),
+            message: "A sub-task needs a parent before it can be committed".into(),
             refresh: None,
         });
     }
+    let issue_type = create_issue_types(client, base_url, email, token, &desired.project_key)
+        .and_then(|issue_types| create_issue_type(issue_types, desired))
+        .map_err(|message| SubmitFailure {
+            message,
+            refresh: None,
+        })?;
     let account_id =
         resolve_assignee(client, base_url, email, token, desired).map_err(|message| {
             SubmitFailure {
@@ -764,7 +905,7 @@ fn create_issue(
                 refresh: None,
             }
         })?;
-    let fields = issue_fields(desired, account_id.as_deref(), true);
+    let fields = create_issue_fields(desired, account_id.as_deref(), &issue_type);
     let response = client
         .post(format!("{base_url}/rest/api/3/issue"))
         .basic_auth(email, Some(token))
@@ -822,14 +963,16 @@ fn update_issue(
     original: &Ticket,
     desired: &Ticket,
 ) -> Result<Ticket, String> {
+    if desired.kind == TicketKind::Subtask && desired.parent_key.is_none() {
+        return Err("A sub-task cannot be moved to Root in Jira".into());
+    }
     let account_id = resolve_assignee(client, base_url, email, token, desired)?;
+    let payload = update_payload(original, desired, account_id.as_deref())?;
     let response = client
         .put(format!("{base_url}/rest/api/3/issue/{}", original.key))
         .basic_auth(email, Some(token))
         .header("Accept", "application/json")
-        .json(&json!({
-            "fields": issue_fields(desired, account_id.as_deref(), false)
-        }))
+        .json(&payload)
         .send()
         .map_err(|error| error.to_string())?;
     ensure_success(response)?;
@@ -945,7 +1088,42 @@ fn issue_fields(ticket: &Ticket, account_id: Option<&str>, include_project: bool
         "assignee".into(),
         account_id.map_or(Value::Null, |id| json!({ "accountId": id })),
     );
+    if let Some(parent) = ticket.parent_key.as_deref() {
+        fields.insert("parent".into(), json!({ "key": parent }));
+    }
     Value::Object(fields)
+}
+
+fn create_issue_fields(
+    ticket: &Ticket,
+    account_id: Option<&str>,
+    issue_type: &JiraOption,
+) -> Value {
+    let mut fields = issue_fields(ticket, account_id, true)
+        .as_object()
+        .expect("issue fields must be an object")
+        .clone();
+    fields.insert("issuetype".into(), json!({ "id": issue_type.id }));
+    Value::Object(fields)
+}
+
+fn update_payload(
+    original: &Ticket,
+    desired: &Ticket,
+    account_id: Option<&str>,
+) -> Result<Value, String> {
+    if desired.kind == TicketKind::Subtask && desired.parent_key.is_none() {
+        return Err("A sub-task cannot be moved to Root in Jira".into());
+    }
+    let mut payload = Map::new();
+    payload.insert("fields".into(), issue_fields(desired, account_id, false));
+    if original.parent_key.is_some() && desired.parent_key.is_none() {
+        payload.insert(
+            "update".into(),
+            json!({ "parent": [{ "set": Value::Null }] }),
+        );
+    }
+    Ok(Value::Object(payload))
 }
 
 fn failed_with_refresh(
@@ -976,6 +1154,8 @@ fn same_jira_content(left: &Ticket, right: &Ticket) -> bool {
         && left.status == right.status
         && left.priority == right.priority
         && left.assignee == right.assignee
+        && left.assignee_account_id == right.assignee_account_id
+        && left.parent_key == right.parent_key
 }
 
 fn response_json<T: for<'de> Deserialize<'de>>(
@@ -1016,8 +1196,8 @@ fn request_search(
         .header("Accept", "application/json")
         .json(&serde_json::json!({
             "jql": jql,
-            "fields": ["summary", "description", "issuetype", "status", "priority", "assignee"],
-            "maxResults": 10
+            "fields": ISSUE_FIELDS,
+            "maxResults": 100
         }))
         .send()
         .map_err(|error| (None, error.to_string()))?;
@@ -1064,6 +1244,14 @@ fn to_ticket(issue: JiraIssue) -> Ticket {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .into(),
+        parent_key: field("parent")
+            .get("key")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        parent_kind: field("parent")
+            .pointer("/fields/issuetype/name")
+            .and_then(Value::as_str)
+            .map(ticket_kind),
     }
 }
 

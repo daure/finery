@@ -12,7 +12,10 @@ use tuicore::{
     TextareaInput, TickResult, TuiEvent, TuiNode,
 };
 
-use crate::store::composer::{ComposerAction, ComposerState, ComposerViewMode};
+use crate::{
+    app_settings::ComposerKeyBinding,
+    store::composer::{ComposerAction, ComposerState, ComposerViewMode},
+};
 
 type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
 
@@ -186,10 +189,8 @@ impl BoundDescription {
         let input = TextareaInput::new()
             .language(Language::Markdown)
             .on_edit_end(move |value| {
-                let adf = crate::store::composer::jira_adf::markdown_to_adf(&value);
-                let markdown = crate::store::composer::jira_adf::adf_to_markdown(&adf);
                 sink.borrow_mut()
-                    .push(ComposerAction::UpdateDescription(markdown));
+                    .push(ComposerAction::UpdateDescription(value));
             });
         let mut bound = Self {
             state,
@@ -337,7 +338,11 @@ pub(super) struct BoundViewMode {
 }
 
 impl BoundViewMode {
-    pub(super) fn new(state: Rc<RefCell<ComposerState>>, pending: PendingActions) -> Self {
+    pub(super) fn new(
+        state: Rc<RefCell<ComposerState>>,
+        pending: PendingActions,
+        key: ComposerKeyBinding,
+    ) -> Self {
         let sink = Rc::clone(&pending);
         let dropdown = Dropdown::single(
             [
@@ -356,7 +361,7 @@ impl BoundViewMode {
         .variant(DropdownVariant::Filled)
         .label("View")
         .label_position(DropdownLabelPosition::Inline)
-        .hotkey("shift+m")
+        .hotkey(key.sequence())
         .on_select(move |modes| {
             if let Some(mode) = modes.first() {
                 sink.borrow_mut().push(ComposerAction::SetViewMode(*mode));

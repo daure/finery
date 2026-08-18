@@ -51,7 +51,7 @@ impl SubmissionController {
         let service = self.service.clone();
         let sender = self.sender.clone();
         if let Err(error) = std::thread::Builder::new()
-            .name("finery-jira-submit".into())
+            .name("finery-jira-commit".into())
             .spawn(move || {
                 let _ = sender.send(service.submit_ticket_changes(&changes));
             })
@@ -59,8 +59,8 @@ impl SubmissionController {
             self.submitting = false;
             self.notices.push((
                 NoticeKind::Error,
-                "Submit failed".into(),
-                format!("Could not start Jira submit: {error}"),
+                "Commit failed".into(),
+                format!("Could not start Jira commit: {error}"),
             ));
         }
     }
@@ -73,10 +73,10 @@ impl SubmissionController {
             match result {
                 Err(error) => self
                     .notices
-                    .push((NoticeKind::Error, "Submit failed".into(), error)),
+                    .push((NoticeKind::Error, "Commit failed".into(), error)),
                 Ok(SubmitBatchOutcome::Conflict(keys)) => self.notices.push((
                     NoticeKind::Warning,
-                    "Submit cancelled".into(),
+                    "Commit cancelled".into(),
                     format!(
                         "Jira changed since this change set was composed: {}. Refresh those tickets before retrying.",
                         keys.join(", ")
@@ -124,11 +124,11 @@ impl SubmissionController {
                             },
                         );
                     }
-                    self.notices.push((
-                        NoticeKind::Error,
-                        format!("{} failed", outcome.id),
-                        failure.message,
-                    ));
+                    self.service
+                        .report_notification(tuicore::Notification::error(
+                            format!("{} failed", outcome.id),
+                            failure.message,
+                        ));
                 }
             }
         }
@@ -147,14 +147,14 @@ impl SubmissionController {
             [(key, title)] => self
                 .service
                 .report_notification(tuicore::Notification::success(
-                    "Ticket submitted",
+                    "Ticket committed",
                     format!("{key} · {title}"),
                 )),
             submitted => self
                 .service
                 .report_notification(tuicore::Notification::success(
-                    "Tickets submitted",
-                    format!("{} tickets submitted", submitted.len()),
+                    "Tickets committed",
+                    format!("{} tickets committed", submitted.len()),
                 )),
         }
     }

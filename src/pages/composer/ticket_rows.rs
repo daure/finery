@@ -1,15 +1,23 @@
-use ratatui::style::Style;
-use tuicore::{ActivationMode, DataView, SelectionGlyphs, SelectionMode, SelectionTrigger, theme};
+use ratatui::{layout::Constraint, style::Style, text::Line};
+use tuicore::{
+    ActivationMode, CellContext, Column, DataView, SelectionGlyphs, SelectionMode,
+    SelectionTrigger, TreeAdapter, theme,
+};
 
 use crate::{
-    components::work_item_rows::{ChangeBadge, WorkItemKind, WorkItemRow, work_item_column},
+    components::work_item_rows::{ChangeBadge, WorkItemKind, WorkItemRow, work_item_text},
     store::composer::{ChangeKind, ComposerState, TicketChange, TicketKind},
 };
 
-pub(super) type TicketRow = WorkItemRow;
+#[derive(Clone)]
+pub(super) struct TicketRow {
+    pub(super) item: WorkItemRow,
+    parent_id: Option<String>,
+    parent_delta: Option<String>,
+}
 
 pub(super) fn ticket_data_view(state: &ComposerState) -> DataView<TicketRow, String> {
-    let mut view = DataView::new(ticket_rows(state), |row: &TicketRow| row.id.clone())
+    let mut view = DataView::new(ticket_rows(state), |row: &TicketRow| row.item.id.clone())
         .headers(false)
         .columns(ticket_columns())
         .row_height(2)
@@ -17,8 +25,17 @@ pub(super) fn ticket_data_view(state: &ComposerState) -> DataView<TicketRow, Str
         .selection_mode(SelectionMode::Multi)
         .selection_trigger(SelectionTrigger::OnActivate)
         .selection_glyphs(SelectionGlyphs::NERD_FONT)
-        .selection_disabled_by(|row| row.submitted)
+        .selection_disabled_by(|row| row.item.submitted)
         .selection_disabled_glyph("󱋭")
+        .tree(TreeAdapter::parent_id(|row: &TicketRow| {
+            row.parent_id.clone()
+        }))
+        .expanded(
+            ticket_rows(state)
+                .into_iter()
+                .map(|row| row.item.id)
+                .collect::<Vec<_>>(),
+        )
         .selected(
             state
                 .active_set()
@@ -38,7 +55,7 @@ pub(super) fn set_active_ticket_style(
     selected: Option<String>,
 ) {
     view.set_row_style_by(move |row| {
-        (selected.as_deref() == Some(row.id.as_str())).then(|| {
+        (selected.as_deref() == Some(row.item.id.as_str())).then(|| {
             let theme = theme();
             Style::default()
                 .fg(theme.selected_fg())
@@ -49,29 +66,73 @@ pub(super) fn set_active_ticket_style(
 
 pub(super) fn ticket_rows(state: &ComposerState) -> Vec<TicketRow> {
     state
-        .active_set()
+        .ordered_changes()
         .into_iter()
-        .flat_map(|set| &set.tickets)
         .filter_map(|change| ticket_row(state, change))
         .collect()
 }
 
 fn ticket_row(state: &ComposerState, change: &TicketChange) -> Option<TicketRow> {
     let ticket = state.ticket_for_change(change)?;
-    Some(WorkItemRow {
-        id: change.id.clone(),
-        key: ticket.key.clone(),
-        title: ticket.title.clone(),
-        kind: ticket_kind(ticket.kind),
-        priority: ticket.priority.clone(),
-        status: ticket.status.clone(),
-        change_badge: Some(change_badge(change.kind)),
-        submitted: change.is_submitted(),
+    let active_ids = state
+        .active_set()?
+        .tickets
+        .iter()
+        .flat_map(|change| {
+            std::iter::once((change.id.as_str(), change.id.as_str())).chain(
+                state
+                    .changes_for_change(change)
+                    .map(|candidate| (candidate.key.as_str(), change.id.as_str())),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let parent_id = ticket
+        .parent_key
+        .as_ref()
+        .and_then(|parent| active_ids.get(parent.as_str()))
+        .map(|parent| (*parent).to_owned());
+    let old_parent = change
+        .original
+        .as_ref()
+        .or_else(|| state.source_for_change(change))
+        .and_then(|ticket| ticket.parent_key.as_ref())
+        .cloned();
+    let parent_delta = (old_parent != ticket.parent_key).then(|| {
+        format!(
+            "{} -> {}",
+            old_parent.unwrap_or_else(|| "Root".into()),
+            ticket.parent_key.clone().unwrap_or_else(|| "Root".into())
+        )
+    });
+    Some(TicketRow {
+        item: WorkItemRow {
+            id: change.id.clone(),
+            key: ticket.key.clone(),
+            title: ticket.title.clone(),
+            kind: ticket_kind(ticket.kind),
+            priority: ticket.priority.clone(),
+            status: ticket.status.clone(),
+            change_badge: Some(change_badge(change.kind)),
+            submitted: change.is_submitted(),
+        },
+        parent_id,
+        parent_delta,
     })
 }
 
-fn ticket_columns() -> Vec<tuicore::Column<TicketRow, String>> {
-    vec![work_item_column()]
+fn ticket_columns() -> Vec<Column<TicketRow, String>> {
+    vec![Column::multiline(
+        "ticket",
+        "",
+        Constraint::Percentage(100),
+        |row: &TicketRow, _: &CellContext<String>| {
+            let mut text = work_item_text(&row.item);
+            if let Some(delta) = &row.parent_delta {
+                text.lines[1] = Line::raw(delta.clone());
+            }
+            text
+        },
+    )]
 }
 
 fn ticket_kind(kind: TicketKind) -> WorkItemKind {

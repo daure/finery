@@ -5,6 +5,8 @@ use super::{
     jira_adf::{adf_to_markdown, markdown_to_adf},
 };
 
+mod placement;
+
 #[test]
 fn included_ticket_uses_live_source_until_first_edit_creates_changes() {
     let mut state = ComposerState::demo();
@@ -13,7 +15,10 @@ fn included_ticket_uses_live_source_until_first_edit_creates_changes() {
     state.dispatch(ComposerAction::IncludeTicket(ticket));
     let id = state.selected_ticket.clone().unwrap();
     let change = state.selected_change().unwrap();
-    assert!(change.original.is_none());
+    assert_eq!(
+        change.original.as_ref().unwrap(),
+        &super::demo_jira_tickets()[0]
+    );
     assert!(change.updated.is_none());
 
     let mut refreshed = state.selected_changes().unwrap().clone();
@@ -27,7 +32,10 @@ fn included_ticket_uses_live_source_until_first_edit_creates_changes() {
     state.dispatch(ComposerAction::UpdateTitle("A safer checkout".into()));
 
     let change = state.selected_change().unwrap();
-    assert!(change.original.is_none());
+    assert_eq!(
+        change.original.as_ref().unwrap().title,
+        "Keep checkout state across retries"
+    );
     assert_eq!(change.updated.as_ref().unwrap().title, "A safer checkout");
     assert_eq!(change.kind, ChangeKind::Modified);
 
@@ -134,7 +142,7 @@ fn remote_tickets_allow_refresh_even_when_a_new_ticket_is_selected() {
 }
 
 #[test]
-fn submitted_tickets_keep_snapshots_and_close_set_when_all_are_done() {
+fn submitted_tickets_keep_snapshots_and_stay_in_change_set_when_all_are_done() {
     let mut state = ComposerState::demo();
     state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
     let tickets = state.active_set().unwrap().tickets.clone();
@@ -156,7 +164,7 @@ fn submitted_tickets_keep_snapshots_and_close_set_when_all_are_done() {
     assert!(set.closed);
     assert_eq!(set.submitted_count(), set.tickets.len());
     assert!(set.tickets.iter().all(|ticket| ticket.submitted.is_some()));
-    assert!(state.active_change_set.is_none());
+    assert_eq!(state.active_change_set.as_deref(), Some("CS-1"));
 }
 
 #[test]
@@ -170,7 +178,7 @@ fn deleting_ticket_keeps_live_source_read_only_and_visible() {
 
     let change = state.selected_change().unwrap();
     assert_eq!(change.kind, ChangeKind::Deleted);
-    assert!(change.original.is_none());
+    assert!(change.original.is_some());
     assert!(change.updated.is_none());
     assert!(state.selected_changes().is_some());
     assert!(!state.selected_is_editable());

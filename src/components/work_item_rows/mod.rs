@@ -1,9 +1,7 @@
 use ratatui::{
-    layout::Constraint,
     style::{Modifier, Style},
     text::{Line, Span, Text},
 };
-use tuicore::{CellContext, Column};
 
 #[derive(Clone)]
 pub(crate) struct WorkItemRow {
@@ -33,15 +31,6 @@ pub(crate) enum ChangeBadge {
     Modified,
     Deleted,
     Synced,
-}
-
-pub(crate) fn work_item_column() -> Column<WorkItemRow, String> {
-    Column::multiline(
-        "work_item",
-        "",
-        Constraint::Percentage(100),
-        |row: &WorkItemRow, _: &CellContext<String>| work_item_text(row),
-    )
 }
 
 pub(crate) fn work_item_text(row: &WorkItemRow) -> Text<'static> {
