@@ -4,7 +4,8 @@ use super::{
     AppSettings, COMPOSER_ADD_CHILD_KEY_SETTING, COMPOSER_ADD_SIBLING_KEY_SETTING,
     COMPOSER_COMMIT_KEY_SETTING, COMPOSER_CREATE_SUBMIT_KEY_SETTING,
     COMPOSER_DESCRIPTION_FOCUS_KEY_SETTING, COMPOSER_DESCRIPTION_READER_KEY_SETTING,
-    COMPOSER_ISSUE_TYPE_KEY_SETTING, COMPOSER_VIEW_KEY_SETTING, SPEED_READER_WPM_SETTING,
+    COMPOSER_ISSUE_TYPE_KEY_SETTING, COMPOSER_VIEW_KEY_SETTING, JIRA_STORY_POINTS_BOARD_ID_SETTING,
+    JIRA_STORY_POINTS_FIELD_ID_SETTING, SPEED_READER_WPM_SETTING,
 };
 
 #[test]
@@ -19,6 +20,30 @@ fn persistence_only_includes_changed_settings() {
     assert_eq!(
         current.changed_values(&previous),
         vec![(SPEED_READER_WPM_SETTING, "500".into())]
+    );
+}
+
+#[test]
+fn story_points_field_id_round_trips_through_settings_values() {
+    let settings = AppSettings::resolve(&HashMap::from([
+        (
+            JIRA_STORY_POINTS_FIELD_ID_SETTING.into(),
+            "customfield_10016".into(),
+        ),
+        (JIRA_STORY_POINTS_BOARD_ID_SETTING.into(), "42".into()),
+    ]))
+    .unwrap();
+
+    assert_eq!(settings.jira_story_points_field_id, "customfield_10016");
+    assert_eq!(settings.jira_story_points_board_id, "42");
+    assert!(settings.values().contains(&(
+        JIRA_STORY_POINTS_FIELD_ID_SETTING,
+        "customfield_10016".into(),
+    )));
+    assert!(
+        settings
+            .values()
+            .contains(&(JIRA_STORY_POINTS_BOARD_ID_SETTING, "42".into()))
     );
 }
 

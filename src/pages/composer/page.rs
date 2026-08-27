@@ -32,6 +32,10 @@ pub(crate) struct ComposerPage {
     state: Rc<RefCell<ComposerState>>,
     change_sets: ChangeSetListView,
     editor: TicketEditor,
+    service: AppService,
+    catalog_revision: i64,
+    poll_elapsed: Duration,
+    external_reload_needed: bool,
 }
 
 impl ComposerPage {
@@ -43,8 +47,12 @@ impl ComposerPage {
         let state = Rc::new(RefCell::new(ComposerState::from_change_sets(change_sets)));
         Self {
             change_sets: ChangeSetListView::new(Rc::clone(&state), service.clone()),
-            editor: TicketEditor::new(Rc::clone(&state), settings, service),
+            editor: TicketEditor::new(Rc::clone(&state), settings, service.clone()),
             state,
+            catalog_revision: service.composer_catalog_revision(),
+            service,
+            poll_elapsed: Duration::ZERO,
+            external_reload_needed: false,
         }
     }
 
@@ -81,6 +89,88 @@ impl ComposerPage {
         ctx.request_redraw();
         if is_open {
             self.editor.on_open(ctx);
+        }
+    }
+
+    fn poll_external_catalog(&mut self, dt: Duration) -> TickResult {
+        self.catalog_revision = self
+            .catalog_revision
+            .max(self.service.composer_catalog_revision());
+        self.poll_elapsed = self.poll_elapsed.saturating_add(dt);
+        if self.poll_elapsed >= Duration::from_millis(500) {
+            self.poll_elapsed = Duration::ZERO;
+            self.service.poll_composer_catalog_revision();
+        }
+
+        for alert in self.service.take_composer_alerts() {
+            self.service
+                .report_notification(tuicore::Notification::warning("Composer refreshed", alert));
+        }
+        self.external_reload_needed |= self.service.take_composer_reload_required();
+        if let Some(result) = self.service.take_composer_catalog_revision() {
+            match result {
+                Ok(revision) => {
+                    self.external_reload_needed |= revision > self.catalog_revision;
+                }
+                Err(error) => self
+                    .service
+                    .report_error(format!("composer catalog poll failed: {error}")),
+            }
+        }
+
+        let mut changed = false;
+        if !self.service.composer_writes_pending() && !self.editor.is_submitting() {
+            if let Some(result) = self.service.take_loaded_composer_catalog() {
+                match result {
+                    Ok(loaded) => {
+                        let catalog = loaded.catalog;
+                        let catalog_is_stale = loaded.requested_catalog_revision
+                            < self.catalog_revision
+                            || catalog.catalog_revision < self.catalog_revision;
+                        if catalog_is_stale || !self.service.accept_composer_catalog(&catalog) {
+                            self.catalog_revision = self
+                                .catalog_revision
+                                .max(self.service.composer_catalog_revision());
+                            self.external_reload_needed = true;
+                            return TickResult {
+                                changed: false,
+                                layout: false,
+                                active: false,
+                                next_tick: Some(Duration::from_millis(50)),
+                            };
+                        }
+                        self.catalog_revision = catalog.catalog_revision;
+                        self.state.borrow_mut().replace_change_sets(
+                            catalog
+                                .change_sets
+                                .iter()
+                                .map(|set| set.change_set.clone())
+                                .collect(),
+                        );
+                        self.change_sets.sync();
+                        self.editor.sync();
+                        self.external_reload_needed = false;
+                        changed = true;
+                    }
+                    Err(error) => self
+                        .service
+                        .report_error(format!("composer catalog reload failed: {error}")),
+                }
+            } else if self.external_reload_needed {
+                self.service.load_composer_catalog();
+            }
+        }
+
+        let next_tick = if self.service.composer_sync_in_flight() {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(500).saturating_sub(self.poll_elapsed)
+        };
+        TickResult {
+            changed,
+            layout: changed,
+            active: false,
+            next_tick: Some(next_tick),
         }
     }
 
@@ -243,6 +333,7 @@ impl TuiNode for ComposerPage {
                 .tick(dt, settings)
                 .merge(self.editor.poll_inactive_submission())
         };
+        let outcome = outcome.merge(self.poll_external_catalog(dt));
         if was_open && !self.in_change_set() {
             self.change_sets.sync();
             outcome.merge(TickResult {

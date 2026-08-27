@@ -97,17 +97,18 @@ fn ticket_row(state: &ComposerState, change: &TicketChange) -> Option<TicketRow>
         .or_else(|| state.source_for_change(change))
         .and_then(|ticket| ticket.parent_key.as_ref())
         .cloned();
-    let parent_delta = (old_parent != ticket.parent_key).then(|| {
-        format!(
-            "{} -> {}",
-            old_parent.unwrap_or_else(|| "Root".into()),
-            ticket.parent_key.clone().unwrap_or_else(|| "Root".into())
-        )
-    });
+    let parent_delta = (change.kind == ChangeKind::Modified && old_parent != ticket.parent_key)
+        .then(|| {
+            format!(
+                "{} -> {}",
+                old_parent.unwrap_or_else(|| "Root".into()),
+                ticket.parent_key.clone().unwrap_or_else(|| "Root".into())
+            )
+        });
     Some(TicketRow {
         item: WorkItemRow {
             id: change.id.clone(),
-            key: ticket.key.clone(),
+            key: display_key(change, ticket),
             title: ticket.title.clone(),
             kind: ticket_kind(ticket.kind),
             priority: ticket.priority.clone(),
@@ -118,6 +119,15 @@ fn ticket_row(state: &ComposerState, change: &TicketChange) -> Option<TicketRow>
         parent_id,
         parent_delta,
     })
+}
+
+fn display_key(change: &TicketChange, ticket: &crate::store::composer::Ticket) -> String {
+    if change.kind == ChangeKind::Added && !change.is_submitted() && ticket.key.starts_with("NEW-")
+    {
+        format!("{}-DRAFT", ticket.project_key)
+    } else {
+        ticket.key.clone()
+    }
 }
 
 fn ticket_columns() -> Vec<Column<TicketRow, String>> {

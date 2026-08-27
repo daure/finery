@@ -1,3 +1,3 @@
-mod backlog_data_view;
+mod backlog_section;
 
-pub(super) use backlog_data_view::backlog_data_view;
+pub(super) use backlog_section::{BacklogSectionEvent, backlog_section};

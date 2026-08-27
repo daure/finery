@@ -1,7 +1,7 @@
 use std::{
     cell::RefCell,
     rc::Rc,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::{self, Receiver, Sender, TryRecvError},
 };
 
 use crate::{
@@ -10,14 +10,34 @@ use crate::{
     store::composer::{ComposerAction, ComposerState, TicketChange},
 };
 
+enum SubmissionPhase {
+    Idle,
+    AwaitingCreateMarkers {
+        change_set_id: String,
+        changes: Vec<TicketChange>,
+        create_attempts: Vec<String>,
+        response: Receiver<Result<(), String>>,
+    },
+    AwaitingJira {
+        request_id: u64,
+        change_set_id: String,
+        create_attempts: Vec<String>,
+    },
+    AwaitingReconciliation {
+        change_set_id: String,
+        restore_create_attempts: Vec<String>,
+        submitted: Vec<(String, String)>,
+        response: Receiver<Result<(), String>>,
+    },
+}
+
 pub(super) struct SubmissionController {
     state: Rc<RefCell<ComposerState>>,
     service: AppService,
     sender: Sender<(u64, String, Result<SubmitBatchOutcome, String>)>,
     receiver: Receiver<(u64, String, Result<SubmitBatchOutcome, String>)>,
     request_id: u64,
-    active_request: Option<(u64, String, Vec<String>)>,
-    submitting: bool,
+    phase: SubmissionPhase,
 }
 
 impl SubmissionController {
@@ -29,17 +49,16 @@ impl SubmissionController {
             sender,
             receiver,
             request_id: 0,
-            active_request: None,
-            submitting: false,
+            phase: SubmissionPhase::Idle,
         }
     }
 
     pub(super) fn is_submitting(&self) -> bool {
-        self.submitting
+        !matches!(self.phase, SubmissionPhase::Idle)
     }
 
     pub(super) fn start(&mut self, changes: Vec<TicketChange>, ctx: &mut tuicore::EventCtx<()>) {
-        if self.submitting || changes.is_empty() {
+        if self.is_submitting() || changes.is_empty() {
             return;
         }
         let Some(change_set_id) = self.state.borrow().active_change_set.clone() else {
@@ -63,7 +82,9 @@ impl SubmissionController {
             .filter(|change| change.kind == crate::store::composer::ChangeKind::Added)
             .map(|change| change.id.clone())
             .collect::<Vec<_>>();
-        let persisted_set = (!create_attempts.is_empty()).then(|| {
+        if create_attempts.is_empty() {
+            self.start_jira_submission(change_set_id, changes, create_attempts);
+        } else {
             self.state
                 .borrow_mut()
                 .dispatch(ComposerAction::MarkCreateAttempts {
@@ -71,50 +92,114 @@ impl SubmissionController {
                     ids: create_attempts.clone(),
                 })
                 .expect("submission target must exist");
-            self.state
-                .borrow()
-                .change_sets
-                .iter()
-                .find(|set| set.id == change_set_id)
-                .cloned()
-                .expect("submission target must exist")
-        });
-        self.submitting = true;
+            let set = self.change_set(&change_set_id);
+            match self.service.save_change_set_durably(set) {
+                Ok(response) => {
+                    self.phase = SubmissionPhase::AwaitingCreateMarkers {
+                        change_set_id,
+                        changes,
+                        create_attempts,
+                        response,
+                    };
+                }
+                Err(error) => {
+                    self.finish_submission(&change_set_id);
+                    self.report_marker_persistence_failure(&error);
+                }
+            }
+        }
+        if self.is_submitting() {
+            ctx.request_tick();
+        }
+    }
+
+    pub(super) fn drain_results(&mut self) -> bool {
+        match &self.phase {
+            SubmissionPhase::Idle => false,
+            SubmissionPhase::AwaitingCreateMarkers { response, .. } => {
+                let Some(result) = take_persistence_result(response) else {
+                    return false;
+                };
+                let SubmissionPhase::AwaitingCreateMarkers {
+                    change_set_id,
+                    changes,
+                    create_attempts,
+                    ..
+                } = std::mem::replace(&mut self.phase, SubmissionPhase::Idle)
+                else {
+                    unreachable!();
+                };
+                match result {
+                    Ok(()) => self.start_jira_submission(change_set_id, changes, create_attempts),
+                    Err(error) => {
+                        self.finish_submission(&change_set_id);
+                        self.report_marker_persistence_failure(&error);
+                    }
+                }
+                true
+            }
+            SubmissionPhase::AwaitingJira { .. } => self.drain_jira_result(),
+            SubmissionPhase::AwaitingReconciliation { response, .. } => {
+                let Some(result) = take_persistence_result(response) else {
+                    return false;
+                };
+                let SubmissionPhase::AwaitingReconciliation {
+                    change_set_id,
+                    restore_create_attempts,
+                    submitted,
+                    ..
+                } = std::mem::replace(&mut self.phase, SubmissionPhase::Idle)
+                else {
+                    unreachable!();
+                };
+                self.finish_submission(&change_set_id);
+                self.report_submitted(&submitted);
+                if let Err(error) = result {
+                    self.restore_create_attempts(&change_set_id, &restore_create_attempts);
+                    self.service
+                        .report_notification(tuicore::Notification::error(
+                            "Commit persistence failed",
+                            format!(
+                                "Jira returned a result, but Finery could not save its reconciliation state: {error}"
+                            ),
+                        ));
+                }
+                true
+            }
+        }
+    }
+
+    fn start_jira_submission(
+        &mut self,
+        change_set_id: String,
+        changes: Vec<TicketChange>,
+        create_attempts: Vec<String>,
+    ) {
         self.request_id = self.request_id.saturating_add(1);
         let request_id = self.request_id;
-        self.active_request = Some((request_id, change_set_id.clone(), create_attempts.clone()));
-        ctx.request_tick();
+        self.phase = SubmissionPhase::AwaitingJira {
+            request_id,
+            change_set_id: change_set_id.clone(),
+            create_attempts: create_attempts.clone(),
+        };
         let service = self.service.clone();
         let sender = self.sender.clone();
-        let submitted_change_set_id = change_set_id.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("finery-jira-commit".into())
             .spawn(move || {
                 let _ = sender.send((
                     request_id,
-                    submitted_change_set_id,
-                    persisted_set.map_or_else(
-                        || Ok(service.submit_ticket_changes(&changes)),
-                        |set| {
-                            service
-                                .save_change_set_durably(set)
-                                .map_err(|error| {
-                                    format!("Could not persist Jira create attempt: {error}")
-                                })
-                                .map(|_| service.submit_ticket_changes(&changes))
-                        },
-                    ),
+                    change_set_id,
+                    Ok(service.submit_ticket_changes(&changes)),
                 ));
             })
         {
-            self.submitting = false;
-            self.active_request = None;
-            self.state.borrow_mut().end_submission(&change_set_id);
-            if let Err(persist_error) =
-                self.clear_create_attempts_durably(&change_set_id, &create_attempts)
-            {
-                self.report_create_attempt_clear_failure(&persist_error);
-            }
+            let change_set_id = match std::mem::replace(&mut self.phase, SubmissionPhase::Idle) {
+                SubmissionPhase::AwaitingJira { change_set_id, .. } => change_set_id,
+                _ => unreachable!(),
+            };
+            self.clear_create_attempts(&change_set_id, &create_attempts);
+            self.enqueue_reconciliation(change_set_id, create_attempts, Vec::new());
             self.service
                 .report_notification(tuicore::Notification::error(
                     "Commit failed",
@@ -123,67 +208,69 @@ impl SubmissionController {
         }
     }
 
-    pub(super) fn drain_results(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok((request_id, change_set_id, result)) = self.receiver.try_recv() {
-            let Some((active_request_id, active_change_set_id, active_create_attempts)) =
-                self.active_request.as_ref()
-            else {
-                continue;
+    fn drain_jira_result(&mut self) -> bool {
+        let Ok((request_id, change_set_id, result)) = self.receiver.try_recv() else {
+            return false;
+        };
+        let SubmissionPhase::AwaitingJira {
+            request_id: active_request_id,
+            change_set_id: active_change_set_id,
+            create_attempts,
+        } = std::mem::replace(&mut self.phase, SubmissionPhase::Idle)
+        else {
+            unreachable!();
+        };
+        if (active_request_id, active_change_set_id.as_str())
+            != (request_id, change_set_id.as_str())
+        {
+            self.phase = SubmissionPhase::AwaitingJira {
+                request_id: active_request_id,
+                change_set_id: active_change_set_id,
+                create_attempts,
             };
-            if (*active_request_id, active_change_set_id.as_str())
-                != (request_id, change_set_id.as_str())
-            {
-                continue;
+            return false;
+        }
+        match result {
+            Err(error) => {
+                self.clear_create_attempts(&change_set_id, &create_attempts);
+                self.enqueue_reconciliation(change_set_id, create_attempts, Vec::new());
+                self.service
+                    .report_notification(tuicore::Notification::error("Commit failed", error));
             }
-            let create_attempts = active_create_attempts.clone();
-            self.submitting = false;
-            self.active_request = None;
-            self.state.borrow_mut().end_submission(&change_set_id);
-            changed = true;
-            match result {
-                Err(error) => {
-                    if let Err(persist_error) =
-                        self.clear_create_attempts_durably(&change_set_id, &create_attempts)
-                    {
-                        self.report_create_attempt_clear_failure(&persist_error);
-                    }
-                    self.service
-                        .report_notification(tuicore::Notification::error("Commit failed", error));
-                }
-                Ok(SubmitBatchOutcome::PreflightError(error)) => {
-                    if let Err(persist_error) =
-                        self.clear_create_attempts_durably(&change_set_id, &create_attempts)
-                    {
-                        self.report_create_attempt_clear_failure(&persist_error);
-                    }
-                    self.service
-                        .report_notification(tuicore::Notification::error("Commit failed", error));
-                }
-                Ok(SubmitBatchOutcome::Conflict(keys)) => {
-                    if let Err(persist_error) =
-                        self.clear_create_attempts_durably(&change_set_id, &create_attempts)
-                    {
-                        self.report_create_attempt_clear_failure(&persist_error);
-                    }
-                    self.service.report_notification(tuicore::Notification::warning(
-                        "Commit cancelled",
-                        format!(
-                            "Jira changed since this change set was composed: {}. Refresh those tickets before retrying.",
-                            keys.join(", ")
-                        ),
-                    ));
-                }
-                Ok(SubmitBatchOutcome::Completed(outcomes)) => {
-                    self.apply_outcomes(&change_set_id, outcomes)
-                }
+            Ok(SubmitBatchOutcome::PreflightError(error)) => {
+                self.clear_create_attempts(&change_set_id, &create_attempts);
+                self.enqueue_reconciliation(change_set_id, create_attempts, Vec::new());
+                self.service
+                    .report_notification(tuicore::Notification::error("Commit failed", error));
+            }
+            Ok(SubmitBatchOutcome::Conflict(keys)) => {
+                self.clear_create_attempts(&change_set_id, &create_attempts);
+                self.enqueue_reconciliation(change_set_id, create_attempts, Vec::new());
+                self.service.report_notification(tuicore::Notification::warning(
+                    "Commit cancelled",
+                    format!(
+                        "Jira changed since this change set was composed: {}. Refresh those tickets before retrying.",
+                        keys.join(", ")
+                    ),
+                ));
+            }
+            Ok(SubmitBatchOutcome::Completed(outcomes)) => {
+                let (submitted, restore_create_attempts) =
+                    self.apply_outcomes(&change_set_id, outcomes, &create_attempts);
+                self.enqueue_reconciliation(change_set_id, restore_create_attempts, submitted);
             }
         }
-        changed
+        true
     }
 
-    fn apply_outcomes(&mut self, change_set_id: &str, outcomes: Vec<TicketSubmitOutcome>) {
+    fn apply_outcomes(
+        &mut self,
+        change_set_id: &str,
+        outcomes: Vec<TicketSubmitOutcome>,
+        create_attempts: &[String],
+    ) -> (Vec<(String, String)>, Vec<String>) {
         let mut submitted = Vec::new();
+        let mut restore_create_attempts = Vec::new();
         for outcome in outcomes {
             if !self.state.borrow().has_change(change_set_id, &outcome.id) {
                 self.service
@@ -227,6 +314,9 @@ impl SubmissionController {
                                 id: outcome.id.clone(),
                             })
                             .expect("checked submission target must exist");
+                        if create_attempts.contains(&outcome.id) {
+                            restore_create_attempts.push(outcome.id.clone());
+                        }
                     }
                     if let Some(refresh) = failure.refresh {
                         let (original, updated) = *refresh;
@@ -248,15 +338,43 @@ impl SubmissionController {
                 }
             }
         }
-        if let Some(set) = self
-            .state
-            .borrow()
-            .change_sets
-            .iter()
-            .find(|set| set.id == change_set_id)
-            .cloned()
+        (submitted, restore_create_attempts)
+    }
+
+    fn clear_create_attempts(&mut self, change_set_id: &str, create_attempts: &[String]) {
+        for id in create_attempts {
+            self.state
+                .borrow_mut()
+                .dispatch(ComposerAction::ResolveCreateAttempt {
+                    change_set_id: change_set_id.into(),
+                    id: id.clone(),
+                })
+                .expect("submission target must exist");
+        }
+    }
+
+    fn enqueue_reconciliation(
+        &mut self,
+        change_set_id: String,
+        restore_create_attempts: Vec<String>,
+        submitted: Vec<(String, String)>,
+    ) {
+        match self
+            .service
+            .save_change_set_durably(self.change_set(&change_set_id))
         {
-            if let Err(error) = self.service.save_change_set_durably(set) {
+            Ok(response) => {
+                self.phase = SubmissionPhase::AwaitingReconciliation {
+                    change_set_id,
+                    restore_create_attempts,
+                    submitted,
+                    response,
+                };
+            }
+            Err(error) => {
+                self.restore_create_attempts(&change_set_id, &restore_create_attempts);
+                self.finish_submission(&change_set_id);
+                self.report_submitted(&submitted);
                 self.service
                     .report_notification(tuicore::Notification::error(
                         "Commit persistence failed",
@@ -266,7 +384,46 @@ impl SubmissionController {
                     ));
             }
         }
-        match submitted.as_slice() {
+    }
+
+    fn change_set(&self, change_set_id: &str) -> crate::store::composer::ChangeSet {
+        self.state
+            .borrow()
+            .change_sets
+            .iter()
+            .find(|set| set.id == change_set_id)
+            .cloned()
+            .expect("submission target must exist")
+    }
+
+    fn restore_create_attempts(&mut self, change_set_id: &str, create_attempts: &[String]) {
+        if create_attempts.is_empty() {
+            return;
+        }
+        self.state
+            .borrow_mut()
+            .dispatch(ComposerAction::MarkCreateAttempts {
+                change_set_id: change_set_id.into(),
+                ids: create_attempts.to_vec(),
+            })
+            .expect("submission target must exist");
+    }
+
+    fn finish_submission(&mut self, change_set_id: &str) {
+        self.phase = SubmissionPhase::Idle;
+        self.state.borrow_mut().end_submission(change_set_id);
+    }
+
+    fn report_marker_persistence_failure(&self, error: &str) {
+        self.service
+            .report_notification(tuicore::Notification::error(
+                "Commit marker persistence failed",
+                format!("Could not persist the Jira create-attempt marker; Jira was not contacted: {error}"),
+            ));
+    }
+
+    fn report_submitted(&self, submitted: &[(String, String)]) {
+        match submitted {
             [] => {}
             [(key, title)] => self
                 .service
@@ -282,52 +439,14 @@ impl SubmissionController {
                 )),
         }
     }
+}
 
-    fn clear_create_attempts_durably(
-        &mut self,
-        change_set_id: &str,
-        create_attempts: &[String],
-    ) -> Result<(), String> {
-        if create_attempts.is_empty() {
-            return Ok(());
-        }
-        for id in create_attempts {
-            self.state
-                .borrow_mut()
-                .dispatch(ComposerAction::ResolveCreateAttempt {
-                    change_set_id: change_set_id.into(),
-                    id: id.clone(),
-                })
-                .expect("submission target must exist");
-        }
-        let set = self
-            .state
-            .borrow()
-            .change_sets
-            .iter()
-            .find(|set| set.id == change_set_id)
-            .cloned()
-            .expect("submission target must exist");
-        if let Err(error) = self.service.save_change_set_durably(set) {
-            self.state
-                .borrow_mut()
-                .dispatch(ComposerAction::MarkCreateAttempts {
-                    change_set_id: change_set_id.into(),
-                    ids: create_attempts.to_vec(),
-                })
-                .expect("submission target must exist");
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    fn report_create_attempt_clear_failure(&self, error: &str) {
-        self.service
-            .report_notification(tuicore::Notification::error(
-                "Commit marker persistence failed",
-                format!(
-                    "Could not clear the Jira create-attempt marker; retry remains blocked: {error}"
-                ),
-            ));
+fn take_persistence_result(response: &Receiver<Result<(), String>>) -> Option<Result<(), String>> {
+    match response.try_recv() {
+        Ok(result) => Some(result),
+        Err(TryRecvError::Empty) => None,
+        Err(TryRecvError::Disconnected) => Some(Err(
+            "persistence worker stopped before saving Composer state".into(),
+        )),
     }
 }

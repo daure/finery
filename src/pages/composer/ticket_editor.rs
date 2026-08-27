@@ -628,6 +628,10 @@ impl TicketEditor {
         );
     }
 
+    pub(super) fn is_submitting(&self) -> bool {
+        self.submission.is_submitting()
+    }
+
     #[cfg(test)]
     pub(super) fn detail_panel_areas(&self) -> (Rect, Rect) {
         self.view
@@ -683,7 +687,8 @@ impl TicketEditor {
         for action in actions {
             match action {
                 DescriptionAction::ShowChanges => {
-                    self.state
+                    let _ = self
+                        .state
                         .borrow_mut()
                         .dispatch(ComposerAction::SetViewMode(
                             crate::store::composer::ComposerViewMode::Changes,
@@ -817,6 +822,9 @@ impl TicketEditor {
                 ComposerAction::CreateTicket { .. } | ComposerAction::CreateTicketAt { .. }
             )
         });
+        let view_mode_changed = actions
+            .iter()
+            .any(|action| matches!(action, ComposerAction::SetViewMode(_)));
         let mut ticket_action = false;
         let mut persist = false;
         for action in actions {
@@ -857,6 +865,9 @@ impl TicketEditor {
                 .base_mut()
                 .base_mut()
                 .set_active_with_context(false, ctx);
+            Self::focus_tickets(ctx);
+        }
+        if view_mode_changed {
             Self::focus_tickets(ctx);
         }
         if ticket_action {
@@ -1485,7 +1496,8 @@ impl TicketEditor {
             Self::focus_tickets(ctx);
             ctx.request_redraw();
         } else {
-            self.state
+            let _ = self
+                .state
                 .borrow_mut()
                 .dispatch(ComposerAction::CloseChangeSet);
             ctx.request_layout();
@@ -1586,7 +1598,8 @@ impl TuiNode for TicketEditor {
                 matches!(event, TuiEvent::Key(key) if keybindings().focus().unfocus_matches(*key));
             if leaving_key {
                 self.opening_loading = false;
-                self.state
+                let _ = self
+                    .state
                     .borrow_mut()
                     .dispatch(ComposerAction::CloseChangeSet);
                 ctx.request_layout();
@@ -1638,7 +1651,8 @@ impl TuiNode for TicketEditor {
                 matches!(event, TuiEvent::Key(key) if keybindings().focus().unfocus_matches(*key));
             if leaving_key {
                 self.opening_loading = false;
-                self.state
+                let _ = self
+                    .state
                     .borrow_mut()
                     .dispatch(ComposerAction::CloseChangeSet);
                 ctx.request_layout();

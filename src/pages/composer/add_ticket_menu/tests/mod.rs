@@ -41,7 +41,9 @@ fn existing_jira_search_uses_centered_dropdown_popup_without_trigger_field() {
         assignee: "Ada".into(),
         assignee_account_id: "ada".into(),
         parent_key: None,
+        parent_title: None,
         parent_kind: None,
+        has_children: false,
     }]));
     let mut open_layout = LayoutCtx::new();
     open_layout.with_overlay_bounds(area, |ctx| {
@@ -102,7 +104,9 @@ fn existing_search_keeps_legal_result_beyond_first_ten() {
             assignee: "Unassigned".into(),
             assignee_account_id: String::new(),
             parent_key: None,
+            parent_title: None,
             parent_kind: None,
+            has_children: false,
         })
         .collect::<Vec<_>>();
     tickets.push(Ticket {
@@ -117,7 +121,9 @@ fn existing_search_keeps_legal_result_beyond_first_ten() {
         assignee: "Unassigned".into(),
         assignee_account_id: String::new(),
         parent_key: None,
+        parent_title: None,
         parent_kind: None,
+        has_children: false,
     });
 
     menu.apply_search_result(Ok(tickets));

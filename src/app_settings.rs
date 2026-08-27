@@ -11,6 +11,8 @@ pub(crate) const JIRA_EMAIL_SETTING: &str = "jira.email";
 pub(crate) const JIRA_API_TOKEN_SETTING: &str = "jira.api_token";
 pub(crate) const JIRA_DEFAULT_PROJECT_SETTING: &str = "jira.default_project";
 pub(crate) const JIRA_DEFAULT_BOARD_SETTING: &str = "jira.default_board";
+pub(crate) const JIRA_STORY_POINTS_FIELD_ID_SETTING: &str = "jira.story_points_field_id";
+pub(crate) const JIRA_STORY_POINTS_BOARD_ID_SETTING: &str = "jira.story_points_board_id";
 pub(crate) const SPEED_READER_WPM_SETTING: &str = "reader.wpm";
 pub(crate) const SPEED_READER_BLOCK_DELAY_SETTING: &str = "reader.markdown_block_pause_ms";
 pub(crate) const COMPOSER_ADD_SIBLING_KEY_SETTING: &str = "composer.add_sibling_key";
@@ -138,6 +140,7 @@ impl ComposerSequenceBinding {
         &self.sequence
     }
 
+    #[cfg(test)]
     pub(crate) fn label(&self) -> String {
         self.specs.iter().map(|spec| spec.label()).collect()
     }
@@ -281,14 +284,22 @@ fn ensure_unambiguous(sequences: &[&str]) -> Result<(), String> {
         .iter()
         .enumerate()
         .all(|(index, sequence)| {
-            sequences.iter().skip(index + 1).all(|candidate| {
-                !sequence.starts_with(candidate) && !candidate.starts_with(sequence)
-            })
+            sequences
+                .iter()
+                .skip(index + 1)
+                .all(|candidate| !sequences_conflict(sequence, candidate))
         })
         .then_some(())
         .ok_or_else(|| {
             "Composer action keys must be unique and non-prefix within their active context".into()
         })
+}
+
+fn sequences_conflict(sequence: &str, candidate: &str) -> bool {
+    match (parse_composer_key(sequence), parse_composer_key(candidate)) {
+        (Some(sequence), Some(candidate)) => sequence == candidate,
+        _ => sequence.starts_with(candidate) || candidate.starts_with(sequence),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -298,6 +309,8 @@ pub(crate) struct AppSettings {
     pub(crate) jira_api_token: String,
     pub(crate) jira_default_project: String,
     pub(crate) jira_default_board: String,
+    pub(crate) jira_story_points_field_id: String,
+    pub(crate) jira_story_points_board_id: String,
     pub(crate) speed_reader: SpeedReaderSettings,
     pub(crate) composer_keys: ComposerKeyBindings,
 }
@@ -320,6 +333,14 @@ impl AppSettings {
                 "JIRA_DEFAULT_PROJECT",
             ),
             jira_default_board: value_or_env(JIRA_DEFAULT_BOARD_SETTING, "JIRA_DEFAULT_BOARD"),
+            jira_story_points_field_id: values
+                .get(JIRA_STORY_POINTS_FIELD_ID_SETTING)
+                .cloned()
+                .unwrap_or_default(),
+            jira_story_points_board_id: values
+                .get(JIRA_STORY_POINTS_BOARD_ID_SETTING)
+                .cloned()
+                .unwrap_or_default(),
             speed_reader: SpeedReaderSettings {
                 wpm: values
                     .get(SPEED_READER_WPM_SETTING)
@@ -344,6 +365,14 @@ impl AppSettings {
                 self.jira_default_project.clone(),
             ),
             (JIRA_DEFAULT_BOARD_SETTING, self.jira_default_board.clone()),
+            (
+                JIRA_STORY_POINTS_FIELD_ID_SETTING,
+                self.jira_story_points_field_id.clone(),
+            ),
+            (
+                JIRA_STORY_POINTS_BOARD_ID_SETTING,
+                self.jira_story_points_board_id.clone(),
+            ),
             (SPEED_READER_WPM_SETTING, self.speed_reader.wpm.to_string()),
             (
                 SPEED_READER_BLOCK_DELAY_SETTING,

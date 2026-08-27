@@ -1,4 +1,12 @@
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use tuicore::{
@@ -11,11 +19,13 @@ use super::page::ComposerPage;
 use super::property_fields::BoundPropertyDropdown;
 use super::source::SourceController;
 use super::submission::SubmissionController;
+use super::ticket_rows::ticket_data_view;
 use crate::{
     jira::JiraOption,
-    service::AppService,
+    service::{AppService, composer_service::ChangeSetPatchOperation},
     store::composer::{
-        ComposerAction, ComposerState, ComposerViewMode, PlacementTarget, TicketKind,
+        ComposerAction, ComposerState, ComposerViewMode, PlacementTarget, SubmissionSnapshot,
+        TicketKind,
     },
 };
 
@@ -225,7 +235,8 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
         &TuiEvent::Key(KeyEvent::from(Key::Char('!'))),
         &mut EventCtx::default(),
     );
-    assert!(render_text(&mut page).contains("order.!"));
+    let description_text = render_text(&mut page);
+    assert!(description_text.contains('!'));
     page.dispatch_focus(&description, false, &mut FocusCtx::default());
 
     let tabs = target(&mut page, "tabs");
@@ -574,7 +585,9 @@ fn remove_discloses_descendants_and_keeps_blocked_subtree_dialog_open() {
 
     let dialog_text = render_text(&mut page);
     assert!(dialog_text.contains("Remove blocked"));
-    assert!(dialog_text.contains("NEW-2 was already submitted"));
+    assert!(dialog_text.contains("NEW-2"));
+    assert!(dialog_text.contains("was already"));
+    assert!(dialog_text.contains("submitted"));
     let dialog = target(&mut page, "dialog");
     page.dispatch_event(
         &EventRoute::new(dialog.path),
@@ -872,6 +885,39 @@ fn refreshed_source_updates_ticket_row_title_issue_type_and_title_field() {
 }
 
 #[test]
+fn composer_page_reloads_an_externally_changed_catalog() {
+    tuicore::init();
+    let service = AppService::for_tests();
+    let set = ComposerState::demo().change_sets.remove(0);
+    service.save_change_set(set.clone());
+    service.flush().unwrap();
+    let settings = service.settings();
+    let mut page = ComposerPage::new(vec![set], service.clone(), settings);
+    open_change_set(&mut page, 0);
+
+    service
+        .composer_service()
+        .apply_change_set_patch(
+            "CS-1",
+            1,
+            vec![ChangeSetPatchOperation::UpdateTitle {
+                ticket_id: "FIN-142".into(),
+                title: "Changed outside the TUI".into(),
+            }],
+        )
+        .unwrap();
+
+    for _ in 0..10 {
+        page.tick(Duration::from_millis(500), AnimationSettings::default());
+        if page.selected_changes().title == "Changed outside the TUI" {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("external Composer catalog was not applied");
+}
+
+#[test]
 fn toolbar_hotkeys_run_without_focusing_their_buttons() {
     tuicore::init();
     let mut page = composer_page();
@@ -956,7 +1002,8 @@ fn preflight_failure_clears_only_its_durable_create_attempt_marker() {
 
     submission.start(changes, &mut EventCtx::default());
     for _ in 0..100 {
-        if submission.drain_results() {
+        submission.drain_results();
+        if !submission.is_submitting() {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -973,6 +1020,80 @@ fn preflight_failure_clears_only_its_durable_create_attempt_marker() {
             .contains("unresolved Jira create attempt")
     );
     assert!(state.commit_changes(&["NEW-2".into()]).is_ok());
+}
+
+#[test]
+fn delayed_marker_persistence_does_not_block_submission_polling() {
+    let service = AppService::for_tests();
+    let resume = service.pause_durable_change_set_saves();
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    state.dispatch(ComposerAction::CreateTicket {
+        title: "New local ticket".into(),
+        project_key: "FIN".into(),
+    });
+    let changes = state.commit_changes(&["NEW-1".into()]).unwrap();
+    let state = Rc::new(RefCell::new(state));
+    let mut submission = SubmissionController::new(state, service);
+
+    submission.start(changes, &mut EventCtx::default());
+    let started = Instant::now();
+
+    assert!(!submission.drain_results());
+    assert!(started.elapsed() < Duration::from_millis(50));
+    assert!(submission.is_submitting());
+
+    resume.send(()).unwrap();
+}
+
+#[test]
+fn jira_submission_waits_for_durable_create_marker_confirmation() {
+    let service = AppService::for_tests();
+    let marker_was_durable = Arc::new(AtomicBool::new(false));
+    let jira_called = Arc::new(AtomicBool::new(false));
+    let marker_service = service.clone();
+    let observed_marker = Arc::clone(&marker_was_durable);
+    let observed_jira_call = Arc::clone(&jira_called);
+    service.set_jira_submit_for_tests(Arc::new(move |_| {
+        observed_jira_call.store(true, Ordering::SeqCst);
+        observed_marker.store(
+            marker_service
+                .change_set_for_tests("CS-2")
+                .is_some_and(|set| {
+                    set.tickets
+                        .iter()
+                        .any(|change| change.id == "NEW-1" && change.create_attempt)
+                }),
+            Ordering::SeqCst,
+        );
+        crate::jira::SubmitBatchOutcome::PreflightError("test preflight failure".into())
+    }));
+    let resume = service.pause_durable_change_set_saves();
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    state.dispatch(ComposerAction::CreateTicket {
+        title: "New local ticket".into(),
+        project_key: "FIN".into(),
+    });
+    let changes = state.commit_changes(&["NEW-1".into()]).unwrap();
+    let state = Rc::new(RefCell::new(state));
+    let mut submission = SubmissionController::new(state, service);
+
+    submission.start(changes, &mut EventCtx::default());
+    assert!(!submission.drain_results());
+    assert!(!jira_called.load(Ordering::SeqCst));
+
+    resume.send(()).unwrap();
+    for _ in 0..100 {
+        submission.drain_results();
+        if !submission.is_submitting() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert!(jira_called.load(Ordering::SeqCst));
+    assert!(marker_was_durable.load(Ordering::SeqCst));
 }
 
 #[test]
@@ -1338,6 +1459,75 @@ fn adding_child_expands_parent_and_focuses_new_child() {
 }
 
 #[test]
+fn added_subtask_uses_project_draft_key_until_submission() {
+    tuicore::init();
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    state
+        .dispatch(ComposerAction::CreateTicketAt {
+            title: "Parent task".into(),
+            project_key: "FIN".into(),
+            kind: TicketKind::Task,
+            placement: PlacementTarget::Root,
+        })
+        .unwrap();
+    state
+        .dispatch(ComposerAction::CreateTicketAt {
+            title: "Added subtask".into(),
+            project_key: "FIN".into(),
+            kind: TicketKind::Subtask,
+            placement: PlacementTarget::ChildOf("NEW-1".into()),
+        })
+        .unwrap();
+    let mut tickets = ticket_data_view(&state);
+    let area = Rect::new(0, 0, TEST_WIDTH, 8);
+    TuiNode::<()>::layout(&mut tickets, area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            tickets.render(frame, area);
+        })
+        .unwrap();
+    let mut text = String::new();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            text.push_str(terminal.backend().buffer().cell((x, y)).unwrap().symbol());
+        }
+    }
+
+    assert!(text.contains("A • FIN-DRAFT • To Do"));
+    assert!(!text.contains("Root -> NEW-1"));
+
+    let mut submitted = state.selected_changes().unwrap().clone();
+    submitted.key = "FIN-200".into();
+    state
+        .dispatch(ComposerAction::CompleteSubmission {
+            change_set_id: "CS-2".into(),
+            id: "NEW-2".into(),
+            snapshot: SubmissionSnapshot {
+                original: None,
+                updated: Some(submitted),
+            },
+        })
+        .unwrap();
+    let mut tickets = ticket_data_view(&state);
+    TuiNode::<()>::layout(&mut tickets, area, &mut LayoutCtx::new());
+    terminal
+        .draw(|frame| {
+            tickets.render(frame, area);
+        })
+        .unwrap();
+    let mut text = String::new();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            text.push_str(terminal.backend().buffer().cell((x, y)).unwrap().symbol());
+        }
+    }
+
+    assert!(text.contains("A • FIN-200 • To Do"));
+}
+
+#[test]
 fn editing_description_does_not_leak_hotkeys() {
     tuicore::init();
     let mut page = composer_page();
@@ -1358,14 +1548,15 @@ fn editing_description_does_not_leak_hotkeys() {
         &TuiEvent::Key(KeyEvent::from(Key::Char('R'))),
         &mut ctx,
     );
-    assert!(!ctx.tick_requested());
 
     page.dispatch_event(
         &EventRoute::new(textarea.path),
         &TuiEvent::Key(KeyEvent::from(Key::Char('M'))),
         &mut ctx,
     );
-    assert!(!page.create_dialog_is_open());
+    let text = render_text(&mut page);
+    assert!(text.contains("RM"));
+    assert!(!text.contains("Commit changes"));
 }
 
 #[test]

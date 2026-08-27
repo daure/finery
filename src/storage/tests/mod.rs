@@ -2,8 +2,9 @@ use crate::store::composer::{
     ChangeKind, ChangeSet, SubmissionSnapshot, Ticket, TicketChange, TicketKind,
 };
 
-use super::Storage;
+use super::{ConditionalSaveChangeSetOutcome, Storage};
 
+mod revisions;
 mod ticket_order;
 
 fn ticket(key: &str, title: &str) -> Ticket {
@@ -19,7 +20,9 @@ fn ticket(key: &str, title: &str) -> Ticket {
         assignee: "Ada".into(),
         assignee_account_id: "ada".into(),
         parent_key: None,
+        parent_title: None,
         parent_kind: None,
+        has_children: false,
     }
 }
 
@@ -48,13 +51,34 @@ fn change_sets_ticket_snapshots_and_settings_survive_round_trip() {
         };
 
         storage.save_change_set(&set).await.unwrap();
-        storage.set_setting("reader.wpm", "450").await.unwrap();
-        storage.set_setting("reader.wpm", "500").await.unwrap();
+        storage
+            .set_settings(&[("reader.wpm", "450".into())])
+            .await
+            .unwrap();
+        storage
+            .set_settings(&[("reader.wpm", "500".into())])
+            .await
+            .unwrap();
+        storage
+            .set_settings(&[
+                ("jira.story_points_board_id", "42".into()),
+                ("jira.story_points_field_id", "customfield_10016".into()),
+            ])
+            .await
+            .unwrap();
 
         assert_eq!(storage.load_change_sets().await.unwrap(), vec![set]);
         assert_eq!(
             storage.load_settings().await.unwrap().get("reader.wpm"),
             Some(&"500".to_string())
+        );
+        assert_eq!(
+            storage
+                .load_settings()
+                .await
+                .unwrap()
+                .get("jira.story_points_field_id"),
+            Some(&"customfield_10016".to_string())
         );
     });
 }

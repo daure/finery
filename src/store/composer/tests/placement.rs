@@ -16,7 +16,9 @@ fn ticket(id: &str, kind: TicketKind) -> Ticket {
         assignee: "Unassigned".into(),
         assignee_account_id: String::new(),
         parent_key: None,
+        parent_title: None,
         parent_kind: None,
+        has_children: false,
     }
 }
 
@@ -511,7 +513,9 @@ fn tasks_allow_subtask_children() {
                 assignee: "Unassigned".into(),
                 assignee_account_id: String::new(),
                 parent_key: None,
+                parent_title: None,
                 parent_kind: None,
+                has_children: false,
             }),
             updated: None,
             kind: ChangeKind::Synced,

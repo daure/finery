@@ -59,6 +59,37 @@ fn included_ticket_uses_live_source_until_first_edit_creates_changes() {
 }
 
 #[test]
+fn replacing_catalog_preserves_valid_selection_and_falls_back_safely() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    let selected = state.selected_ticket.clone().unwrap();
+    let source = state.selected_changes().unwrap().clone();
+    state.dispatch(ComposerAction::SetSource {
+        change_set_id: "CS-1".into(),
+        id: selected.clone(),
+        ticket: source,
+    });
+
+    let catalog = state.change_sets.clone();
+    state.replace_change_sets(catalog);
+    assert_eq!(state.active_change_set.as_deref(), Some("CS-1"));
+    assert_eq!(state.selected_ticket.as_deref(), Some(selected.as_str()));
+    assert!(state.sources.is_empty());
+
+    let mut changed_catalog = state.change_sets.clone();
+    changed_catalog[0]
+        .tickets
+        .retain(|change| change.id != selected);
+    state.replace_change_sets(changed_catalog);
+    assert_eq!(state.active_change_set.as_deref(), Some("CS-1"));
+    assert_eq!(state.selected_ticket.as_deref(), Some("FIN-157"));
+
+    state.replace_change_sets(Vec::new());
+    assert!(state.active_change_set.is_none());
+    assert!(state.selected_ticket.is_none());
+}
+
+#[test]
 fn submission_results_update_the_originating_change_set_after_navigation() {
     let mut state = ComposerState::demo();
     state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));

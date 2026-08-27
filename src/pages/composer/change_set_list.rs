@@ -79,7 +79,8 @@ impl ChangeSetListView {
             match event {
                 ListControlEvent::Added { row_id } => {
                     if let Some(row) = self.control.items().iter().find(|row| row.id == row_id) {
-                        self.state
+                        let _ = self
+                            .state
                             .borrow_mut()
                             .dispatch(ComposerAction::CreateChangeSet {
                                 id: row.id.clone(),
@@ -95,7 +96,8 @@ impl ChangeSetListView {
                         {
                             self.service.save_change_set(set);
                         }
-                        self.state
+                        let _ = self
+                            .state
                             .borrow_mut()
                             .dispatch(ComposerAction::OpenChangeSet(row_id.clone()));
                         ctx.request_layout();
@@ -114,7 +116,8 @@ impl ChangeSetListView {
                         ctx.request_redraw();
                         continue;
                     }
-                    self.state
+                    let _ = self
+                        .state
                         .borrow_mut()
                         .dispatch(ComposerAction::DeleteChangeSet(row_id.clone()));
                     self.service.delete_change_set(row_id);
@@ -124,7 +127,8 @@ impl ChangeSetListView {
         }
         for event in self.control.data_view_mut().drain_events() {
             if let tuicore::DataViewTypedEvent::Activated { row_id } = event {
-                self.state
+                let _ = self
+                    .state
                     .borrow_mut()
                     .dispatch(ComposerAction::OpenChangeSet(row_id));
                 ctx.request_layout();

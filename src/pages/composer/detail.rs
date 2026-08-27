@@ -199,7 +199,8 @@ impl DetailPane {
             let details = self.detail.second_mut().second_mut();
             match action {
                 DescriptionAction::ShowChanges => {
-                    self.state
+                    let _ = self
+                        .state
                         .borrow_mut()
                         .dispatch(ComposerAction::SetViewMode(ComposerViewMode::Changes));
                 }
@@ -229,6 +230,9 @@ impl DetailPane {
     }
 
     fn sync(&mut self) {
+        let fields = self.detail.second_mut();
+        let title_height = fields.first().height();
+        fields.set_constraints(Constraint::Length(title_height), Constraint::Fill(1));
         let state = self.state.borrow();
         let editable = state.selected_is_editable();
         let deleted = state

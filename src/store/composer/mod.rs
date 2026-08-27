@@ -29,7 +29,11 @@ pub(crate) struct Ticket {
     #[serde(default)]
     pub parent_key: Option<String>,
     #[serde(default)]
+    pub parent_title: Option<String>,
+    #[serde(default)]
     pub parent_kind: Option<TicketKind>,
+    #[serde(default)]
+    pub has_children: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +171,13 @@ pub(crate) enum ComposerAction {
         kind: TicketKind,
         placement: PlacementTarget,
     },
+    CreateTicketWithId {
+        id: String,
+        title: String,
+        project_key: String,
+        kind: TicketKind,
+        placement: PlacementTarget,
+    },
     IncludeTicket(Ticket),
     IncludeTicketAt {
         ticket: Ticket,
@@ -216,13 +227,7 @@ pub(crate) enum ComposerAction {
 
 impl ComposerState {
     pub(crate) fn from_change_sets(change_sets: Vec<ChangeSet>) -> Self {
-        let next_ticket = change_sets
-            .iter()
-            .flat_map(|set| &set.tickets)
-            .filter_map(|change| change.id.strip_prefix("NEW-")?.parse::<usize>().ok())
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let next_ticket = next_ticket_id(&change_sets);
         Self {
             change_sets,
             active_change_set: None,
@@ -300,6 +305,35 @@ impl ComposerState {
     pub(crate) fn active_set(&self) -> Option<&ChangeSet> {
         let active = self.active_change_set.as_deref()?;
         self.change_sets.iter().find(|set| set.id == active)
+    }
+
+    pub(crate) fn replace_change_sets(&mut self, change_sets: Vec<ChangeSet>) {
+        let active_change_set = self.active_change_set.clone();
+        let selected_ticket = self.selected_ticket.clone();
+        self.change_sets = change_sets;
+        self.sources.clear();
+        self.submitting_change_sets
+            .retain(|id| self.change_sets.iter().any(|set| &set.id == id));
+        self.next_ticket = next_ticket_id(&self.change_sets);
+
+        if let Some(active) = active_change_set
+            && self.change_sets.iter().any(|set| set.id == active)
+        {
+            self.active_change_set = Some(active);
+            self.selected_ticket = selected_ticket.filter(|selected| {
+                self.active_set()
+                    .is_some_and(|set| set.tickets.iter().any(|change| change.id == *selected))
+            });
+            if self.selected_ticket.is_none() {
+                self.selected_ticket = self
+                    .ordered_changes()
+                    .into_iter()
+                    .find(|change| self.ticket_for_change(change).is_some())
+                    .map(|change| change.id.clone());
+            }
+        } else {
+            self.close_change_set();
+        }
     }
 
     pub(crate) fn begin_submission(&mut self, change_set_id: &str) -> bool {
@@ -684,6 +718,13 @@ impl ComposerState {
                 kind,
                 placement,
             } => self.create_ticket(title, project_key, kind, placement)?,
+            ComposerAction::CreateTicketWithId {
+                id,
+                title,
+                project_key,
+                kind,
+                placement,
+            } => self.create_ticket_with_id(id, title, project_key, kind, placement)?,
             ComposerAction::IncludeTicket(ticket) => {
                 self.include_ticket(ticket, PlacementTarget::Root, false)?
             }
@@ -758,11 +799,10 @@ impl ComposerState {
         else {
             return;
         };
-        self.sources
-            .insert((change_set_id.to_owned(), id), ticket.clone());
         if !change.is_submitted() && change.original.is_some() {
-            change.original = Some(ticket);
+            change.original = Some(ticket.clone());
         }
+        self.sources.insert((change_set_id.to_owned(), id), ticket);
     }
 
     fn close_change_set(&mut self) {
@@ -777,13 +817,32 @@ impl ComposerState {
         kind: TicketKind,
         placement: PlacementTarget,
     ) -> Result<(), PlacementError> {
+        let id = format!("NEW-{}", self.next_ticket);
+        self.create_ticket_with_id(id, title, project_key, kind, placement)?;
+        self.next_ticket += 1;
+        Ok(())
+    }
+
+    fn create_ticket_with_id(
+        &mut self,
+        id: String,
+        title: String,
+        project_key: String,
+        kind: TicketKind,
+        placement: PlacementTarget,
+    ) -> Result<(), PlacementError> {
         if self.active_set().is_none() {
             return Err(PlacementError::UnknownTicket);
         }
         if self.active_set().is_some_and(|set| set.closed) {
             return Err(PlacementError::ClosedChangeSet);
         }
-        let id = format!("NEW-{}", self.next_ticket);
+        if self
+            .active_set()
+            .is_some_and(|set| set.tickets.iter().any(|change| change.id == id))
+        {
+            return Err(PlacementError::UnknownTicket);
+        }
         let mut ticket = Ticket {
             key: id.clone(),
             project_key,
@@ -796,11 +855,16 @@ impl ComposerState {
             assignee: "Unassigned".into(),
             assignee_account_id: String::new(),
             parent_key: None,
+            parent_title: None,
             parent_kind: None,
+            has_children: false,
         };
         self.validate_new_placement(ticket.kind, &placement, None)?;
-        self.next_ticket += 1;
         ticket.parent_key = self.resolved_parent_key(&placement);
+        ticket.parent_title = ticket
+            .parent_key
+            .as_deref()
+            .and_then(|parent| self.parent_title_for(parent));
         ticket.parent_kind = ticket
             .parent_key
             .as_deref()
@@ -881,6 +945,14 @@ impl ComposerState {
                     .flatten()
             });
         ticket.parent_key = parent_key.clone();
+        ticket.parent_title = parent_key
+            .as_deref()
+            .and_then(|parent| self.parent_title_for(parent))
+            .or_else(|| {
+                (source.parent_key == parent_key)
+                    .then_some(source.parent_title.clone())
+                    .flatten()
+            });
         ticket.parent_kind = parent_kind;
         let sibling_order = self.next_sibling_order(parent_key.as_deref());
         let Some(set) = self.active_set_mut() else {
@@ -1230,7 +1302,20 @@ impl ComposerState {
         nodes.insert(id.into(), (kind, parent, parent_kind));
         aliases.insert(id.into(), id.into());
 
-        for (child_id, (child_kind, parent, external_parent_kind)) in &nodes {
+        for child_id in nodes.keys() {
+            let mut visited = std::collections::HashSet::new();
+            let mut current = Some(child_id.as_str());
+            while let Some(node) = current {
+                if !visited.insert(node) {
+                    return Err(PlacementError::Cycle);
+                }
+                current = nodes
+                    .get(node)
+                    .and_then(|(_, parent, _)| parent.as_deref())
+                    .and_then(|parent| aliases.get(parent).map(String::as_str));
+            }
+        }
+        for (child_kind, parent, external_parent_kind) in nodes.values() {
             if parent.is_none() && !allowed_child_kinds(None).contains(child_kind) {
                 return Err(PlacementError::InvalidParentKind);
             }
@@ -1245,17 +1330,6 @@ impl ComposerState {
                 .ok_or(PlacementError::UnknownParentKind)?;
             if !allowed_child_kinds(Some(parent_kind)).contains(child_kind) {
                 return Err(PlacementError::InvalidParentKind);
-            }
-            let mut visited = std::collections::HashSet::new();
-            let mut current = Some(child_id.as_str());
-            while let Some(node) = current {
-                if !visited.insert(node) {
-                    return Err(PlacementError::Cycle);
-                }
-                current = nodes
-                    .get(node)
-                    .and_then(|(_, parent, _)| parent.as_deref())
-                    .and_then(|parent| aliases.get(parent).map(String::as_str));
             }
         }
         Ok(())
@@ -1272,6 +1346,9 @@ impl ComposerState {
         let parent_kind = parent_key
             .as_deref()
             .and_then(|parent| self.parent_kind_for(parent));
+        let parent_title = parent_key
+            .as_deref()
+            .and_then(|parent| self.parent_title_for(parent));
         let sibling_order = self.next_sibling_order(parent_key.as_deref());
         let change = self
             .active_set_mut()
@@ -1288,6 +1365,7 @@ impl ComposerState {
             .as_mut()
             .ok_or(PlacementError::UnknownTicket)?;
         ticket.parent_key = parent_key;
+        ticket.parent_title = parent_title;
         ticket.parent_kind = parent_kind;
         change.sibling_order = sibling_order;
         if change.kind == ChangeKind::Synced {
@@ -1316,6 +1394,20 @@ impl ComposerState {
             .filter_map(|ticket| ticket.parent_kind)
             .collect::<std::collections::HashSet<_>>();
         (kinds.len() == 1).then(|| *kinds.iter().next().unwrap())
+    }
+
+    fn parent_title_for(&self, parent: &str) -> Option<String> {
+        self.active_set()
+            .and_then(|set| {
+                set.tickets.iter().find(|change| {
+                    change.id == parent
+                        || self
+                            .changes_for_change(change)
+                            .is_some_and(|ticket| ticket.key == parent)
+                })
+            })
+            .and_then(|change| self.changes_for_change(change))
+            .map(|ticket| ticket.title.clone())
     }
 
     fn resolved_parent_key(&self, placement: &PlacementTarget) -> Option<String> {
@@ -1396,6 +1488,16 @@ impl ComposerState {
     }
 }
 
+fn next_ticket_id(change_sets: &[ChangeSet]) -> usize {
+    change_sets
+        .iter()
+        .flat_map(|set| &set.tickets)
+        .filter_map(|change| change.id.strip_prefix("NEW-")?.parse::<usize>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
 fn allowed_child_kinds(parent: Option<TicketKind>) -> &'static [TicketKind] {
     match parent {
         None => &[
@@ -1444,6 +1546,7 @@ impl ComposerAction {
             self,
             Self::CreateTicket { .. }
                 | Self::CreateTicketAt { .. }
+                | Self::CreateTicketWithId { .. }
                 | Self::IncludeTicket(_)
                 | Self::IncludeTicketAt { .. }
                 | Self::ReparentTicket { .. }
@@ -1465,6 +1568,7 @@ impl ComposerAction {
             self,
             Self::CreateTicket { .. }
                 | Self::CreateTicketAt { .. }
+                | Self::CreateTicketWithId { .. }
                 | Self::IncludeTicket(_)
                 | Self::IncludeTicketAt { .. }
                 | Self::ReparentTicket { .. }
@@ -1501,7 +1605,9 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             assignee: "Mina Patel".into(),
             assignee_account_id: "mina".into(),
             parent_key: None,
+            parent_title: None,
             parent_kind: None,
+            has_children: false,
         },
         Ticket {
             key: "FIN-157".into(),
@@ -1515,7 +1621,9 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             assignee: "Ada Mensah".into(),
             assignee_account_id: "ada".into(),
             parent_key: None,
+            parent_title: None,
             parent_kind: None,
+            has_children: false,
         },
         Ticket {
             key: "FIN-131".into(),
@@ -1529,7 +1637,9 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             assignee: "Lin Chen".into(),
             assignee_account_id: "lin".into(),
             parent_key: None,
+            parent_title: None,
             parent_kind: None,
+            has_children: false,
         },
         Ticket {
             key: "FIN-166".into(),
@@ -1543,7 +1653,9 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             assignee: "Unassigned".into(),
             assignee_account_id: String::new(),
             parent_key: None,
+            parent_title: None,
             parent_kind: None,
+            has_children: false,
         },
     ]
 }

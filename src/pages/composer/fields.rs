@@ -6,10 +6,10 @@ use std::{
 
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
-    AnimationSettings, DiffStyle, DiffViewer, Dropdown, DropdownLabelPosition, DropdownVariant,
-    EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget, InputChrome, Language,
-    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, TextInput,
-    TextareaInput, TickResult, TuiEvent, TuiNode,
+    AnimationSettings, BorderKind, DiffStyle, DiffViewer, Dropdown, DropdownLabelPosition,
+    DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget,
+    InputChrome, Language, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
+    Panel, PanelHost, RenderCtx, TextInput, TextareaInput, TickResult, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -62,6 +62,7 @@ pub(super) struct BoundTextField {
     state: Rc<RefCell<ComposerState>>,
     field: TextField,
     input: TextInput,
+    diff: PanelHost<DiffViewer>,
 }
 
 impl BoundTextField {
@@ -80,10 +81,21 @@ impl BoundTextField {
         } else {
             input
         };
+        let diff = DiffViewer::new("", "")
+            .labels("Source", "Changes")
+            .style(DiffStyle::Inline)
+            .min_rows(2)
+            .max_rows(2)
+            .show_headers(false)
+            .wrap(true);
         let mut bound = Self {
             state,
             field,
             input,
+            diff: Panel::new()
+                .border(BorderKind::RoundedDashed)
+                .top_right("read-only")
+                .host(diff),
         };
         bound.sync();
         bound
@@ -101,19 +113,28 @@ impl BoundTextField {
         let state = self.state.borrow();
         let value = self.field.value(&state);
         let editable = state.selected_is_editable();
-        let mode = match state.view_mode {
-            ComposerViewMode::Source => "Source · read-only",
-            ComposerViewMode::Changes => "Changes",
-            ComposerViewMode::Diff => "Diff · read-only",
-        };
+        let read_only = matches!(
+            state.view_mode,
+            ComposerViewMode::Source | ComposerViewMode::Diff
+        );
         let key = state
             .selected_ticket()
             .map_or_else(|| "No ticket selected".into(), |ticket| ticket.key.clone());
-        let chrome = if matches!(self.field, TextField::Title) {
-            InputChrome::panel(key).top_right(mode)
+        let chrome = if read_only {
+            InputChrome::panel(key.clone()).top_right("read-only")
         } else {
-            InputChrome::panel(self.field.label()).top_right(mode)
+            InputChrome::panel(key.clone())
         };
+        let source = state
+            .selected_source()
+            .map_or("", |ticket| ticket.title.as_str());
+        let changes = state
+            .selected_changes()
+            .map_or("", |ticket| ticket.title.as_str());
+        self.diff
+            .child_mut()
+            .set_texts(terminated_line(source), terminated_line(changes));
+        self.diff.panel_mut().set_top_left(key);
         let value_changed =
             (!self.input.insert_mode() || !editable) && self.input.current_value() != value;
         let changed = value_changed || editable == self.input.is_disabled();
@@ -125,21 +146,56 @@ impl BoundTextField {
         self.input.set_style(chrome);
         changed
     }
+
+    fn shows_diff(&self) -> bool {
+        let state = self.state.borrow();
+        state.view_mode == ComposerViewMode::Diff
+            && state.selected_source().map(|ticket| &ticket.title)
+                != state.selected_changes().map(|ticket| &ticket.title)
+    }
+
+    pub(super) fn height(&self) -> u16 {
+        if self.shows_diff() { 4 } else { 3 }
+    }
+}
+
+fn terminated_line(value: &str) -> String {
+    if value.ends_with('\n') {
+        value.into()
+    } else {
+        format!("{value}\n")
+    }
 }
 
 impl TuiNode for BoundTextField {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
-        self.input.measure(proposal)
+        if self.shows_diff() {
+            self.diff.measure(proposal)
+        } else {
+            self.input.measure(proposal)
+        }
     }
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.sync();
-        self.input.layout(area, ctx)
+        if self.shows_diff() {
+            self.diff.layout(area, ctx)
+        } else {
+            self.input.layout(area, ctx)
+        }
     }
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, _ctx: &mut RenderCtx<'a>) {
-        self.input.render(frame, area);
+        if self.shows_diff() {
+            self.diff.render(frame, area, _ctx);
+        } else {
+            self.input.render(frame, area);
+        }
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        self.input.event(event, ctx)
+        if self.shows_diff() {
+            self.diff.event(event, ctx)
+        } else {
+            self.input.event(event, ctx)
+        }
     }
     fn dispatch_event(
         &mut self,
@@ -147,7 +203,9 @@ impl TuiNode for BoundTextField {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        if route.path.is_empty() {
+        if self.shows_diff() {
+            self.diff.dispatch_event(route, event, ctx)
+        } else if route.path.is_empty() {
             self.event(event, ctx)
         } else {
             EventOutcome::Ignored
@@ -155,7 +213,12 @@ impl TuiNode for BoundTextField {
     }
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let changed = self.sync();
-        self.input.tick(dt, settings).merge(if changed {
+        let active = if self.shows_diff() {
+            self.diff.tick(dt, settings)
+        } else {
+            self.input.tick(dt, settings)
+        };
+        active.merge(if changed {
             TickResult::CHANGED
         } else {
             TickResult::IDLE
@@ -163,20 +226,26 @@ impl TuiNode for BoundTextField {
     }
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
         self.input.focus(target, focused, ctx);
+        self.diff.focus(target, focused, ctx);
     }
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
         self.input.dispatch_focus(target, focused, ctx);
+        self.diff.dispatch_focus(target, focused, ctx);
     }
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.input.init(ctx);
+        self.diff.init(ctx);
     }
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.input.mount(ctx);
+        self.diff.mount(ctx);
     }
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.diff.unmount(ctx);
         self.input.unmount(ctx);
     }
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.diff.destroy(ctx);
         self.input.destroy(ctx);
     }
 }

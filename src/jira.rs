@@ -10,10 +10,10 @@ use crate::{
         ChangeKind, SubmissionSnapshot, Ticket, TicketChange, TicketKind,
         jira_adf::{adf_is_safe_to_overwrite, adf_to_markdown, markdown_to_adf},
     },
-    store::work_items::{BacklogSnapshot, Sprint, WorkItem},
+    store::work_items::{BacklogSnapshot, RankPlan, Sprint, WorkItem},
 };
 
-const ISSUE_FIELDS: [&str; 8] = [
+const ISSUE_FIELDS: [&str; 9] = [
     "summary",
     "description",
     "issuetype",
@@ -22,10 +22,29 @@ const ISSUE_FIELDS: [&str; 8] = [
     "assignee",
     "project",
     "parent",
+    "subtasks",
 ];
 
-const BACKLOG_FIELDS: [&str; 5] = ["summary", "issuetype", "status", "priority", "assignee"];
+const BACKLOG_FIELDS: [&str; 7] = [
+    "summary",
+    "issuetype",
+    "status",
+    "priority",
+    "assignee",
+    "parent",
+    "subtasks",
+];
 const BACKLOG_JQL: &str = "issuetype not in subTaskIssueTypes() AND issuetype != Epic";
+
+pub(crate) struct BacklogLoad {
+    pub snapshot: BacklogSnapshot,
+    pub discovered_story_points: Option<DiscoveredStoryPoints>,
+}
+
+pub(crate) struct DiscoveredStoryPoints {
+    pub board_id: String,
+    pub field_id: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct JiraProject {
@@ -126,7 +145,7 @@ struct JiraIssue {
     fields: Value,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct CreatedIssue {
     key: String,
 }
@@ -188,27 +207,148 @@ pub(crate) fn search(settings: &AppSettings, query: &str) -> Result<Vec<Ticket>,
     Ok(response.issues.into_iter().map(to_ticket).collect())
 }
 
-pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogSnapshot, String> {
+pub(crate) fn fetch_tickets(
+    settings: &AppSettings,
+    keys: &[String],
+) -> Result<HashMap<String, Ticket>, String> {
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let tickets = bulk_fetch_tickets(&client, &base_url, &email, &token, keys)?;
+    let missing = keys
+        .iter()
+        .filter(|key| !tickets.contains_key(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(tickets)
+    } else {
+        Err(format!(
+            "Jira did not return requested tickets: {}",
+            missing.join(", ")
+        ))
+    }
+}
+
+pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
     let (client, base_url, email, token) = configured_client(settings)?;
     let board = backlog_board(&client, &base_url, &email, &token, settings)?;
+    let (discovered_story_points, discovery_warning) =
+        if should_discover_story_points(settings, board.id) {
+            discover_story_points(
+                settings,
+                board.id,
+                board_story_points_field(&client, &base_url, &email, &token, board.id),
+            )
+        } else {
+            (None, None)
+        };
+    let story_points_field_id = discovered_story_points
+        .as_ref()
+        .map(|discovery| discovery.field_id.as_str())
+        .or_else(|| {
+            (!settings.jira_story_points_field_id.trim().is_empty())
+                .then_some(settings.jira_story_points_field_id.as_str())
+        });
     let sprints = board_sprints(&client, &base_url, &email, &token, board.id)?;
-    let sprints = sprints
-        .into_iter()
-        .map(|sprint| {
-            sprint_issues(&client, &base_url, &email, &token, sprint.id).map(|work_items| Sprint {
-                id: sprint.id,
-                name: sprint.name,
-                state: sprint.state,
-                work_items,
+    let (sprints, work_items) = std::thread::scope(|scope| -> Result<_, String> {
+        let backlog_client = client.clone();
+        let backlog_base_url = base_url.clone();
+        let backlog_email = email.clone();
+        let backlog_token = token.clone();
+        let board_id = board.id;
+        let story_points_field_id = story_points_field_id.map(str::to_owned);
+        let backlog_story_points_field_id = story_points_field_id.clone();
+        let backlog = scope.spawn(move || {
+            board_backlog(
+                &backlog_client,
+                &backlog_base_url,
+                &backlog_email,
+                &backlog_token,
+                board_id,
+                backlog_story_points_field_id.as_deref(),
+            )
+        });
+        let sprint_requests = sprints
+            .iter()
+            .map(|sprint| {
+                let sprint_id = sprint.id;
+                let client = client.clone();
+                let base_url = base_url.clone();
+                let email = email.clone();
+                let token = token.clone();
+                let story_points_field_id = story_points_field_id.clone();
+                scope.spawn(move || {
+                    sprint_issues(
+                        &client,
+                        &base_url,
+                        &email,
+                        &token,
+                        sprint_id,
+                        story_points_field_id.as_deref(),
+                    )
+                })
             })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let work_items = board_backlog(&client, &base_url, &email, &token, board.id)?;
-    Ok(BacklogSnapshot {
+            .collect::<Vec<_>>();
+        let work_items = backlog
+            .join()
+            .map_err(|_| "Jira backlog request panicked".to_string())??;
+        let sprints = sprints
+            .into_iter()
+            .zip(sprint_requests)
+            .map(|(sprint, request)| {
+                let work_items = request
+                    .join()
+                    .map_err(|_| "Jira sprint request panicked".to_string())??;
+                Ok(Sprint {
+                    id: sprint.id,
+                    name: sprint.name,
+                    state: sprint.state,
+                    work_items,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok((sprints, work_items))
+    })?;
+    let mut snapshot = BacklogSnapshot {
         board_name: board.name,
         sprints,
         work_items,
+        warnings: Vec::new(),
+    };
+    if let Some(warning) = discovery_warning {
+        snapshot.warnings.push(warning);
+    }
+    if let Some(warning) = story_points_warning(&snapshot) {
+        snapshot.warnings.push(warning);
+    }
+    Ok(BacklogLoad {
+        snapshot,
+        discovered_story_points,
     })
+}
+
+pub(crate) fn rank(settings: &AppSettings, plan: &RankPlan) -> Result<(), String> {
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let response = client
+        .put(format!("{base_url}/rest/agile/1.0/issue/rank"))
+        .basic_auth(email, Some(token))
+        .json(&rank_payload(plan))
+        .send()
+        .map_err(|error| error.to_string())?;
+    ensure_rank_success(response)
+}
+
+fn rank_payload(plan: &RankPlan) -> Value {
+    let mut payload = Map::new();
+    payload.insert("issues".into(), json!(plan.issues));
+    if let Some(anchor) = plan.rank_before_issue.as_ref() {
+        payload.insert("rankBeforeIssue".into(), json!(anchor));
+    } else if let Some(anchor) = plan.rank_after_issue.as_ref() {
+        payload.insert("rankAfterIssue".into(), json!(anchor));
+    }
+    Value::Object(payload)
 }
 
 fn backlog_board(
@@ -294,19 +434,90 @@ fn board_sprints(
     }
 }
 
+fn board_story_points_field(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    board_id: u64,
+) -> Result<String, String> {
+    let response = client
+        .get(format!(
+            "{base_url}/rest/agile/1.0/board/{board_id}/configuration"
+        ))
+        .basic_auth(email, Some(token))
+        .send()
+        .map_err(|error| error.to_string())?;
+    response_json::<Value>(response).map(|configuration| story_points_field_id(&configuration))
+}
+
+fn story_points_field_id(configuration: &Value) -> String {
+    (configuration
+        .pointer("/estimation/type")
+        .and_then(Value::as_str)
+        == Some("field"))
+    .then(|| {
+        configuration
+            .pointer("/estimation/field/fieldId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    })
+    .unwrap_or_default()
+}
+
+fn should_discover_story_points(settings: &AppSettings, board_id: u64) -> bool {
+    let known_board = settings.jira_story_points_board_id.trim();
+    settings.jira_story_points_field_id.trim().is_empty()
+        || (!known_board.is_empty() && known_board != board_id.to_string())
+}
+
+fn discover_story_points(
+    settings: &AppSettings,
+    board_id: u64,
+    result: Result<String, String>,
+) -> (Option<DiscoveredStoryPoints>, Option<String>) {
+    if !should_discover_story_points(settings, board_id) {
+        return (None, None);
+    }
+    match result {
+        Ok(field_id) if !field_id.trim().is_empty() => (
+            Some(DiscoveredStoryPoints {
+                board_id: board_id.to_string(),
+                field_id,
+            }),
+            None,
+        ),
+        Ok(_) => (None, None),
+        Err(error) => (
+            None,
+            Some(format!(
+                "Could not discover the Jira story-points field: {error}. Loaded tickets without it; retry on the next backlog refresh."
+            )),
+        ),
+    }
+}
+
+fn configured_story_points_field(settings: &AppSettings) -> Option<&str> {
+    (!settings.jira_story_points_field_id.trim().is_empty())
+        .then_some(settings.jira_story_points_field_id.as_str())
+}
+
 fn sprint_issues(
     client: &Client,
     base_url: &str,
     email: &str,
     token: &str,
     sprint_id: u64,
+    story_points_field_id: Option<&str>,
 ) -> Result<Vec<WorkItem>, String> {
     let mut next_page_token = None;
     let mut work_items = Vec::new();
     loop {
         let query = vec![
             ("maxResults", "100".to_string()),
-            ("fields", BACKLOG_FIELDS.join(",")),
+            ("fields", backlog_fields(story_points_field_id).join(",")),
         ];
         let mut request = client
             .get(format!(
@@ -319,7 +530,11 @@ fn sprint_issues(
         }
         let response = request.send().map_err(|error| error.to_string())?;
         let page = response_json::<AgileIssuePage>(response)?;
-        work_items.extend(page.issues.into_iter().map(to_work_item));
+        work_items.extend(
+            page.issues
+                .into_iter()
+                .map(|issue| to_work_item(issue, story_points_field_id)),
+        );
         let Some(page_token) = page.next_page_token else {
             return Ok(work_items);
         };
@@ -333,6 +548,7 @@ fn board_backlog(
     email: &str,
     token: &str,
     board_id: u64,
+    story_points_field_id: Option<&str>,
 ) -> Result<Vec<WorkItem>, String> {
     let mut start_at = 0;
     let mut work_items = Vec::new();
@@ -342,13 +558,17 @@ fn board_backlog(
                 "{base_url}/rest/agile/1.0/board/{board_id}/backlog"
             ))
             .basic_auth(email, Some(token))
-            .query(&board_backlog_query(start_at))
+            .query(&board_backlog_query(start_at, story_points_field_id))
             .send()
             .map_err(|error| error.to_string())?;
         let page = response_json::<AgileIssuePage>(response)?;
         let loaded = page.issues.len();
         let complete = backlog_page_complete(&page, loaded);
-        work_items.extend(page.issues.into_iter().map(to_work_item));
+        work_items.extend(
+            page.issues
+                .into_iter()
+                .map(|issue| to_work_item(issue, story_points_field_id)),
+        );
         if complete {
             return Ok(work_items);
         }
@@ -362,13 +582,24 @@ fn backlog_page_complete(page: &AgileIssuePage, loaded: usize) -> bool {
         || (page.total > 0 && page.start_at.saturating_add(page.max_results) >= page.total)
 }
 
-fn board_backlog_query(start_at: usize) -> [(&'static str, String); 4] {
-    [
+fn board_backlog_query(
+    start_at: usize,
+    story_points_field_id: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    vec![
         ("startAt", start_at.to_string()),
         ("maxResults", "100".into()),
-        ("fields", BACKLOG_FIELDS.join(",")),
+        ("fields", backlog_fields(story_points_field_id).join(",")),
         ("jql", BACKLOG_JQL.into()),
     ]
+}
+
+fn backlog_fields(story_points_field_id: Option<&str>) -> Vec<&str> {
+    let mut fields = BACKLOG_FIELDS.to_vec();
+    if let Some(field_id) = story_points_field_id.filter(|field_id| !field_id.trim().is_empty()) {
+        fields.push(field_id);
+    }
+    fields
 }
 
 pub(crate) fn fetch(settings: &AppSettings, key: &str) -> Result<Ticket, String> {
@@ -387,10 +618,7 @@ pub(crate) fn field_options(
         edit_issue_types(&client, &base_url, &email, &token, &ticket.key)?
     };
     let statuses = if ticket.key.starts_with("NEW-") {
-        vec![JiraOption {
-            id: ticket.status.clone(),
-            label: ticket.status.clone(),
-        }]
+        create_available_statuses(&client, &base_url, &email, &token, ticket)?
     } else {
         available_statuses(&client, &base_url, &email, &token, ticket)?
     };
@@ -449,7 +677,12 @@ fn create_issue_types(
 }
 
 fn create_issue_types_from_value(value: &Value) -> Vec<JiraOption> {
-    options_from_values(value.get("values").and_then(Value::as_array))
+    options_from_values(
+        value
+            .get("issueTypes")
+            .or_else(|| value.get("values"))
+            .and_then(Value::as_array),
+    )
 }
 
 fn create_issue_type(issue_types: Vec<JiraOption>, ticket: &Ticket) -> Result<JiraOption, String> {
@@ -501,6 +734,53 @@ fn priorities(
     Ok(options_from_values(
         value.get("values").and_then(Value::as_array),
     ))
+}
+
+fn create_available_statuses(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    ticket: &Ticket,
+) -> Result<Vec<JiraOption>, String> {
+    let response = client
+        .get(format!(
+            "{base_url}/rest/api/3/project/{}/statuses",
+            ticket.project_key
+        ))
+        .basic_auth(email, Some(token))
+        .send()
+        .map_err(|error| error.to_string())?;
+    let statuses = response_json::<Value>(response)?;
+    Ok(create_available_statuses_from_value(&statuses, ticket.kind))
+}
+
+fn create_available_statuses_from_value(value: &Value, kind: TicketKind) -> Vec<JiraOption> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|issue_type| {
+            issue_type
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| ticket_kind(name) == kind)
+        })
+        .and_then(|issue_type| issue_type.get("statuses").and_then(Value::as_array))
+        .into_iter()
+        .flatten()
+        .filter_map(|status| {
+            let label = status.get("name")?.as_str()?.to_owned();
+            Some(JiraOption {
+                id: status
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&label)
+                    .to_owned(),
+                label,
+            })
+        })
+        .collect()
 }
 
 fn available_statuses(
@@ -595,7 +875,7 @@ pub(crate) fn submit_changes(
             .filter(|change| change.kind != ChangeKind::Added)
             .filter_map(|change| change.original.as_ref().map(|ticket| ticket.key.clone()))
             .collect::<Vec<_>>();
-        let current = fetch_tickets(&client, &base_url, &email, &token, &existing_keys)?;
+        let current = bulk_fetch_tickets(&client, &base_url, &email, &token, &existing_keys)?;
         let conflicts = changes
             .iter()
             .filter(|change| change.kind != ChangeKind::Added)
@@ -855,7 +1135,7 @@ fn submit_change(
     }
 }
 
-fn fetch_tickets(
+fn bulk_fetch_tickets(
     client: &Client,
     base_url: &str,
     email: &str,
@@ -1277,6 +1557,17 @@ fn ensure_success(response: reqwest::blocking::Response) -> Result<(), String> {
     }
 }
 
+fn ensure_rank_success(response: reqwest::blocking::Response) -> Result<(), String> {
+    let status = response.status();
+    if status == StatusCode::NO_CONTENT {
+        return Ok(());
+    }
+    let body = response
+        .text()
+        .unwrap_or_else(|_| "unknown Jira error".into());
+    Err(format!("Jira returned {}: {body}", status.as_u16()))
+}
+
 fn request_search(
     client: &Client,
     base_url: &str,
@@ -1312,6 +1603,7 @@ fn request_search(
 
 fn to_ticket(issue: JiraIssue) -> Ticket {
     let field = |name: &str| issue.fields.get(name).unwrap_or(&Value::Null);
+    let (parent_key, parent_title) = parent_metadata(field("parent"));
     Ticket {
         key: issue.key.clone(),
         project_key: field("project")
@@ -1339,19 +1631,21 @@ fn to_ticket(issue: JiraIssue) -> Ticket {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .into(),
-        parent_key: field("parent")
-            .get("key")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        parent_key,
+        parent_title,
         parent_kind: field("parent")
             .pointer("/fields/issuetype/name")
             .and_then(Value::as_str)
             .map(ticket_kind),
+        has_children: field("subtasks")
+            .as_array()
+            .is_some_and(|subtasks| !subtasks.is_empty()),
     }
 }
 
-fn to_work_item(issue: JiraIssue) -> WorkItem {
+fn to_work_item(issue: JiraIssue, story_points_field_id: Option<&str>) -> WorkItem {
     let field = |name: &str| issue.fields.get(name).unwrap_or(&Value::Null);
+    let (parent_key, parent_title) = parent_metadata(field("parent"));
     WorkItem {
         key: issue.key.clone(),
         title: field("summary").as_str().unwrap_or(&issue.key).into(),
@@ -1363,7 +1657,41 @@ fn to_work_item(issue: JiraIssue) -> WorkItem {
             .and_then(Value::as_str)
             .unwrap_or("Unassigned")
             .into(),
+        parent_key,
+        parent_title,
+        has_children: field("subtasks")
+            .as_array()
+            .is_some_and(|subtasks| !subtasks.is_empty()),
+        story_points: story_points_field_id.and_then(|field_id| {
+            field(field_id)
+                .as_f64()
+                .or_else(|| field(field_id).as_str()?.parse().ok())
+        }),
     }
+}
+
+fn story_points_warning(snapshot: &BacklogSnapshot) -> Option<String> {
+    let tickets = snapshot
+        .sprints
+        .iter()
+        .flat_map(|sprint| &sprint.work_items)
+        .chain(&snapshot.work_items)
+        .collect::<Vec<_>>();
+    (!tickets.is_empty() && tickets.iter().all(|ticket| ticket.story_points.is_none())).then(|| {
+        "No loaded backlog tickets have story-point values. Check the Jira story-points custom-field ID in Settings.".into()
+    })
+}
+
+fn parent_metadata(parent: &Value) -> (Option<String>, Option<String>) {
+    let parent_key = parent.get("key").and_then(Value::as_str).map(str::to_owned);
+    let parent_title = parent_key.as_ref().map(|key| {
+        parent
+            .pointer("/fields/summary")
+            .and_then(Value::as_str)
+            .unwrap_or(key)
+            .into()
+    });
+    (parent_key, parent_title)
 }
 
 fn named_field(value: &Value) -> Option<String> {

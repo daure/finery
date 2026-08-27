@@ -1,17 +1,22 @@
 use serde_json::json;
 
 use super::{
-    AgileBoard, AgileIssuePage, BACKLOG_JQL, ISSUE_FIELDS, JiraIssue, SubmitBatchOutcome,
-    ambiguous_create_failure, backlog_page_complete, board_backlog_query, commit_order,
-    create_issue_fields, create_issue_type, create_issue_types_from_value, create_response_failure,
-    created_issue_failure, issue_fields, options_from_values, same_jira_content, search_jql,
-    select_backlog_board, submit_failure, submit_ordered_changes, text_search_jql, to_ticket,
-    update_payload,
+    AgileBoard, AgileIssuePage, BACKLOG_FIELDS, BACKLOG_JQL, ISSUE_FIELDS, JiraIssue,
+    SubmitBatchOutcome, ambiguous_create_failure, backlog_page_complete, board_backlog_query,
+    commit_order, create_available_statuses_from_value, create_issue_fields, create_issue_type,
+    create_issue_types_from_value, create_response_failure, created_issue_failure,
+    discover_story_points, issue_fields, options_from_values, rank_payload, same_jira_content,
+    search_jql, select_backlog_board, should_discover_story_points, story_points_field_id,
+    story_points_warning, submit_failure, submit_ordered_changes, text_search_jql, to_ticket,
+    to_work_item, update_payload,
 };
 use crate::{
     app_settings::AppSettings,
     jira::submit_changes,
-    store::composer::{ChangeKind, Ticket, TicketChange, TicketKind},
+    store::{
+        composer::{ChangeKind, Ticket, TicketChange, TicketKind},
+        work_items::RankPlan,
+    },
 };
 
 fn ticket(key: &str, kind: TicketKind, parent_key: Option<&str>) -> Ticket {
@@ -27,7 +32,9 @@ fn ticket(key: &str, kind: TicketKind, parent_key: Option<&str>) -> Ticket {
         assignee: "Unassigned".into(),
         assignee_account_id: String::new(),
         parent_key: parent_key.map(str::to_owned),
+        parent_title: None,
         parent_kind: None,
+        has_children: false,
     }
 }
 
@@ -73,7 +80,7 @@ fn jira_metadata_options_keep_ids_and_labels() {
 #[test]
 fn jira_project_create_metadata_reads_issue_type_ids() {
     let issue_types = create_issue_types_from_value(&json!({
-        "values": [
+        "issueTypes": [
             { "id": "10001", "name": "Story" },
             { "id": "10003", "name": "Subtask", "subtask": true }
         ]
@@ -81,6 +88,42 @@ fn jira_project_create_metadata_reads_issue_type_ids() {
 
     assert_eq!(issue_types[1].id, "10003");
     assert_eq!(issue_types[1].label, "Subtask");
+}
+
+#[test]
+fn jira_project_statuses_match_ticket_kind_and_keep_status_ids() {
+    let statuses = create_available_statuses_from_value(
+        &json!([
+            {
+                "id": "10001",
+                "name": "Story",
+                "statuses": [
+                    { "id": "10000", "name": "To Do" },
+                    { "id": "10001", "name": "In Progress" }
+                ]
+            },
+            {
+                "id": "10003",
+                "name": "Sub-task",
+                "statuses": [{ "id": "10002", "name": "Done" }]
+            }
+        ]),
+        TicketKind::Story,
+    );
+
+    assert_eq!(
+        statuses,
+        vec![
+            super::JiraOption {
+                id: "10000".into(),
+                label: "To Do".into(),
+            },
+            super::JiraOption {
+                id: "10001".into(),
+                label: "In Progress".into(),
+            },
+        ]
+    );
 }
 
 #[test]
@@ -94,7 +137,13 @@ fn jira_issue_maps_search_fields_and_adf_description() {
             "status": { "name": "In Progress" },
             "priority": { "name": "High" },
             "assignee": { "displayName": "Ada", "accountId": "ada-1" },
-            "parent": { "key": "OPS-1", "fields": { "issuetype": { "name": "Epic" } } },
+            "parent": {
+                "key": "OPS-1",
+                "fields": {
+                    "summary": "Checkout",
+                    "issuetype": { "name": "Epic" }
+                }
+            },
             "description": {
                 "type": "doc",
                 "version": 1,
@@ -114,8 +163,10 @@ fn jira_issue_maps_search_fields_and_adf_description() {
     assert_eq!(ticket.assignee, "Ada");
     assert_eq!(ticket.assignee_account_id, "ada-1");
     assert_eq!(ticket.parent_key.as_deref(), Some("OPS-1"));
+    assert_eq!(ticket.parent_title.as_deref(), Some("Checkout"));
     assert_eq!(ticket.parent_kind, Some(TicketKind::Epic));
     assert!(ISSUE_FIELDS.contains(&"parent"));
+    assert!(ISSUE_FIELDS.contains(&"subtasks"));
 }
 
 #[test]
@@ -439,12 +490,152 @@ fn backlog_board_falls_back_to_a_project_board_without_scrum_type() {
 
 #[test]
 fn board_backlog_query_excludes_subtasks_and_epics_hidden_by_the_web_backlog_list() {
-    let query = board_backlog_query(0);
+    let query = board_backlog_query(0, None);
 
     assert!(
         query
             .iter()
             .any(|(name, value)| *name == "jql" && value == BACKLOG_JQL)
+    );
+}
+
+#[test]
+fn backlog_items_expose_whether_jira_reports_subtasks() {
+    assert!(BACKLOG_FIELDS.contains(&"parent"));
+    assert!(BACKLOG_FIELDS.contains(&"subtasks"));
+
+    let work_item = to_work_item(
+        JiraIssue {
+            key: "FIN-1".into(),
+            fields: json!({
+                "summary": "Parent",
+                "parent": { "key": "FIN-0", "fields": { "summary": "Grandparent" } },
+                "subtasks": [{ "key": "FIN-2" }]
+            }),
+        },
+        None,
+    );
+
+    assert_eq!(work_item.parent_key.as_deref(), Some("FIN-0"));
+    assert_eq!(work_item.parent_title.as_deref(), Some("Grandparent"));
+    assert!(work_item.has_children);
+}
+
+#[test]
+fn board_estimation_field_is_used_only_for_field_estimation() {
+    assert_eq!(
+        story_points_field_id(&json!({
+            "estimation": {
+                "type": "field",
+                "field": { "fieldId": "customfield_10016" }
+            }
+        })),
+        "customfield_10016"
+    );
+    assert_eq!(
+        story_points_field_id(&json!({
+            "estimation": {
+                "type": "issueCount",
+                "field": { "fieldId": "customfield_10016" }
+            }
+        })),
+        ""
+    );
+}
+
+#[test]
+fn manual_story_point_field_is_not_overwritten_on_the_first_board_load() {
+    let manual = AppSettings {
+        jira_story_points_field_id: "customfield_10016".into(),
+        ..AppSettings::default()
+    };
+    let discovered = AppSettings {
+        jira_story_points_field_id: "customfield_10016".into(),
+        jira_story_points_board_id: "1".into(),
+        ..AppSettings::default()
+    };
+
+    assert!(!should_discover_story_points(&manual, 1));
+    assert!(should_discover_story_points(&AppSettings::default(), 1));
+    assert!(should_discover_story_points(&discovered, 2));
+}
+
+#[test]
+fn failed_story_points_discovery_warns_and_retries_without_a_persisted_field() {
+    let (discovered, warning) = discover_story_points(
+        &AppSettings::default(),
+        1,
+        Err("Jira returned 403: forbidden".into()),
+    );
+    let interrupted = AppSettings {
+        jira_story_points_board_id: "1".into(),
+        ..AppSettings::default()
+    };
+
+    assert!(discovered.is_none());
+    assert!(
+        warning
+            .unwrap()
+            .contains("retry on the next backlog refresh")
+    );
+    assert!(should_discover_story_points(&interrupted, 1));
+}
+
+#[test]
+fn backlog_work_items_parse_numeric_story_points() {
+    let work_item = to_work_item(
+        JiraIssue {
+            key: "FIN-1".into(),
+            fields: json!({ "customfield_10016": 3.5 }),
+        },
+        Some("customfield_10016"),
+    );
+
+    assert_eq!(work_item.story_points, Some(3.5));
+}
+
+#[test]
+fn backlog_warns_when_loaded_tickets_lack_story_points() {
+    let snapshot = crate::store::work_items::BacklogSnapshot {
+        board_name: "Finery".into(),
+        sprints: Vec::new(),
+        work_items: vec![to_work_item(
+            JiraIssue {
+                key: "FIN-1".into(),
+                fields: json!({ "customfield_10016": null }),
+            },
+            Some("customfield_10016"),
+        )],
+        warnings: Vec::new(),
+    };
+
+    assert!(
+        story_points_warning(&snapshot)
+            .unwrap()
+            .contains("No loaded backlog tickets have story-point values")
+    );
+}
+
+#[test]
+fn jira_rank_payload_uses_the_before_or_after_anchor() {
+    let before = rank_payload(&RankPlan {
+        issues: vec!["FIN-2".into(), "FIN-3".into()],
+        rank_before_issue: Some("FIN-4".into()),
+        rank_after_issue: None,
+    });
+    assert_eq!(
+        before,
+        json!({ "issues": ["FIN-2", "FIN-3"], "rankBeforeIssue": "FIN-4" })
+    );
+
+    let after = rank_payload(&RankPlan {
+        issues: vec!["FIN-2".into()],
+        rank_before_issue: None,
+        rank_after_issue: Some("FIN-1".into()),
+    });
+    assert_eq!(
+        after,
+        json!({ "issues": ["FIN-2"], "rankAfterIssue": "FIN-1" })
     );
 }
 
