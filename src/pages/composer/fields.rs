@@ -65,13 +65,18 @@ pub(super) struct BoundTextField {
 }
 
 impl BoundTextField {
-    fn new(state: Rc<RefCell<ComposerState>>, pending: PendingActions, field: TextField) -> Self {
+    fn new(
+        state: Rc<RefCell<ComposerState>>,
+        pending: PendingActions,
+        field: TextField,
+        hotkey: ComposerKeyBinding,
+    ) -> Self {
         let sink = Rc::clone(&pending);
         let input = TextInput::new()
             .placeholder(field.label())
             .on_edit_end(move |value| sink.borrow_mut().push(field.action(value)));
         let input = if matches!(field, TextField::Title) {
-            input.hotkey("shift+t")
+            input.hotkey(hotkey.sequence())
         } else {
             input
         };
@@ -84,8 +89,12 @@ impl BoundTextField {
         bound
     }
 
-    pub(super) fn title(state: Rc<RefCell<ComposerState>>, pending: PendingActions) -> Self {
-        Self::new(state, pending, TextField::Title)
+    pub(super) fn title(
+        state: Rc<RefCell<ComposerState>>,
+        pending: PendingActions,
+        hotkey: ComposerKeyBinding,
+    ) -> Self {
+        Self::new(state, pending, TextField::Title, hotkey)
     }
 
     fn sync(&mut self) -> bool {

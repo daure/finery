@@ -12,7 +12,7 @@ use tuicore::{
 };
 
 use crate::{
-    app_settings::ComposerKeyBinding,
+    app_settings::ComposerKeyBindings,
     service::AppService,
     store::composer::{ChangeKind, ComposerAction, ComposerState, ComposerViewMode},
 };
@@ -36,6 +36,8 @@ struct ResponsiveDetails {
     narrow: Tabs<()>,
     wide: WideDetails,
     is_wide: bool,
+    description_focus_key: String,
+    description_editor_key: String,
 }
 
 pub(super) struct DetailPane {
@@ -43,6 +45,7 @@ pub(super) struct DetailPane {
     description_actions: PendingDescriptionActions,
     description_edit_request: DescriptionEditRequest,
     external_editor_pending: bool,
+    service: AppService,
     detail: TicketDetail,
     empty: SeasonalEmptyState,
 }
@@ -53,9 +56,10 @@ impl DetailPane {
         pending: PendingActions,
         description_actions: PendingDescriptionActions,
         service: AppService,
-        view_key: ComposerKeyBinding,
+        keys: ComposerKeyBindings,
     ) -> Self {
-        let title = BoundTextField::title(Rc::clone(&state), Rc::clone(&pending));
+        let title =
+            BoundTextField::title(Rc::clone(&state), Rc::clone(&pending), keys.title.clone());
         let description_edit_request = Rc::new(std::cell::Cell::new(false));
         let narrow_description = BoundDescription::new(
             Rc::clone(&state),
@@ -63,15 +67,20 @@ impl DetailPane {
             Rc::clone(&description_edit_request),
         );
         let tabs = Tabs::new(vec![
-            Tab::new("Description", narrow_description).hotkey("shift+d"),
+            Tab::new("Description", narrow_description).hotkey(keys.description_tab.sequence()),
             Tab::new(
                 "Properties",
-                PropertyFields::new(Rc::clone(&state), Rc::clone(&pending), service.clone()),
+                PropertyFields::new(
+                    Rc::clone(&state),
+                    Rc::clone(&pending),
+                    service.clone(),
+                    keys.clone(),
+                ),
             )
-            .hotkey("shift+p"),
+            .hotkey(keys.properties_tab.sequence()),
         ])
         .action_hotkey(
-            "dd",
+            keys.description_focus.sequence(),
             description_tab_action(
                 Rc::clone(&state),
                 Rc::clone(&description_actions),
@@ -79,7 +88,7 @@ impl DetailPane {
             ),
         )
         .action_hotkey(
-            "do",
+            keys.description_editor.sequence(),
             description_tab_action(
                 Rc::clone(&state),
                 Rc::clone(&description_actions),
@@ -87,7 +96,7 @@ impl DetailPane {
             ),
         )
         .action_hotkey(
-            "ds",
+            keys.description_reader.sequence(),
             description_tab_action(
                 Rc::clone(&state),
                 Rc::clone(&description_actions),
@@ -98,9 +107,9 @@ impl DetailPane {
         .bordered(true);
         let wide_description = Panel::new()
             .top_left("Description")
-            .hotkey("shift+d")
+            .hotkey(keys.description_tab.sequence())
             .action_hotkey(
-                "dd",
+                keys.description_focus.sequence(),
                 panel_description_action(
                     Rc::clone(&state),
                     Rc::clone(&description_actions),
@@ -108,7 +117,7 @@ impl DetailPane {
                 ),
             )
             .action_hotkey(
-                "do",
+                keys.description_editor.sequence(),
                 panel_description_action(
                     Rc::clone(&state),
                     Rc::clone(&description_actions),
@@ -116,7 +125,7 @@ impl DetailPane {
                 ),
             )
             .action_hotkey(
-                "ds",
+                keys.description_reader.sequence(),
                 panel_description_action(
                     Rc::clone(&state),
                     Rc::clone(&description_actions),
@@ -128,25 +137,27 @@ impl DetailPane {
                 Rc::clone(&pending),
                 Rc::clone(&description_edit_request),
             ));
-        let wide_properties =
-            Panel::new()
-                .top_left("Properties")
-                .hotkey("shift+p")
-                .host(PropertyFields::new(
-                    Rc::clone(&state),
-                    Rc::clone(&pending),
-                    service.clone(),
-                ));
+        let wide_properties = Panel::new()
+            .top_left("Properties")
+            .hotkey(keys.properties_tab.sequence())
+            .host(PropertyFields::new(
+                Rc::clone(&state),
+                Rc::clone(&pending),
+                service.clone(),
+                keys.clone(),
+            ));
         let details = ResponsiveDetails {
             narrow: tabs,
             wide: Split::horizontal(wide_description, wide_properties).ratio(70, 30),
             is_wide: false,
+            description_focus_key: keys.description_focus.sequence().into(),
+            description_editor_key: keys.description_editor.sequence().into(),
         };
         let fields =
             Split::vertical(title, details).constraints(Constraint::Length(3), Constraint::Fill(1));
         let mode = Flex::row().child(
             "mode",
-            BoundViewMode::new(Rc::clone(&state), Rc::clone(&pending), view_key),
+            BoundViewMode::new(Rc::clone(&state), Rc::clone(&pending), keys.view.clone()),
             FlexItem::fit_content(),
         );
         Self {
@@ -154,6 +165,7 @@ impl DetailPane {
             description_actions,
             description_edit_request,
             external_editor_pending: false,
+            service,
             detail: Split::vertical(mode, fields)
                 .constraints(Constraint::Length(1), Constraint::Fill(1)),
             empty: SeasonalEmptyState::new("No issue selected"),
@@ -186,10 +198,11 @@ impl DetailPane {
         for action in actions {
             let details = self.detail.second_mut().second_mut();
             match action {
-                DescriptionAction::ShowChanges => self
-                    .state
-                    .borrow_mut()
-                    .dispatch(ComposerAction::SetViewMode(ComposerViewMode::Changes)),
+                DescriptionAction::ShowChanges => {
+                    self.state
+                        .borrow_mut()
+                        .dispatch(ComposerAction::SetViewMode(ComposerViewMode::Changes));
+                }
                 DescriptionAction::Focus { edit } => {
                     self.description_edit_request.set(edit);
                     details.focus_description();
@@ -246,9 +259,17 @@ impl DetailPane {
             return None;
         }
         self.external_editor_pending = false;
-        self.state
+        if let Err(error) = self
+            .state
             .borrow_mut()
-            .dispatch(ComposerAction::UpdateDescription(response.value.clone()));
+            .dispatch(ComposerAction::UpdateDescription(response.value.clone()))
+        {
+            self.service
+                .report_notification(tuicore::Notification::error(
+                    "Change blocked",
+                    error.to_string(),
+                ));
+        }
         ctx.request_layout();
         ctx.request_redraw();
         ctx.stop_propagation();
@@ -290,8 +311,10 @@ impl ResponsiveDetails {
     }
 
     fn set_action_hotkeys(&mut self, description: bool, editor: bool) {
-        self.narrow.set_action_hotkey_enabled("dd", description);
-        self.narrow.set_action_hotkey_enabled("do", editor);
+        self.narrow
+            .set_action_hotkey_enabled(&self.description_focus_key, description);
+        self.narrow
+            .set_action_hotkey_enabled(&self.description_editor_key, editor);
     }
 
     fn set_dashed(&mut self, dashed: bool) {

@@ -27,6 +27,7 @@ pub(crate) struct AppService {
 enum PersistenceCommand {
     SaveSettings(Vec<(&'static str, String)>),
     SaveChangeSet(ChangeSet),
+    SaveChangeSetDurably(ChangeSet, Sender<Result<(), String>>),
     DeleteChangeSet(String),
     Flush(Sender<()>),
 }
@@ -86,6 +87,22 @@ impl AppService {
 
     pub(crate) fn save_change_set(&self, set: ChangeSet) {
         self.send(PersistenceCommand::SaveChangeSet(set));
+    }
+
+    pub(crate) fn save_change_set_durably(&self, set: ChangeSet) -> Result<(), String> {
+        let (sender, receiver) = mpsc::channel();
+        self.persistence
+            .send(PersistenceCommand::SaveChangeSetDurably(set, sender))
+            .map_err(|_| "persistence worker is unavailable".to_string())?;
+        receiver.recv().map_err(|_| {
+            "persistence worker stopped before saving the create attempt".to_string()
+        })?
+    }
+
+    pub(crate) fn save_settings_for_restart(&self, values: Vec<(&'static str, String)>) {
+        if !values.is_empty() {
+            self.send(PersistenceCommand::SaveSettings(values));
+        }
     }
 
     pub(crate) fn delete_change_set(&self, id: String) {
@@ -156,13 +173,13 @@ impl AppService {
     pub(crate) fn submit_ticket_changes(
         &self,
         changes: &[TicketChange],
-    ) -> Result<jira::SubmitBatchOutcome, String> {
-        let settings = self
-            .settings
-            .read()
-            .map_err(|_| "settings lock is unavailable".to_string())?
-            .clone();
-        jira::submit_changes(&settings, changes)
+    ) -> jira::SubmitBatchOutcome {
+        match self.settings.read() {
+            Ok(settings) => jira::submit_changes(&settings, changes),
+            Err(_) => {
+                jira::SubmitBatchOutcome::PreflightError("settings lock is unavailable".into())
+            }
+        }
     }
 
     pub(crate) fn take_errors(&self) -> Vec<String> {
@@ -235,6 +252,16 @@ fn start_persistence_worker(
                     }),
                     PersistenceCommand::SaveChangeSet(set) => {
                         runtime.block_on(storage.save_change_set(&set))
+                    }
+                    PersistenceCommand::SaveChangeSetDurably(set, sender) => {
+                        let result = runtime.block_on(storage.save_change_set(&set));
+                        let _ = sender.send(
+                            result
+                                .as_ref()
+                                .map(|_| ())
+                                .map_err(|error| error.to_string()),
+                        );
+                        continue;
                     }
                     PersistenceCommand::DeleteChangeSet(id) => {
                         runtime.block_on(storage.delete_change_set(&id))

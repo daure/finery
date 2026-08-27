@@ -96,6 +96,21 @@ impl ComposerPage {
     }
 
     #[cfg(test)]
+    pub(super) fn create_child_ticket(&mut self, title: &str) {
+        let parent = self.state.borrow().selected_ticket.clone().unwrap();
+        self.state
+            .borrow_mut()
+            .dispatch(crate::store::composer::ComposerAction::CreateTicketAt {
+                title: title.into(),
+                project_key: "FIN".into(),
+                kind: crate::store::composer::TicketKind::Subtask,
+                placement: crate::store::composer::PlacementTarget::ChildOf(parent),
+            })
+            .unwrap();
+        self.editor.sync();
+    }
+
+    #[cfg(test)]
     pub(super) fn open_new_ticket(&mut self, ctx: &mut EventCtx<()>) {
         self.editor.open_new_ticket_for_test(ctx);
     }
@@ -120,10 +135,12 @@ impl ComposerPage {
     #[cfg(test)]
     pub(super) fn submit_selected_locally(&mut self) {
         let change = self.state.borrow().selected_change().cloned().unwrap();
+        let change_set_id = self.state.borrow().active_change_set.clone().unwrap();
         let original = change.original.clone();
         let updated = change.updated.clone().or_else(|| original.clone());
         self.state.borrow_mut().dispatch(
             crate::store::composer::ComposerAction::CompleteSubmission {
+                change_set_id,
                 id: change.id,
                 snapshot: crate::store::composer::SubmissionSnapshot { original, updated },
             },
@@ -134,9 +151,14 @@ impl ComposerPage {
     #[cfg(test)]
     pub(super) fn set_selected_source(&mut self, ticket: crate::store::composer::Ticket) {
         let id = self.state.borrow().selected_ticket.clone().unwrap();
+        let change_set_id = self.state.borrow().active_change_set.clone().unwrap();
         self.state
             .borrow_mut()
-            .dispatch(crate::store::composer::ComposerAction::SetSource { id, ticket });
+            .dispatch(crate::store::composer::ComposerAction::SetSource {
+                change_set_id,
+                id,
+                ticket,
+            });
         self.editor.sync();
     }
 
@@ -214,7 +236,13 @@ impl TuiNode for ComposerPage {
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let was_open = self.in_change_set();
-        let outcome = self.active_mut().tick(dt, settings);
+        let outcome = if was_open {
+            self.editor.tick(dt, settings)
+        } else {
+            self.change_sets
+                .tick(dt, settings)
+                .merge(self.editor.poll_inactive_submission())
+        };
         if was_open && !self.in_change_set() {
             self.change_sets.sync();
             outcome.merge(TickResult {

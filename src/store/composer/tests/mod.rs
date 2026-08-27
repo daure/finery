@@ -24,6 +24,7 @@ fn included_ticket_uses_live_source_until_first_edit_creates_changes() {
     let mut refreshed = state.selected_changes().unwrap().clone();
     refreshed.title = "Latest from Jira".into();
     state.dispatch(ComposerAction::SetSource {
+        change_set_id: "CS-2".into(),
         id,
         ticket: refreshed,
     });
@@ -32,10 +33,7 @@ fn included_ticket_uses_live_source_until_first_edit_creates_changes() {
     state.dispatch(ComposerAction::UpdateTitle("A safer checkout".into()));
 
     let change = state.selected_change().unwrap();
-    assert_eq!(
-        change.original.as_ref().unwrap().title,
-        "Keep checkout state across retries"
-    );
+    assert_eq!(change.original.as_ref().unwrap().title, "Latest from Jira");
     assert_eq!(change.updated.as_ref().unwrap().title, "A safer checkout");
     assert_eq!(change.kind, ChangeKind::Modified);
 
@@ -43,10 +41,241 @@ fn included_ticket_uses_live_source_until_first_edit_creates_changes() {
     newer_source.title = "Even newer Jira title".into();
     let id = state.selected_ticket.clone().unwrap();
     state.dispatch(ComposerAction::SetSource {
+        change_set_id: "CS-2".into(),
         id,
         ticket: newer_source,
     });
+    assert_eq!(
+        state
+            .selected_change()
+            .unwrap()
+            .original
+            .as_ref()
+            .unwrap()
+            .title,
+        "Even newer Jira title"
+    );
     assert_eq!(state.selected_changes().unwrap().title, "A safer checkout");
+}
+
+#[test]
+fn submission_results_update_the_originating_change_set_after_navigation() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    state.dispatch(ComposerAction::CreateTicket {
+        title: "New local ticket".into(),
+        project_key: "FIN".into(),
+    });
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+
+    state.dispatch(ComposerAction::CompleteSubmission {
+        change_set_id: "CS-2".into(),
+        id: "NEW-1".into(),
+        snapshot: SubmissionSnapshot {
+            original: None,
+            updated: Some(super::Ticket {
+                key: "FIN-200".into(),
+                ..super::demo_jira_tickets()[1].clone()
+            }),
+        },
+    });
+
+    let submitted = state
+        .change_sets
+        .iter()
+        .find(|set| set.id == "CS-2")
+        .unwrap()
+        .tickets
+        .first()
+        .unwrap();
+    assert!(submitted.is_submitted());
+    assert_eq!(submitted.updated.as_ref().unwrap().key, "FIN-200");
+}
+
+#[test]
+fn post_create_refresh_failure_converts_added_ticket_to_update() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    state.dispatch(ComposerAction::CreateTicket {
+        title: "New local ticket".into(),
+        project_key: "FIN".into(),
+    });
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    let created = super::Ticket {
+        key: "FIN-201".into(),
+        ..super::demo_jira_tickets()[1].clone()
+    };
+
+    state.dispatch(ComposerAction::RefreshAfterFailedSubmission {
+        change_set_id: "CS-2".into(),
+        id: "NEW-1".into(),
+        original: created.clone(),
+        updated: created,
+    });
+
+    let change = &state
+        .change_sets
+        .iter()
+        .find(|set| set.id == "CS-2")
+        .unwrap()
+        .tickets[0];
+    assert_eq!(change.kind, ChangeKind::Modified);
+    assert_eq!(change.original.as_ref().unwrap().key, "FIN-201");
+}
+
+#[test]
+fn in_flight_change_set_cannot_be_deleted_after_navigation() {
+    let mut state = ComposerState::demo();
+    assert!(state.begin_submission("CS-1"));
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    state.dispatch(ComposerAction::CloseChangeSet);
+    state.dispatch(ComposerAction::DeleteChangeSet("CS-1".into()));
+
+    assert!(state.change_sets.iter().any(|set| set.id == "CS-1"));
+    state.end_submission("CS-1");
+    state.dispatch(ComposerAction::DeleteChangeSet("CS-1".into()));
+    assert!(state.change_sets.iter().all(|set| set.id != "CS-1"));
+}
+
+#[test]
+fn submitting_change_set_rejects_field_mutations_without_losing_the_submitted_snapshot() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    let before = state.selected_changes().unwrap().clone();
+
+    assert!(state.begin_submission("CS-1"));
+    assert!(!state.selected_is_editable());
+    assert_eq!(
+        state.dispatch(ComposerAction::UpdateTitle("Lost edit".into())),
+        Err(super::PlacementError::NotEditable)
+    );
+    assert_eq!(state.selected_changes(), Some(&before));
+}
+
+#[test]
+fn source_response_during_submission_does_not_replace_the_submission_snapshot() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    let id = state.selected_ticket.clone().unwrap();
+    let before = state.selected_change().unwrap().original.clone();
+    let mut source = before.clone().unwrap();
+    source.title = "Stale Jira source".into();
+
+    assert!(state.begin_submission("CS-1"));
+    state.dispatch(ComposerAction::SetSource {
+        change_set_id: "CS-1".into(),
+        id,
+        ticket: source,
+    });
+
+    assert_eq!(state.selected_change().unwrap().original, before);
+}
+
+#[test]
+fn unresolved_create_attempt_blocks_retry_after_restart() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    state.dispatch(ComposerAction::CreateTicket {
+        title: "New local ticket".into(),
+        project_key: "FIN".into(),
+    });
+    state.dispatch(ComposerAction::MarkCreateAttempts {
+        change_set_id: "CS-2".into(),
+        ids: vec!["NEW-1".into()],
+    });
+    let mut restored = ComposerState::from_change_sets(state.change_sets.clone());
+    restored.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+
+    assert!(restored.change_sets[1].tickets[0].create_attempt);
+    assert!(
+        restored
+            .commit_changes(&["NEW-1".into()])
+            .unwrap_err()
+            .contains("unresolved Jira create attempt")
+    );
+}
+
+#[test]
+fn persisted_tickets_without_description_safety_metadata_remain_loadable() {
+    let ticket = serde_json::from_value::<super::Ticket>(json!({
+        "key": "FIN-1",
+        "title": "Legacy ticket",
+        "description": "Description",
+        "kind": "Task",
+        "status": "To Do",
+        "priority": "Medium",
+        "assignee": "Unassigned"
+    }))
+    .unwrap();
+
+    assert!(!ticket.description_safe_to_overwrite);
+}
+
+#[test]
+fn persisted_changes_without_retry_metadata_remain_loadable() {
+    let change = serde_json::from_value::<super::TicketChange>(json!({
+        "id": "FIN-1",
+        "original": null,
+        "updated": null,
+        "kind": "Synced"
+    }))
+    .unwrap();
+
+    assert!(!change.retry_blocked);
+}
+
+#[test]
+fn stale_source_responses_do_not_update_another_change_set_or_retry_blocked_ticket() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    state.dispatch(ComposerAction::CreateTicket {
+        title: "Uncertain create".into(),
+        project_key: "FIN".into(),
+    });
+    state.dispatch(ComposerAction::BlockTicketRetry {
+        change_set_id: "CS-2".into(),
+        id: "NEW-1".into(),
+    });
+    assert!(
+        state
+            .commit_changes(&["NEW-1".into()])
+            .unwrap_err()
+            .contains("may already have been created")
+    );
+
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    let mut stale = super::demo_jira_tickets()[0].clone();
+    stale.title = "Stale source".into();
+    state.dispatch(ComposerAction::SetSource {
+        change_set_id: "CS-2".into(),
+        id: "NEW-1".into(),
+        ticket: stale,
+    });
+
+    assert!(
+        state
+            .sources
+            .get(&("CS-2".into(), "NEW-1".into()))
+            .is_none()
+    );
+}
+
+#[test]
+fn submission_result_with_a_missing_target_is_rejected() {
+    let mut state = ComposerState::demo();
+
+    assert!(
+        state
+            .dispatch(ComposerAction::CompleteSubmission {
+                change_set_id: "CS-1".into(),
+                id: "missing".into(),
+                snapshot: SubmissionSnapshot {
+                    original: None,
+                    updated: None,
+                },
+            })
+            .is_err()
+    );
 }
 
 #[test]
@@ -82,7 +311,11 @@ fn source_changes_and_diff_modes_use_their_expected_ticket_values() {
     let id = state.selected_ticket.clone().unwrap();
     let mut source = state.selected_changes().unwrap().clone();
     source.title = "Latest from Jira".into();
-    state.dispatch(ComposerAction::SetSource { id, ticket: source });
+    state.dispatch(ComposerAction::SetSource {
+        change_set_id: "CS-1".into(),
+        id,
+        ticket: source,
+    });
 
     state.dispatch(ComposerAction::SetViewMode(ComposerViewMode::Source));
     assert_eq!(state.selected_ticket().unwrap().title, "Latest from Jira");
@@ -114,7 +347,7 @@ fn closed_change_sets_use_submission_snapshots_and_forbid_remote_queries() {
     let id = state.selected_ticket.clone().unwrap();
     let mut stale_live_source = snapshot_source;
     stale_live_source.title = "Later Jira value".into();
-    state.sources.insert(id, stale_live_source);
+    state.sources.insert(("CS-1".into(), id), stale_live_source);
     state.dispatch(ComposerAction::SetViewMode(ComposerViewMode::Source));
 
     assert!(!state.remote_queries_allowed());
@@ -151,6 +384,7 @@ fn submitted_tickets_keep_snapshots_and_stay_in_change_set_when_all_are_done() {
         let original = change.original.clone();
         let updated = change.updated.clone().or_else(|| change.original.clone());
         state.dispatch(ComposerAction::CompleteSubmission {
+            change_set_id: "CS-1".into(),
             id: change.id,
             snapshot: SubmissionSnapshot { original, updated },
         });
@@ -173,7 +407,11 @@ fn deleting_ticket_keeps_live_source_read_only_and_visible() {
     state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
     let id = state.selected_ticket.clone().unwrap();
     let source = state.selected_changes().unwrap().clone();
-    state.dispatch(ComposerAction::SetSource { id, ticket: source });
+    state.dispatch(ComposerAction::SetSource {
+        change_set_id: "CS-1".into(),
+        id,
+        ticket: source,
+    });
     state.dispatch(ComposerAction::MarkTicketDeleted("FIN-142".into()));
 
     let change = state.selected_change().unwrap();

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +18,8 @@ pub(crate) struct Ticket {
     pub project_key: String,
     pub title: String,
     pub description: String,
+    #[serde(default)]
+    pub description_safe_to_overwrite: bool,
     pub kind: TicketKind,
     pub status: String,
     pub priority: String,
@@ -54,6 +56,10 @@ pub(crate) struct TicketChange {
     #[serde(default)]
     pub submitted: Option<SubmissionSnapshot>,
     #[serde(default)]
+    pub retry_blocked: bool,
+    #[serde(default)]
+    pub create_attempt: bool,
+    #[serde(default)]
     pub sibling_order: usize,
 }
 
@@ -71,6 +77,19 @@ pub(crate) enum PlacementError {
     Cycle,
     ClosedChangeSet,
     NotEditable,
+}
+
+impl std::fmt::Display for PlacementError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::UnknownTicket => "Ticket is unavailable",
+            Self::InvalidParentKind => "That ticket type cannot use this parent",
+            Self::UnknownParentKind => "Parent ticket type is unavailable",
+            Self::Cycle => "A ticket cannot be its own ancestor",
+            Self::ClosedChangeSet => "Closed change sets cannot be changed",
+            Self::NotEditable => "This ticket cannot be moved",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,7 +134,8 @@ pub(crate) struct ComposerState {
     pub active_change_set: Option<String>,
     pub selected_ticket: Option<String>,
     pub view_mode: ComposerViewMode,
-    pub sources: HashMap<String, Ticket>,
+    pub sources: HashMap<(String, String), Ticket>,
+    submitting_change_sets: HashSet<String>,
     next_ticket: usize,
 }
 
@@ -133,6 +153,7 @@ pub(crate) enum ComposerAction {
     SetSelectedTickets(Vec<String>),
     SetViewMode(ComposerViewMode),
     SetSource {
+        change_set_id: String,
         id: String,
         ticket: Ticket,
     },
@@ -169,13 +190,27 @@ pub(crate) enum ComposerAction {
         account_id: String,
     },
     CompleteSubmission {
+        change_set_id: String,
         id: String,
         snapshot: SubmissionSnapshot,
     },
     RefreshAfterFailedSubmission {
+        change_set_id: String,
         id: String,
         original: Ticket,
         updated: Ticket,
+    },
+    BlockTicketRetry {
+        change_set_id: String,
+        id: String,
+    },
+    MarkCreateAttempts {
+        change_set_id: String,
+        ids: Vec<String>,
+    },
+    ResolveCreateAttempt {
+        change_set_id: String,
+        id: String,
     },
 }
 
@@ -194,6 +229,7 @@ impl ComposerState {
             selected_ticket: None,
             view_mode: ComposerViewMode::Changes,
             sources: HashMap::new(),
+            submitting_change_sets: HashSet::new(),
             next_ticket,
         }
     }
@@ -214,6 +250,8 @@ impl ComposerState {
                             updated: None,
                             kind: ChangeKind::Synced,
                             submitted: None,
+                            retry_blocked: false,
+                            create_attempt: false,
                             sibling_order: 0,
                         },
                         TicketChange {
@@ -225,6 +263,8 @@ impl ComposerState {
                             }),
                             kind: ChangeKind::Modified,
                             submitted: None,
+                            retry_blocked: false,
+                            create_attempt: false,
                             sibling_order: 1,
                         },
                         TicketChange {
@@ -233,6 +273,8 @@ impl ComposerState {
                             updated: None,
                             kind: ChangeKind::Deleted,
                             submitted: None,
+                            retry_blocked: false,
+                            create_attempt: false,
                             sibling_order: 2,
                         },
                     ],
@@ -250,6 +292,7 @@ impl ComposerState {
             selected_ticket: None,
             view_mode: ComposerViewMode::Changes,
             sources: HashMap::new(),
+            submitting_change_sets: HashSet::new(),
             next_ticket: 1,
         }
     }
@@ -257,6 +300,36 @@ impl ComposerState {
     pub(crate) fn active_set(&self) -> Option<&ChangeSet> {
         let active = self.active_change_set.as_deref()?;
         self.change_sets.iter().find(|set| set.id == active)
+    }
+
+    pub(crate) fn begin_submission(&mut self, change_set_id: &str) -> bool {
+        if self.change_sets.iter().any(|set| set.id == change_set_id) {
+            self.submitting_change_sets.insert(change_set_id.into());
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn end_submission(&mut self, change_set_id: &str) {
+        self.submitting_change_sets.remove(change_set_id);
+    }
+
+    pub(crate) fn change_set_is_submitting(&self, change_set_id: &str) -> bool {
+        self.submitting_change_sets.contains(change_set_id)
+    }
+
+    fn active_change_set_is_submitting(&self) -> bool {
+        self.active_change_set
+            .as_deref()
+            .is_some_and(|id| self.change_set_is_submitting(id))
+    }
+
+    pub(crate) fn has_change(&self, change_set_id: &str, id: &str) -> bool {
+        self.change_sets
+            .iter()
+            .find(|set| set.id == change_set_id)
+            .is_some_and(|set| set.tickets.iter().any(|change| change.id == id))
     }
 
     pub(crate) fn remote_queries_allowed(&self) -> bool {
@@ -292,8 +365,7 @@ impl ComposerState {
         if !self.remote_queries_allowed() {
             return snapshot().or(change.original.as_ref());
         }
-        self.sources
-            .get(&change.id)
+        self.active_source_for_change(change)
             .or(change.original.as_ref())
             .or_else(snapshot)
     }
@@ -308,7 +380,7 @@ impl ComposerState {
             .as_ref()
             .and_then(|snapshot| snapshot.updated.as_ref().or(snapshot.original.as_ref()))
             .or(change.updated.as_ref())
-            .or_else(|| self.sources.get(&change.id))
+            .or_else(|| self.active_source_for_change(change))
             .or(change.original.as_ref())
     }
 
@@ -323,7 +395,9 @@ impl ComposerState {
 
     pub(crate) fn selected_is_editable(&self) -> bool {
         self.selected_change().is_some_and(|change| {
-            self.view_mode == ComposerViewMode::Changes && change.can_edit(true)
+            self.view_mode == ComposerViewMode::Changes
+                && !self.active_change_set_is_submitting()
+                && change.can_edit(true)
         })
     }
 
@@ -461,6 +535,31 @@ impl ComposerState {
         self.commit_changes(ids).is_ok()
     }
 
+    pub(crate) fn removal_preview(&self, id: &str) -> Result<Vec<&TicketChange>, String> {
+        let set = self
+            .active_set()
+            .ok_or_else(|| "Open a change set before removing tickets".to_string())?;
+        if set.closed {
+            return Err("Closed change sets cannot be changed".into());
+        }
+        let removed = self.subtree_ids(id);
+        if removed.is_empty() {
+            return Err(format!("Ticket {id} is unavailable"));
+        }
+        let changes = set
+            .tickets
+            .iter()
+            .filter(|change| removed.contains(&change.id))
+            .collect::<Vec<_>>();
+        if let Some(submitted) = changes.iter().find(|change| change.is_submitted()) {
+            return Err(format!(
+                "Cannot remove this subtree because {} was already submitted",
+                submitted.id
+            ));
+        }
+        Ok(changes)
+    }
+
     pub(crate) fn commit_changes(&self, ids: &[String]) -> Result<Vec<TicketChange>, String> {
         if ids.is_empty() {
             return Err("Select at least one ticket to commit".into());
@@ -513,9 +612,21 @@ impl ComposerState {
             .filter(|change| selected.contains(&change.id) && !change.is_submitted())
             .cloned()
             .map(|mut change| {
+                if change.retry_blocked {
+                    return Err(format!(
+                        "Commit blocked: {} may already have been created in Jira; refresh or remove it before retrying",
+                        change.id
+                    ));
+                }
+                if change.create_attempt {
+                    return Err(format!(
+                        "Commit blocked: {} has an unresolved Jira create attempt; refresh or remove it before retrying",
+                        change.id
+                    ));
+                }
                 if change.kind != ChangeKind::Added && change.original.is_none() {
                     change.original =
-                        Some(self.sources.get(&change.id).cloned().ok_or_else(|| {
+                        Some(self.active_source_for_change(&change).cloned().ok_or_else(|| {
                             format!("Jira source for {} must load before committing", change.id)
                         })?);
                 }
@@ -524,7 +635,10 @@ impl ComposerState {
             .collect()
     }
 
-    pub(crate) fn dispatch(&mut self, action: ComposerAction) {
+    pub(crate) fn dispatch(&mut self, action: ComposerAction) -> Result<(), PlacementError> {
+        if self.active_change_set_is_submitting() && action.mutates_active_change_set() {
+            return Err(PlacementError::NotEditable);
+        }
         match action {
             ComposerAction::CreateChangeSet { id, name } => {
                 self.change_sets.push(ChangeSet {
@@ -536,6 +650,9 @@ impl ComposerState {
                 });
             }
             ComposerAction::DeleteChangeSet(id) => {
+                if self.change_set_is_submitting(&id) {
+                    return Ok(());
+                }
                 self.change_sets.retain(|set| set.id != id);
                 if self.active_change_set.as_deref() == Some(id.as_str()) {
                     self.close_change_set();
@@ -553,26 +670,28 @@ impl ComposerState {
             ComposerAction::SelectTicket(id) => self.selected_ticket = id,
             ComposerAction::SetSelectedTickets(ids) => self.set_selected_tickets(ids),
             ComposerAction::SetViewMode(mode) => self.view_mode = mode,
-            ComposerAction::SetSource { id, ticket } => {
-                self.sources.insert(id, ticket);
-            }
+            ComposerAction::SetSource {
+                change_set_id,
+                id,
+                ticket,
+            } => self.set_source(&change_set_id, id, ticket),
             ComposerAction::CreateTicket { title, project_key } => {
-                self.create_ticket(title, project_key, TicketKind::Task, PlacementTarget::Root)
+                self.create_ticket(title, project_key, TicketKind::Task, PlacementTarget::Root)?
             }
             ComposerAction::CreateTicketAt {
                 title,
                 project_key,
                 kind,
                 placement,
-            } => self.create_ticket(title, project_key, kind, placement),
+            } => self.create_ticket(title, project_key, kind, placement)?,
             ComposerAction::IncludeTicket(ticket) => {
-                self.include_ticket(ticket, PlacementTarget::Root, false)
+                self.include_ticket(ticket, PlacementTarget::Root, false)?
             }
             ComposerAction::IncludeTicketAt { ticket, placement } => {
-                self.include_ticket(ticket, placement, true)
+                self.include_ticket(ticket, placement, true)?
             }
             ComposerAction::ReparentTicket { id, placement } => {
-                let _ = self.reparent_ticket(&id, placement);
+                self.reparent_ticket(&id, placement)?;
             }
             ComposerAction::RemoveTicket(id) => self.remove_ticket(&id),
             ComposerAction::MarkTicketDeleted(id) => self.mark_deleted(&id),
@@ -582,7 +701,7 @@ impl ComposerState {
             ComposerAction::UpdateDescription(value) => {
                 self.edit_selected(|ticket| ticket.description = value)
             }
-            ComposerAction::UpdateKind(value) => self.update_selected_kind(value),
+            ComposerAction::UpdateKind(value) => self.update_selected_kind(value)?,
             ComposerAction::UpdateStatus(value) => {
                 self.edit_selected(|ticket| ticket.status = value)
             }
@@ -593,20 +712,57 @@ impl ComposerState {
                 ticket.assignee = name;
                 ticket.assignee_account_id = account_id;
             }),
-            ComposerAction::CompleteSubmission { id, snapshot } => {
-                self.complete_submission(&id, snapshot)
-            }
+            ComposerAction::CompleteSubmission {
+                change_set_id,
+                id,
+                snapshot,
+            } => self.complete_submission(&change_set_id, &id, snapshot)?,
             ComposerAction::RefreshAfterFailedSubmission {
+                change_set_id,
                 id,
                 original,
                 updated,
-            } => self.refresh_after_failed_submission(&id, original, updated),
+            } => self.refresh_after_failed_submission(&change_set_id, &id, original, updated)?,
+            ComposerAction::BlockTicketRetry { change_set_id, id } => {
+                self.block_ticket_retry(&change_set_id, &id)?
+            }
+            ComposerAction::MarkCreateAttempts { change_set_id, ids } => {
+                self.mark_create_attempts(&change_set_id, &ids)?
+            }
+            ComposerAction::ResolveCreateAttempt { change_set_id, id } => {
+                self.resolve_create_attempt(&change_set_id, &id)?
+            }
         }
+        Ok(())
     }
 
     fn active_set_mut(&mut self) -> Option<&mut ChangeSet> {
         let active = self.active_change_set.as_deref()?;
         self.change_sets.iter_mut().find(|set| set.id == active)
+    }
+
+    fn change_set_mut(&mut self, id: &str) -> Option<&mut ChangeSet> {
+        self.change_sets.iter_mut().find(|set| set.id == id)
+    }
+
+    fn set_source(&mut self, change_set_id: &str, id: String, ticket: Ticket) {
+        if self.active_change_set.as_deref() != Some(change_set_id)
+            || !self.remote_queries_allowed()
+            || self.change_set_is_submitting(change_set_id)
+        {
+            return;
+        }
+        let Some(change) = self
+            .change_set_mut(change_set_id)
+            .and_then(|set| set.tickets.iter_mut().find(|change| change.id == id))
+        else {
+            return;
+        };
+        self.sources
+            .insert((change_set_id.to_owned(), id), ticket.clone());
+        if !change.is_submitted() && change.original.is_some() {
+            change.original = Some(ticket);
+        }
     }
 
     fn close_change_set(&mut self) {
@@ -620,9 +776,12 @@ impl ComposerState {
         project_key: String,
         kind: TicketKind,
         placement: PlacementTarget,
-    ) {
+    ) -> Result<(), PlacementError> {
+        if self.active_set().is_none() {
+            return Err(PlacementError::UnknownTicket);
+        }
         if self.active_set().is_some_and(|set| set.closed) {
-            return;
+            return Err(PlacementError::ClosedChangeSet);
         }
         let id = format!("NEW-{}", self.next_ticket);
         let mut ticket = Ticket {
@@ -630,6 +789,7 @@ impl ComposerState {
             project_key,
             title,
             description: String::new(),
+            description_safe_to_overwrite: true,
             kind,
             status: "To Do".into(),
             priority: "Medium".into(),
@@ -638,12 +798,7 @@ impl ComposerState {
             parent_key: None,
             parent_kind: None,
         };
-        if self
-            .validate_new_placement(ticket.kind, &placement, None)
-            .is_err()
-        {
-            return;
-        }
+        self.validate_new_placement(ticket.kind, &placement, None)?;
         self.next_ticket += 1;
         ticket.parent_key = self.resolved_parent_key(&placement);
         ticket.parent_kind = ticket
@@ -658,12 +813,15 @@ impl ComposerState {
                 updated: Some(ticket),
                 kind: ChangeKind::Added,
                 submitted: None,
+                retry_blocked: false,
+                create_attempt: false,
                 sibling_order,
             });
             set.selected_ticket_ids.push(id.clone());
             self.selected_ticket = Some(id);
             self.view_mode = ComposerViewMode::Changes;
         }
+        Ok(())
     }
 
     fn include_ticket(
@@ -671,10 +829,14 @@ impl ComposerState {
         mut ticket: Ticket,
         placement: PlacementTarget,
         reparent_existing: bool,
-    ) {
+    ) -> Result<(), PlacementError> {
         let id = ticket.key.clone();
         if self.active_set().is_none_or(|set| set.closed) {
-            return;
+            return Err(if self.active_set().is_some() {
+                PlacementError::ClosedChangeSet
+            } else {
+                PlacementError::UnknownTicket
+            });
         }
         let existing_id = self.active_set().and_then(|set| {
             set.tickets
@@ -688,11 +850,12 @@ impl ComposerState {
                 .map(|change| change.id.clone())
         });
         if let Some(existing_id) = existing_id {
-            if !reparent_existing || self.reparent_ticket(&existing_id, placement).is_ok() {
-                self.select_ticket_for_submission(&existing_id);
-                self.selected_ticket = Some(existing_id);
+            if reparent_existing {
+                self.reparent_ticket(&existing_id, placement)?;
             }
-            return;
+            self.select_ticket_for_submission(&existing_id);
+            self.selected_ticket = Some(existing_id);
+            return Ok(());
         }
         let source = ticket.clone();
         let stages_parent = matches!(&placement, PlacementTarget::ChildOf(_));
@@ -704,16 +867,11 @@ impl ComposerState {
             .as_ref()
             .map(|parent| PlacementTarget::ChildOf(parent.clone()))
             .unwrap_or(PlacementTarget::Root);
-        if self
-            .validate_new_placement(
-                ticket.kind,
-                &effective_placement,
-                placement_parent_kind(&ticket, &effective_placement),
-            )
-            .is_err()
-        {
-            return;
-        }
+        self.validate_new_placement(
+            ticket.kind,
+            &effective_placement,
+            placement_parent_kind(&ticket, &effective_placement),
+        )?;
         let parent_kind = parent_key
             .as_deref()
             .and_then(|parent| self.parent_kind_for(parent))
@@ -726,7 +884,7 @@ impl ComposerState {
         ticket.parent_kind = parent_kind;
         let sibling_order = self.next_sibling_order(parent_key.as_deref());
         let Some(set) = self.active_set_mut() else {
-            return;
+            return Err(PlacementError::UnknownTicket);
         };
         set.tickets.push(TicketChange {
             id: id.clone(),
@@ -738,32 +896,38 @@ impl ComposerState {
                 ChangeKind::Synced
             },
             submitted: None,
+            retry_blocked: false,
+            create_attempt: false,
             sibling_order,
         });
         set.selected_ticket_ids.push(id.clone());
         self.selected_ticket = Some(id);
+        Ok(())
     }
 
     fn remove_ticket(&mut self, id: &str) {
-        let removed = self.subtree_ids(id);
-        if removed.is_empty() {
-            return;
-        }
+        let removed = {
+            let Ok(preview) = self.removal_preview(id) else {
+                return;
+            };
+            preview
+                .into_iter()
+                .map(|change| change.id.clone())
+                .collect::<std::collections::HashSet<_>>()
+        };
+        let selected_removed = self
+            .selected_ticket
+            .as_ref()
+            .is_some_and(|selected| removed.contains(selected));
         let Some(set) = self.active_set_mut() else {
             return;
         };
-        if set.closed
-            || set
-                .tickets
-                .iter()
-                .any(|change| removed.contains(&change.id) && change.is_submitted())
-        {
-            return;
-        }
         set.tickets.retain(|change| !removed.contains(&change.id));
         set.selected_ticket_ids
             .retain(|selected| !removed.contains(selected));
-        self.selected_ticket = set.tickets.first().map(|change| change.id.clone());
+        if selected_removed {
+            self.selected_ticket = set.tickets.first().map(|change| change.id.clone());
+        }
     }
 
     fn mark_deleted(&mut self, id: &str) {
@@ -813,16 +977,25 @@ impl ComposerState {
         }
     }
 
-    fn complete_submission(&mut self, id: &str, snapshot: SubmissionSnapshot) {
-        let Some(set) = self.active_set_mut() else {
-            return;
-        };
-        let Some(change) = set.tickets.iter_mut().find(|change| change.id == id) else {
-            return;
-        };
+    fn complete_submission(
+        &mut self,
+        change_set_id: &str,
+        id: &str,
+        snapshot: SubmissionSnapshot,
+    ) -> Result<(), PlacementError> {
+        let set = self
+            .change_set_mut(change_set_id)
+            .ok_or(PlacementError::UnknownTicket)?;
+        let change = set
+            .tickets
+            .iter_mut()
+            .find(|change| change.id == id)
+            .ok_or(PlacementError::UnknownTicket)?;
         change.original = snapshot.original.clone();
         change.updated = snapshot.updated.clone();
         change.submitted = Some(snapshot);
+        change.retry_blocked = false;
+        change.create_attempt = false;
         let created_key = change
             .updated
             .as_ref()
@@ -842,19 +1015,67 @@ impl ComposerState {
         }
         set.selected_ticket_ids.retain(|selected| selected != id);
         set.closed = !set.tickets.is_empty() && set.tickets.iter().all(TicketChange::is_submitted);
+        Ok(())
     }
 
-    fn refresh_after_failed_submission(&mut self, id: &str, original: Ticket, updated: Ticket) {
-        self.sources.insert(id.to_owned(), original.clone());
-        let Some(change) = self
-            .active_set_mut()
+    fn refresh_after_failed_submission(
+        &mut self,
+        change_set_id: &str,
+        id: &str,
+        original: Ticket,
+        updated: Ticket,
+    ) -> Result<(), PlacementError> {
+        let (sources, change_sets) = (&mut self.sources, &mut self.change_sets);
+        let change = change_sets
+            .iter_mut()
+            .find(|set| set.id == change_set_id)
             .and_then(|set| set.tickets.iter_mut().find(|change| change.id == id))
-        else {
-            return;
-        };
+            .ok_or(PlacementError::UnknownTicket)?;
+        sources.insert((change_set_id.to_owned(), id.to_owned()), original.clone());
         change.original = Some(original);
         change.updated = Some(updated);
         change.kind = ChangeKind::Modified;
+        change.retry_blocked = false;
+        change.create_attempt = false;
+        Ok(())
+    }
+
+    fn block_ticket_retry(&mut self, change_set_id: &str, id: &str) -> Result<(), PlacementError> {
+        let change = self
+            .change_set_mut(change_set_id)
+            .and_then(|set| set.tickets.iter_mut().find(|change| change.id == id))
+            .ok_or(PlacementError::UnknownTicket)?;
+        change.retry_blocked = true;
+        Ok(())
+    }
+
+    fn mark_create_attempts(
+        &mut self,
+        change_set_id: &str,
+        ids: &[String],
+    ) -> Result<(), PlacementError> {
+        let set = self
+            .change_set_mut(change_set_id)
+            .ok_or(PlacementError::UnknownTicket)?;
+        for change in &mut set.tickets {
+            if ids.contains(&change.id) && change.kind == ChangeKind::Added {
+                change.create_attempt = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_create_attempt(
+        &mut self,
+        change_set_id: &str,
+        id: &str,
+    ) -> Result<(), PlacementError> {
+        let change = self
+            .change_set_mut(change_set_id)
+            .and_then(|set| set.tickets.iter_mut().find(|change| change.id == id))
+            .ok_or(PlacementError::UnknownTicket)?;
+        change.create_attempt = false;
+        Ok(())
     }
 
     fn set_selected_tickets(&mut self, ids: Vec<String>) {
@@ -893,7 +1114,7 @@ impl ComposerState {
         let Some(selected) = self.selected_ticket.clone() else {
             return;
         };
-        let source = self.sources.get(&selected).cloned();
+        let source = self.active_source(&selected).cloned();
         let Some(change) = self
             .active_set_mut()
             .and_then(|set| set.tickets.iter_mut().find(|change| change.id == selected))
@@ -915,33 +1136,30 @@ impl ComposerState {
         edit(ticket);
     }
 
-    fn update_selected_kind(&mut self, kind: TicketKind) {
+    fn update_selected_kind(&mut self, kind: TicketKind) -> Result<(), PlacementError> {
         let Some(selected) = self.selected_ticket.clone() else {
-            return;
+            return Err(PlacementError::UnknownTicket);
         };
         let Some(ticket) = self
             .active_set()
             .and_then(|set| set.tickets.iter().find(|change| change.id == selected))
             .and_then(|change| self.changes_for_change(change))
         else {
-            return;
+            return Err(PlacementError::UnknownTicket);
         };
         let placement = ticket
             .parent_key
             .as_ref()
             .map(|parent| PlacementTarget::ChildOf(parent.clone()))
             .unwrap_or(PlacementTarget::Root);
-        if self
-            .validate_tree_with(
-                &selected,
-                kind,
-                &placement,
-                placement_parent_kind(ticket, &placement),
-            )
-            .is_ok()
-        {
-            self.edit_selected(|ticket| ticket.kind = kind);
-        }
+        self.validate_tree_with(
+            &selected,
+            kind,
+            &placement,
+            placement_parent_kind(ticket, &placement),
+        )?;
+        self.edit_selected(|ticket| ticket.kind = kind);
+        Ok(())
     }
 
     fn validate_new_placement(
@@ -1049,7 +1267,7 @@ impl ComposerState {
         placement: PlacementTarget,
     ) -> Result<(), PlacementError> {
         self.validate_placement(id, &placement)?;
-        let source = self.sources.get(id).cloned();
+        let source = self.active_source(id).cloned();
         let parent_key = self.resolved_parent_key(&placement);
         let parent_kind = parent_key
             .as_deref()
@@ -1116,6 +1334,16 @@ impl ComposerState {
             .and_then(|change| self.changes_for_change(change))
             .map(|ticket| ticket.key.clone())
             .or_else(|| Some(parent.clone()))
+    }
+
+    fn active_source(&self, id: &str) -> Option<&Ticket> {
+        self.active_change_set
+            .as_ref()
+            .and_then(|change_set_id| self.sources.get(&(change_set_id.clone(), id.to_owned())))
+    }
+
+    fn active_source_for_change(&self, change: &TicketChange) -> Option<&Ticket> {
+        self.active_source(&change.id)
     }
 
     fn subtree_ids(&self, root: &str) -> std::collections::HashSet<String> {
@@ -1211,6 +1439,27 @@ fn collect_ordered_changes<'a>(
 }
 
 impl ComposerAction {
+    fn mutates_active_change_set(&self) -> bool {
+        matches!(
+            self,
+            Self::CreateTicket { .. }
+                | Self::CreateTicketAt { .. }
+                | Self::IncludeTicket(_)
+                | Self::IncludeTicketAt { .. }
+                | Self::ReparentTicket { .. }
+                | Self::RemoveTicket(_)
+                | Self::MarkTicketDeleted(_)
+                | Self::RestoreTicket(_)
+                | Self::ResetTicket(_)
+                | Self::UpdateTitle(_)
+                | Self::UpdateDescription(_)
+                | Self::UpdateKind(_)
+                | Self::UpdateStatus(_)
+                | Self::UpdatePriority(_)
+                | Self::UpdateAssignee { .. }
+        )
+    }
+
     pub(crate) fn affects_persistence(&self) -> bool {
         matches!(
             self,
@@ -1230,6 +1479,9 @@ impl ComposerAction {
                 | Self::UpdateStatus(_)
                 | Self::UpdatePriority(_)
                 | Self::UpdateAssignee { .. }
+                | Self::BlockTicketRetry { .. }
+                | Self::MarkCreateAttempts { .. }
+                | Self::ResolveCreateAttempt { .. }
         )
     }
 }
@@ -1242,6 +1494,7 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             project_key: "FIN".into(),
             title: "Keep checkout state across retries".into(),
             description: "## Outcome\n\nCustomers can retry checkout without losing their basket.\n\n## Acceptance Criteria\n\n- Basket state survives a failed authorization.\n- A successful retry creates one order.".into(),
+            description_safe_to_overwrite: true,
             kind: TicketKind::Story,
             status: "In Progress".into(),
             priority: "High".into(),
@@ -1255,6 +1508,7 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             project_key: "FIN".into(),
             title: "Retry payment authorization".into(),
             description: "## Description\n\nAdd an idempotent retry path for transient gateway errors.".into(),
+            description_safe_to_overwrite: true,
             kind: TicketKind::Task,
             status: "To Do".into(),
             priority: "Highest".into(),
@@ -1268,6 +1522,7 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             project_key: "FIN".into(),
             title: "Remove legacy payment callback".into(),
             description: "Legacy callback superseded by the event stream.".into(),
+            description_safe_to_overwrite: true,
             kind: TicketKind::Task,
             status: "Done".into(),
             priority: "Low".into(),
@@ -1281,6 +1536,7 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             project_key: "FIN".into(),
             title: "Display authorization failures clearly".into(),
             description: "Show actionable gateway failures without exposing provider internals.".into(),
+            description_safe_to_overwrite: true,
             kind: TicketKind::Bug,
             status: "Backlog".into(),
             priority: "Medium".into(),

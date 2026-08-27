@@ -13,7 +13,7 @@ use tuicore::{
 };
 
 use crate::{
-    app_settings::AppSettings,
+    app_settings::{AppSettings, COMPOSER_BINDING_SETTINGS, ComposerKeyBindings},
     service::AppService,
     speed_reader_settings::{
         MAX_MARKDOWN_BLOCK_PAUSE_MS, MAX_SPEED_READER_WPM, MIN_SPEED_READER_WPM,
@@ -29,6 +29,7 @@ enum SettingChange {
     JiraDefaultBoard(String),
     Wpm(String),
     MarkdownBlockPause(String),
+    ComposerBinding(&'static str, String),
 }
 
 pub(crate) struct SettingsDialog {
@@ -36,6 +37,7 @@ pub(crate) struct SettingsDialog {
     changes: Rc<RefCell<Vec<SettingChange>>>,
     settings: Arc<RwLock<AppSettings>>,
     service: AppService,
+    staged_composer_keys: RefCell<ComposerKeyBindings>,
 }
 
 impl SettingsDialog {
@@ -49,7 +51,7 @@ impl SettingsDialog {
         let board_changes = Rc::clone(&changes);
         let wpm_changes = Rc::clone(&changes);
         let delay_changes = Rc::clone(&changes);
-        let root = Flex::column()
+        let mut root = Flex::column()
             .child(
                 "jira-base-url",
                 TextInput::new()
@@ -139,11 +141,28 @@ impl SettingsDialog {
                     }),
                 FlexItem::fixed(3),
             );
+        for &(setting, label) in &COMPOSER_BINDING_SETTINGS {
+            let binding_changes = Rc::clone(&changes);
+            let value = values.composer_binding_value(setting);
+            root = root.child(
+                setting,
+                TextInput::new()
+                    .value(value)
+                    .panel(format!("Composer {label} key"))
+                    .on_edit_end(move |value| {
+                        binding_changes
+                            .borrow_mut()
+                            .push(SettingChange::ComposerBinding(setting, value));
+                    }),
+                FlexItem::fixed(3),
+            );
+        }
         Self {
             root,
             changes,
             settings,
             service,
+            staged_composer_keys: RefCell::new(values.composer_keys),
         }
     }
 
@@ -154,6 +173,7 @@ impl SettingsDialog {
             .expect("settings lock poisoned")
             .clone();
         let mut changed = false;
+        let mut restart_bindings = Vec::new();
         for change in self.changes.borrow_mut().drain(..) {
             match change {
                 SettingChange::JiraBaseUrl(value) => {
@@ -202,7 +222,27 @@ impl SettingsDialog {
                     settings.speed_reader.markdown_block_pause = markdown_block_pause;
                     changed = true;
                 }
+                SettingChange::ComposerBinding(setting, value) => {
+                    let mut staged = settings.clone();
+                    staged.composer_keys = self.staged_composer_keys.borrow().clone();
+                    if let Err(error) = staged.update_composer_binding(setting, value) {
+                        ctx.notify(tuicore::Notification::warning(
+                            "Invalid Composer key",
+                            error,
+                        ));
+                        continue;
+                    }
+                    *self.staged_composer_keys.borrow_mut() = staged.composer_keys;
+                    restart_bindings.push((setting, staged.composer_binding_value(setting)));
+                }
             }
+        }
+        if !restart_bindings.is_empty() {
+            self.service.save_settings_for_restart(restart_bindings);
+            ctx.notify(tuicore::Notification::info(
+                "Composer keys saved",
+                "Restart Finery to apply Composer key changes.",
+            ));
         }
         if changed {
             self.service.save_settings(settings);
@@ -268,3 +308,6 @@ impl TuiNode for SettingsDialog {
         self.root.destroy(ctx);
     }
 }
+
+#[cfg(test)]
+mod tests;

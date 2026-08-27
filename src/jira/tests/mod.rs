@@ -1,11 +1,12 @@
 use serde_json::json;
 
 use super::{
-    AgileBoard, AgileIssuePage, BACKLOG_JQL, ISSUE_FIELDS, JiraIssue, backlog_page_complete,
-    board_backlog_query, commit_order, create_issue_fields, create_issue_type,
-    create_issue_types_from_value, issue_fields, options_from_values, same_jira_content,
-    search_jql, select_backlog_board, submit_failure, submit_ordered_changes, text_search_jql,
-    to_ticket, update_payload,
+    AgileBoard, AgileIssuePage, BACKLOG_JQL, ISSUE_FIELDS, JiraIssue, SubmitBatchOutcome,
+    ambiguous_create_failure, backlog_page_complete, board_backlog_query, commit_order,
+    create_issue_fields, create_issue_type, create_issue_types_from_value, create_response_failure,
+    created_issue_failure, issue_fields, options_from_values, same_jira_content, search_jql,
+    select_backlog_board, submit_failure, submit_ordered_changes, text_search_jql, to_ticket,
+    update_payload,
 };
 use crate::{
     app_settings::AppSettings,
@@ -19,6 +20,7 @@ fn ticket(key: &str, kind: TicketKind, parent_key: Option<&str>) -> Ticket {
         project_key: "FIN".into(),
         title: key.into(),
         description: String::new(),
+        description_safe_to_overwrite: true,
         kind,
         status: "To Do".into(),
         priority: "Medium".into(),
@@ -36,6 +38,8 @@ fn added(key: &str, kind: TicketKind, parent_key: Option<&str>) -> TicketChange 
         updated: Some(ticket(key, kind, parent_key)),
         kind: ChangeKind::Added,
         submitted: None,
+        retry_blocked: false,
+        create_attempt: false,
         sibling_order: 0,
     }
 }
@@ -179,12 +183,115 @@ fn jira_parent_removal_uses_update_operation_and_rejects_root_subtasks() {
 }
 
 #[test]
+fn jira_update_payload_omits_unchanged_description() {
+    let original = ticket("FIN-2", TicketKind::Task, None);
+    let mut desired = original.clone();
+    desired.title = "Updated title".into();
+
+    assert!(
+        update_payload(&original, &desired, None)
+            .unwrap()
+            .pointer("/fields/description")
+            .is_none()
+    );
+
+    desired.description = "Updated description".into();
+    assert!(
+        update_payload(&original, &desired, None)
+            .unwrap()
+            .pointer("/fields/description")
+            .is_some()
+    );
+}
+
+#[test]
+fn created_ticket_recovery_keeps_the_created_key_when_refresh_fails() {
+    let created = ticket("FIN-201", TicketKind::Task, None);
+    let failure = created_issue_failure("transition failed".into(), created.clone(), None);
+    let (original, updated) = *failure.refresh.expect("created ticket must be recoverable");
+
+    assert_eq!(original.key, "FIN-201");
+    assert_eq!(updated.key, "FIN-201");
+}
+
+#[test]
+fn jira_rejects_description_overwrites_that_cannot_round_trip() {
+    let unsupported_mark = to_ticket(JiraIssue {
+        key: "FIN-2".into(),
+        fields: json!({
+            "description": {
+                "type": "doc", "version": 1, "content": [{
+                    "type": "paragraph", "content": [{
+                        "type": "text", "text": "Underlined", "marks": [{ "type": "underline" }]
+                    }]
+                }]
+            }
+        }),
+    });
+    let unsupported_content = to_ticket(JiraIssue {
+        key: "FIN-3".into(),
+        fields: json!({
+            "description": {
+                "type": "doc", "version": 1, "content": [{ "type": "mediaSingle" }]
+            }
+        }),
+    });
+    assert!(!unsupported_mark.description_safe_to_overwrite);
+    assert!(!unsupported_content.description_safe_to_overwrite);
+
+    let mut edited = unsupported_mark.clone();
+    edited.description.push_str(" changed");
+    assert!(
+        update_payload(&unsupported_mark, &edited, None)
+            .unwrap_err()
+            .contains("cannot be edited safely")
+    );
+
+    let mut title_only = unsupported_mark.clone();
+    title_only.title = "New title".into();
+    assert!(
+        update_payload(&unsupported_mark, &title_only, None)
+            .unwrap()
+            .pointer("/fields/description")
+            .is_none()
+    );
+}
+
+#[test]
 fn jira_conflict_detection_includes_assignee_account_id() {
     let original = ticket("FIN-2", TicketKind::Task, None);
     let mut remote = original.clone();
     remote.assignee_account_id = "different-account".into();
 
     assert!(!same_jira_content(&original, &remote));
+}
+
+#[test]
+fn jira_conflict_detection_includes_description_overwrite_safety() {
+    let original = ticket("FIN-2", TicketKind::Task, None);
+    let mut remote = original.clone();
+    remote.description_safe_to_overwrite = false;
+
+    assert!(!same_jira_content(&original, &remote));
+}
+
+#[test]
+fn ambiguous_create_failure_blocks_retry() {
+    let failure = ambiguous_create_failure("connection reset".into());
+
+    assert!(failure.retry_blocked);
+    assert!(failure.message.contains("retry is blocked"));
+}
+
+#[test]
+fn jira_create_server_errors_block_retry_but_validation_errors_do_not() {
+    assert!(
+        create_response_failure(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "down".into())
+            .retry_blocked
+    );
+    assert!(
+        !create_response_failure(reqwest::StatusCode::BAD_REQUEST, "invalid".into()).retry_blocked
+    );
 }
 
 #[test]
@@ -199,8 +306,8 @@ fn commit_orders_local_parents_before_children_and_blocks_missing_parent_before_
         &AppSettings::default(),
         &[added("NEW-2", TicketKind::Subtask, Some("NEW-1"))],
     ) {
-        Err(error) => error,
-        Ok(_) => panic!("missing local parent must block commit"),
+        SubmitBatchOutcome::PreflightError(error) => error,
+        _ => panic!("missing local parent must block commit"),
     };
     assert!(blocked.contains("needs unsent local parent NEW-1 selected"));
 }
@@ -248,6 +355,75 @@ fn failed_parent_skips_descendant_and_created_key_replaces_local_parent_referenc
     })
     .unwrap();
     assert_eq!(resolved_parent.as_deref(), Some("FIN-101"));
+}
+
+#[test]
+fn deleted_descendants_commit_before_parents_even_when_parent_delete_fails() {
+    let parent = TicketChange {
+        id: "FIN-1".into(),
+        original: Some(ticket("FIN-1", TicketKind::Story, None)),
+        updated: None,
+        kind: ChangeKind::Deleted,
+        submitted: None,
+        retry_blocked: false,
+        create_attempt: false,
+        sibling_order: 0,
+    };
+    let child = TicketChange {
+        id: "FIN-2".into(),
+        original: Some(ticket("FIN-2", TicketKind::Subtask, Some("FIN-1"))),
+        updated: None,
+        kind: ChangeKind::Deleted,
+        submitted: None,
+        retry_blocked: false,
+        create_attempt: false,
+        sibling_order: 0,
+    };
+    let changes = vec![parent, child];
+    let mut calls = Vec::new();
+
+    let outcomes = submit_ordered_changes(&changes, |change| {
+        calls.push(change.id.clone());
+        if change.id == "FIN-2" {
+            Ok(crate::store::composer::SubmissionSnapshot {
+                original: change.original.clone(),
+                updated: None,
+            })
+        } else {
+            Err(submit_failure("parent delete failed".into()))
+        }
+    })
+    .unwrap();
+
+    assert_eq!(calls, ["FIN-2", "FIN-1"]);
+    assert!(outcomes[0].result.is_ok());
+    assert!(outcomes[1].result.is_err());
+}
+
+#[test]
+fn deleting_a_reparented_ticket_uses_its_original_parent_for_delete_order() {
+    let parent = TicketChange {
+        id: "FIN-1".into(),
+        original: Some(ticket("FIN-1", TicketKind::Story, None)),
+        updated: None,
+        kind: ChangeKind::Deleted,
+        submitted: None,
+        retry_blocked: false,
+        create_attempt: false,
+        sibling_order: 0,
+    };
+    let child = TicketChange {
+        id: "FIN-2".into(),
+        original: Some(ticket("FIN-2", TicketKind::Subtask, Some("FIN-1"))),
+        updated: Some(ticket("FIN-2", TicketKind::Subtask, Some("NEW-9"))),
+        kind: ChangeKind::Deleted,
+        submitted: None,
+        retry_blocked: false,
+        create_attempt: false,
+        sibling_order: 0,
+    };
+
+    assert_eq!(commit_order(&[parent, child]).unwrap(), vec![1, 0]);
 }
 
 #[test]

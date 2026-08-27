@@ -10,6 +10,7 @@ use tuicore::{
 use super::page::ComposerPage;
 use super::property_fields::BoundPropertyDropdown;
 use super::source::SourceController;
+use super::submission::SubmissionController;
 use crate::{
     jira::JiraOption,
     service::AppService,
@@ -524,6 +525,67 @@ fn submit_requires_confirmation() {
 }
 
 #[test]
+fn submit_confirmation_lists_local_parent_dependencies() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 0);
+    page.create_ticket("Parent task");
+    page.create_child_ticket("Child sub-task");
+
+    let title = focus(&mut page, "input");
+    page.dispatch_event(
+        &EventRoute::new(title.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('m'),
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut EventCtx::default(),
+    );
+
+    let dialog_text = render_text(&mut page);
+    assert!(dialog_text.contains("Commit 2 ticket changes to Jira:"));
+    assert!(dialog_text.contains("NEW-1 · Parent task"));
+    assert!(dialog_text.contains("NEW-2 · Child sub-task"));
+}
+
+#[test]
+fn remove_discloses_descendants_and_keeps_blocked_subtree_dialog_open() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 0);
+    page.create_ticket("Parent task");
+    page.create_child_ticket("Submitted child");
+    page.submit_selected_locally();
+
+    let tickets = focus(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(tickets.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Home)),
+        &mut EventCtx::default(),
+    );
+    page.dispatch_event(
+        &EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+
+    let dialog_text = render_text(&mut page);
+    assert!(dialog_text.contains("Remove blocked"));
+    assert!(dialog_text.contains("NEW-2 was already submitted"));
+    let dialog = target(&mut page, "dialog");
+    page.dispatch_event(
+        &EventRoute::new(dialog.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('r'))),
+        &mut EventCtx::default(),
+    );
+
+    assert!(render_text(&mut page).contains("Ticket action"));
+}
+
+#[test]
 fn restore_reset_dialog_opens_without_a_selected_ticket() {
     tuicore::init();
     let mut page = composer_page();
@@ -870,6 +932,47 @@ fn refresh_queues_every_remote_ticket_in_the_open_change_set() {
     let mut source = SourceController::new(state, AppService::for_tests());
 
     assert_eq!(source.refresh_all(), 3);
+}
+
+#[test]
+fn preflight_failure_clears_only_its_durable_create_attempt_marker() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    state.dispatch(ComposerAction::CreateTicket {
+        title: "Older unresolved ticket".into(),
+        project_key: "FIN".into(),
+    });
+    state.dispatch(ComposerAction::MarkCreateAttempts {
+        change_set_id: "CS-2".into(),
+        ids: vec!["NEW-1".into()],
+    });
+    state.dispatch(ComposerAction::CreateTicket {
+        title: "New local ticket".into(),
+        project_key: "FIN".into(),
+    });
+    let changes = state.commit_changes(&["NEW-2".into()]).unwrap();
+    let state = Rc::new(RefCell::new(state));
+    let mut submission = SubmissionController::new(Rc::clone(&state), AppService::for_tests());
+
+    submission.start(changes, &mut EventCtx::default());
+    for _ in 0..100 {
+        if submission.drain_results() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let state = state.borrow();
+    let tickets = &state.active_set().unwrap().tickets;
+    assert!(tickets[0].create_attempt);
+    assert!(!tickets[1].create_attempt);
+    assert!(
+        state
+            .commit_changes(&["NEW-1".into()])
+            .unwrap_err()
+            .contains("unresolved Jira create attempt")
+    );
+    assert!(state.commit_changes(&["NEW-2".into()]).is_ok());
 }
 
 #[test]

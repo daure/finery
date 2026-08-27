@@ -17,6 +17,11 @@ pub(crate) fn markdown_to_adf(markdown: &str) -> Value {
     json!({ "type": "doc", "version": 1, "content": parse_blocks(markdown) })
 }
 
+pub(crate) fn adf_is_safe_to_overwrite(value: &Value) -> bool {
+    matches!(value, Value::Null | Value::String(_))
+        || (value.is_object() && markdown_to_adf(&adf_to_markdown(value)) == *value)
+}
+
 fn render_blocks(nodes: &[Value]) -> String {
     nodes
         .iter()

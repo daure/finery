@@ -9,6 +9,7 @@ fn ticket(id: &str, kind: TicketKind) -> Ticket {
         project_key: "FIN".into(),
         title: id.into(),
         description: String::new(),
+        description_safe_to_overwrite: true,
         kind,
         status: "To Do".into(),
         priority: "Medium".into(),
@@ -89,6 +90,8 @@ fn opening_a_change_set_selects_the_first_visible_ticket() {
                 updated: None,
                 kind: ChangeKind::Synced,
                 submitted: None,
+                retry_blocked: false,
+                create_attempt: false,
                 sibling_order: 0,
             },
             TicketChange {
@@ -97,6 +100,8 @@ fn opening_a_change_set_selects_the_first_visible_ticket() {
                 updated: None,
                 kind: ChangeKind::Synced,
                 submitted: None,
+                retry_blocked: false,
+                create_attempt: false,
                 sibling_order: 0,
             },
         ],
@@ -125,10 +130,13 @@ fn invalid_placement_and_kind_changes_leave_tree_unchanged() {
         state.validate_placement("FIN-1", &PlacementTarget::ChildOf("FIN-1".into())),
         Err(PlacementError::Cycle)
     );
-    state.dispatch(ComposerAction::ReparentTicket {
-        id: "FIN-1".into(),
-        placement: PlacementTarget::ChildOf("FIN-2".into()),
-    });
+    assert_eq!(
+        state.dispatch(ComposerAction::ReparentTicket {
+            id: "FIN-1".into(),
+            placement: PlacementTarget::ChildOf("FIN-2".into()),
+        }),
+        Err(PlacementError::Cycle)
+    );
     state.dispatch(ComposerAction::SelectTicket(Some("FIN-1".into())));
     state.dispatch(ComposerAction::UpdateKind(TicketKind::Task));
 
@@ -245,6 +253,7 @@ fn refreshing_parent_relation_reorders_active_tree_without_overwriting_local_mov
     let mut refreshed = ticket("FIN-2", TicketKind::Subtask);
     refreshed.parent_key = Some("FIN-1".into());
     state.dispatch(ComposerAction::SetSource {
+        change_set_id: "CS-1".into(),
         id: "FIN-2".into(),
         ticket: refreshed,
     });
@@ -317,6 +326,7 @@ fn submitted_local_parent_keeps_unsent_child_attached_by_resolved_key() {
         placement: PlacementTarget::ChildOf("NEW-1".into()),
     });
     state.dispatch(ComposerAction::CompleteSubmission {
+        change_set_id: "CS-1".into(),
         id: "NEW-1".into(),
         snapshot: super::super::SubmissionSnapshot {
             original: None,
@@ -360,6 +370,7 @@ fn new_child_uses_committed_parent_key_instead_of_local_alias() {
         placement: PlacementTarget::Root,
     });
     state.dispatch(ComposerAction::CompleteSubmission {
+        change_set_id: "CS-1".into(),
         id: "NEW-1".into(),
         snapshot: super::super::SubmissionSnapshot {
             original: None,
@@ -429,6 +440,58 @@ fn removing_parent_removes_local_subtree_and_repairs_selection() {
 }
 
 #[test]
+fn submitted_descendant_blocks_local_subtree_removal() {
+    let mut state = state();
+    state.dispatch(ComposerAction::CreateTicketAt {
+        title: "Parent story".into(),
+        project_key: "FIN".into(),
+        kind: TicketKind::Story,
+        placement: PlacementTarget::Root,
+    });
+    state.dispatch(ComposerAction::CreateTicketAt {
+        title: "Child sub-task".into(),
+        project_key: "FIN".into(),
+        kind: TicketKind::Subtask,
+        placement: PlacementTarget::ChildOf("NEW-1".into()),
+    });
+    let mut submitted_child = ticket("FIN-202", TicketKind::Subtask);
+    submitted_child.parent_key = Some("NEW-1".into());
+    submitted_child.parent_kind = Some(TicketKind::Story);
+    state.dispatch(ComposerAction::CompleteSubmission {
+        change_set_id: "CS-1".into(),
+        id: "NEW-2".into(),
+        snapshot: super::super::SubmissionSnapshot {
+            original: None,
+            updated: Some(submitted_child),
+        },
+    });
+
+    let error = state.removal_preview("NEW-1").unwrap_err();
+    state.dispatch(ComposerAction::RemoveTicket("NEW-1".into()));
+
+    assert!(error.contains("NEW-2 was already submitted"));
+    assert_eq!(state.active_set().unwrap().tickets.len(), 2);
+}
+
+#[test]
+fn removing_an_unselected_ticket_preserves_the_current_selection() {
+    let mut state = state();
+    state.dispatch(ComposerAction::CreateTicket {
+        title: "First task".into(),
+        project_key: "FIN".into(),
+    });
+    state.dispatch(ComposerAction::CreateTicket {
+        title: "Second task".into(),
+        project_key: "FIN".into(),
+    });
+    state.dispatch(ComposerAction::SelectTicket(Some("NEW-2".into())));
+
+    state.dispatch(ComposerAction::RemoveTicket("NEW-1".into()));
+
+    assert_eq!(state.selected_ticket.as_deref(), Some("NEW-2"));
+}
+
+#[test]
 fn tasks_allow_subtask_children() {
     let mut state = ComposerState::from_change_sets(vec![ChangeSet {
         id: "CS-1".into(),
@@ -441,6 +504,7 @@ fn tasks_allow_subtask_children() {
                 project_key: "FIN".into(),
                 title: "Parent task".into(),
                 description: String::new(),
+                description_safe_to_overwrite: true,
                 kind: TicketKind::Task,
                 status: "To Do".into(),
                 priority: "Medium".into(),
@@ -452,6 +516,8 @@ fn tasks_allow_subtask_children() {
             updated: None,
             kind: ChangeKind::Synced,
             submitted: None,
+            retry_blocked: false,
+            create_attempt: false,
             sibling_order: 0,
         }],
         selected_ticket_ids: Vec::new(),

@@ -14,6 +14,7 @@ use tuicore::{
 };
 
 use crate::{
+    app_settings::{ComposerKeyBindings, ComposerSequenceBinding},
     jira::{JiraAssignee, JiraFieldOptions, JiraOption},
     service::AppService,
     store::composer::{ComposerAction, ComposerState, PlacementTarget, Ticket, TicketKind},
@@ -53,6 +54,7 @@ impl PropertyFields {
         state: Rc<RefCell<ComposerState>>,
         pending: PendingActions,
         service: AppService,
+        keys: ComposerKeyBindings,
     ) -> Self {
         let shared = Rc::new(RefCell::new(SharedOptions::default()));
         let root = Flex::column()
@@ -64,6 +66,7 @@ impl PropertyFields {
                     Rc::clone(&shared),
                     service.clone(),
                     PropertyKind::IssueType,
+                    keys.issue_type.clone(),
                 ),
                 FlexItem::fixed(3),
             )
@@ -75,6 +78,7 @@ impl PropertyFields {
                     Rc::clone(&shared),
                     service.clone(),
                     PropertyKind::Parent,
+                    keys.parent.clone(),
                 ),
                 FlexItem::fixed(3),
             )
@@ -86,6 +90,7 @@ impl PropertyFields {
                     Rc::clone(&shared),
                     service.clone(),
                     PropertyKind::Status,
+                    keys.status.clone(),
                 ),
                 FlexItem::fixed(3),
             )
@@ -97,6 +102,7 @@ impl PropertyFields {
                     Rc::clone(&shared),
                     service.clone(),
                     PropertyKind::Priority,
+                    keys.priority.clone(),
                 ),
                 FlexItem::fixed(3),
             )
@@ -108,6 +114,7 @@ impl PropertyFields {
                     Rc::clone(&shared),
                     service.clone(),
                     PropertyKind::Assignee,
+                    keys.assignee.clone(),
                 ),
                 FlexItem::fixed(3),
             );
@@ -204,6 +211,7 @@ impl BoundPropertyDropdown {
         shared: Rc<RefCell<SharedOptions>>,
         service: AppService,
         kind: PropertyKind,
+        hotkey: ComposerSequenceBinding,
     ) -> Self {
         let labels = Rc::new(RefCell::new(HashMap::<String, String>::new()));
         let callback_labels = Rc::clone(&labels);
@@ -222,7 +230,7 @@ impl BoundPropertyDropdown {
             DropdownSearchMode::Fuzzy
         })
         .external_loading_message("Fetching users")
-        .hotkey(kind.hotkey())
+        .hotkey(hotkey.sequence())
         .on_select(move |ids| {
             let Some(id) = ids.first() else {
                 return;
@@ -241,16 +249,10 @@ impl BoundPropertyDropdown {
                 } else {
                     PlacementTarget::ChildOf(id.clone())
                 };
-                if callback_state
-                    .borrow()
-                    .validate_placement(&ticket_id, &placement)
-                    .is_ok()
-                {
-                    sink.borrow_mut().push(ComposerAction::ReparentTicket {
-                        id: ticket_id,
-                        placement,
-                    });
-                }
+                sink.borrow_mut().push(ComposerAction::ReparentTicket {
+                    id: ticket_id,
+                    placement,
+                });
             } else {
                 sink.borrow_mut().push(kind.action(id.clone(), label));
             }
@@ -289,7 +291,14 @@ impl BoundPropertyDropdown {
                 priorities,
             }),
         }));
-        Self::new(state, pending, shared, service, PropertyKind::Priority)
+        Self::new(
+            state,
+            pending,
+            shared,
+            service,
+            PropertyKind::Priority,
+            ComposerKeyBindings::default().priority,
+        )
     }
 
     #[cfg(test)]
@@ -305,6 +314,7 @@ impl BoundPropertyDropdown {
             Rc::new(RefCell::new(SharedOptions::default())),
             service,
             PropertyKind::Assignee,
+            ComposerKeyBindings::default().assignee,
         );
         control.synced_rows = assignees;
         control.control.set_rows(control.synced_rows.clone());
@@ -323,6 +333,7 @@ impl BoundPropertyDropdown {
             Rc::new(RefCell::new(SharedOptions::default())),
             service,
             PropertyKind::Parent,
+            ComposerKeyBindings::default().parent,
         )
     }
 
@@ -559,7 +570,7 @@ impl BoundPropertyDropdown {
                     let selected_ticket = self.state.borrow().selected_ticket().cloned();
                     let selected = selected_ticket
                         .as_ref()
-                        .map(|ticket| ticket.assignee.clone())
+                        .map(|ticket| ticket.assignee_account_id.clone())
                         .unwrap_or_default();
                     let mut options = users
                         .into_iter()
@@ -576,7 +587,9 @@ impl BoundPropertyDropdown {
                         },
                     );
                     if let Some(ticket) = selected_ticket
-                        && !options.iter().any(|option| option.label == ticket.assignee)
+                        && !options
+                            .iter()
+                            .any(|option| option.id == ticket.assignee_account_id)
                     {
                         options.push(JiraOption {
                             id: ticket.assignee_account_id,
@@ -621,16 +634,6 @@ impl PropertyKind {
             Self::Status => "Status",
             Self::Priority => "Priority",
             Self::Assignee => "Assignee",
-        }
-    }
-
-    fn hotkey(self) -> &'static str {
-        match self {
-            Self::IssueType => "it",
-            Self::Parent => "pa",
-            Self::Status => "st",
-            Self::Priority => "pr",
-            Self::Assignee => "ee",
         }
     }
 

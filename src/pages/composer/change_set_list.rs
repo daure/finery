@@ -103,6 +103,17 @@ impl ChangeSetListView {
                     }
                 }
                 ListControlEvent::Removed { row_id } => {
+                    if self.state.borrow().change_set_is_submitting(&row_id) {
+                        self.service
+                            .report_notification(tuicore::Notification::error(
+                                "Delete blocked",
+                                "Cannot delete a change set while its Jira commit is in progress",
+                            ));
+                        self.sync();
+                        ctx.request_layout();
+                        ctx.request_redraw();
+                        continue;
+                    }
                     self.state
                         .borrow_mut()
                         .dispatch(ComposerAction::DeleteChangeSet(row_id.clone()));

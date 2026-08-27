@@ -11,15 +11,15 @@ use crate::{
 
 #[derive(Clone, PartialEq, Eq)]
 enum SourceRequest {
-    Selected(String),
-    All,
+    Selected { change_set_id: String, id: String },
+    All(String),
 }
 
 pub(super) struct SourceController {
     state: Rc<RefCell<ComposerState>>,
     service: AppService,
-    sender: Sender<(u64, String, Result<Ticket, String>)>,
-    receiver: Receiver<(u64, String, Result<Ticket, String>)>,
+    sender: Sender<(u64, String, String, Result<Ticket, String>)>,
+    receiver: Receiver<(u64, String, String, Result<Ticket, String>)>,
     generation: u64,
     requested: Option<SourceRequest>,
     loading: usize,
@@ -53,26 +53,39 @@ impl SourceController {
             self.loading = 0;
             return;
         }
-        let (target, mode_changed) = {
+        let (change_set_id, target, mode_changed) = {
             let state = self.state.borrow();
             (
+                state.active_change_set.clone(),
                 state.selected_change().and_then(source_target),
                 self.mode != Some(state.view_mode),
             )
         };
         self.mode = Some(self.state.borrow().view_mode);
-        let Some((id, key)) = target else {
-            self.requested = None;
+        let Some((change_set_id, (id, key))) = change_set_id.zip(target) else {
+            if self.requested.take().is_some() {
+                self.generation = self.generation.saturating_add(1);
+            }
             self.loading = 0;
             return;
         };
-        if matches!(self.requested.as_ref(), Some(SourceRequest::All)) && self.loading > 0 {
+        if let Some(SourceRequest::All(request_change_set_id)) = self.requested.as_ref()
+            && self.loading > 0
+        {
+            if request_change_set_id == &change_set_id {
+                return;
+            }
+            self.generation = self.generation.saturating_add(1);
+            self.loading = 0;
+        }
+        let request = SourceRequest::Selected {
+            change_set_id: change_set_id.clone(),
+            id: id.clone(),
+        };
+        if !mode_changed && self.requested.as_ref() == Some(&request) {
             return;
         }
-        if !mode_changed && self.requested == Some(SourceRequest::Selected(id.clone())) {
-            return;
-        }
-        self.requested = Some(SourceRequest::Selected(id.clone()));
+        self.requested = Some(request);
         self.loading = 1;
         self.generation = self.generation.saturating_add(1);
         let generation = self.generation;
@@ -81,7 +94,7 @@ impl SourceController {
         if let Err(error) = std::thread::Builder::new()
             .name(format!("finery-jira-source-{generation}"))
             .spawn(move || {
-                let _ = sender.send((generation, id, service.fetch_jira(&key)));
+                let _ = sender.send((generation, change_set_id, id, service.fetch_jira(&key)));
             })
         {
             self.loading = 0;
@@ -94,17 +107,20 @@ impl SourceController {
         if !self.state.borrow().remote_queries_allowed() {
             return 0;
         }
-        let targets = self
-            .state
-            .borrow()
+        let state = self.state.borrow();
+        let Some(change_set_id) = state.active_change_set.clone() else {
+            return 0;
+        };
+        let targets = state
             .active_set()
             .into_iter()
             .flat_map(|set| &set.tickets)
             .filter_map(source_target)
             .collect::<Vec<_>>();
+        drop(state);
         let target_count = targets.len();
         self.generation = self.generation.saturating_add(1);
-        self.requested = Some(SourceRequest::All);
+        self.requested = Some(SourceRequest::All(change_set_id.clone()));
         self.loading = target_count;
         self.refresh_count = target_count;
         self.refresh_failures = 0;
@@ -118,7 +134,12 @@ impl SourceController {
             .name(format!("finery-jira-source-refresh-{generation}"))
             .spawn(move || {
                 for (id, key) in targets {
-                    let _ = sender.send((generation, id, service.fetch_jira(&key)));
+                    let _ = sender.send((
+                        generation,
+                        change_set_id.clone(),
+                        id,
+                        service.fetch_jira(&key),
+                    ));
                 }
             })
         {
@@ -136,17 +157,22 @@ impl SourceController {
 
     pub(super) fn drain(&mut self) -> bool {
         let mut changed = false;
-        while let Ok((generation, id, result)) = self.receiver.try_recv() {
+        while let Ok((generation, change_set_id, id, result)) = self.receiver.try_recv() {
             if generation != self.generation {
                 continue;
             }
-            let refreshing = matches!(self.requested, Some(SourceRequest::All));
+            let Some(refreshing) = self.accepts_response(&change_set_id, &id) else {
+                continue;
+            };
             self.loading = self.loading.saturating_sub(1);
             match result {
-                Ok(ticket) => self
-                    .state
-                    .borrow_mut()
-                    .dispatch(ComposerAction::SetSource { id, ticket }),
+                Ok(ticket) => {
+                    let _ = self.state.borrow_mut().dispatch(ComposerAction::SetSource {
+                        change_set_id,
+                        id,
+                        ticket,
+                    });
+                }
                 Err(error) => {
                     if refreshing {
                         self.refresh_failures = self.refresh_failures.saturating_add(1);
@@ -161,6 +187,24 @@ impl SourceController {
             changed = true;
         }
         changed
+    }
+
+    fn accepts_response(&self, change_set_id: &str, id: &str) -> Option<bool> {
+        let state = self.state.borrow();
+        if !state.remote_queries_allowed()
+            || state.active_change_set.as_deref() != Some(change_set_id)
+        {
+            return None;
+        }
+        match self.requested.as_ref()? {
+            SourceRequest::Selected {
+                change_set_id: requested_change_set_id,
+                id: requested_id,
+            } => (requested_change_set_id == change_set_id && requested_id == id).then_some(false),
+            SourceRequest::All(requested_change_set_id) => {
+                (requested_change_set_id == change_set_id).then_some(true)
+            }
+        }
     }
 }
 

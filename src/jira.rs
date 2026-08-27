@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
-use reqwest::blocking::Client;
+use reqwest::{StatusCode, blocking::Client};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -8,7 +8,7 @@ use crate::{
     app_settings::AppSettings,
     store::composer::{
         ChangeKind, SubmissionSnapshot, Ticket, TicketChange, TicketKind,
-        jira_adf::{adf_to_markdown, markdown_to_adf},
+        jira_adf::{adf_is_safe_to_overwrite, adf_to_markdown, markdown_to_adf},
     },
     store::work_items::{BacklogSnapshot, Sprint, WorkItem},
 };
@@ -53,6 +53,7 @@ pub(crate) struct JiraAssignee {
 }
 
 pub(crate) enum SubmitBatchOutcome {
+    PreflightError(String),
     Conflict(Vec<String>),
     Completed(Vec<TicketSubmitOutcome>),
 }
@@ -65,6 +66,7 @@ pub(crate) struct TicketSubmitOutcome {
 pub(crate) struct SubmitFailure {
     pub message: String,
     pub refresh: Option<Box<(Ticket, Ticket)>>,
+    pub retry_blocked: bool,
 }
 
 #[derive(Deserialize)]
@@ -584,39 +586,42 @@ pub(crate) fn projects(settings: &AppSettings) -> Result<Vec<JiraProject>, Strin
 pub(crate) fn submit_changes(
     settings: &AppSettings,
     changes: &[TicketChange],
-) -> Result<SubmitBatchOutcome, String> {
-    commit_order(changes)?;
-    let (client, base_url, email, token) = configured_client(settings)?;
-    let existing_keys = changes
-        .iter()
-        .filter(|change| change.kind != ChangeKind::Added)
-        .filter_map(|change| change.original.as_ref().map(|ticket| ticket.key.clone()))
-        .collect::<Vec<_>>();
-    let current = fetch_tickets(&client, &base_url, &email, &token, &existing_keys)?;
-    let conflicts = changes
-        .iter()
-        .filter(|change| change.kind != ChangeKind::Added)
-        .filter_map(|change| {
-            let original = change.original.as_ref()?;
-            let remote = current.get(&original.key)?;
-            (!same_jira_content(original, remote)).then(|| original.key.clone())
-        })
-        .collect::<Vec<_>>();
-    let missing = existing_keys
-        .iter()
-        .filter(|key| !current.contains_key(*key))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !conflicts.is_empty() || !missing.is_empty() {
-        return Ok(SubmitBatchOutcome::Conflict(
-            conflicts.into_iter().chain(missing).collect(),
-        ));
-    }
+) -> SubmitBatchOutcome {
+    let result = (|| {
+        commit_order(changes)?;
+        let (client, base_url, email, token) = configured_client(settings)?;
+        let existing_keys = changes
+            .iter()
+            .filter(|change| change.kind != ChangeKind::Added)
+            .filter_map(|change| change.original.as_ref().map(|ticket| ticket.key.clone()))
+            .collect::<Vec<_>>();
+        let current = fetch_tickets(&client, &base_url, &email, &token, &existing_keys)?;
+        let conflicts = changes
+            .iter()
+            .filter(|change| change.kind != ChangeKind::Added)
+            .filter_map(|change| {
+                let original = change.original.as_ref()?;
+                let remote = current.get(&original.key)?;
+                (!same_jira_content(original, remote)).then(|| original.key.clone())
+            })
+            .collect::<Vec<_>>();
+        let missing = existing_keys
+            .iter()
+            .filter(|key| !current.contains_key(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !conflicts.is_empty() || !missing.is_empty() {
+            return Ok(SubmitBatchOutcome::Conflict(
+                conflicts.into_iter().chain(missing).collect(),
+            ));
+        }
 
-    submit_ordered_changes(changes, |change| {
-        submit_change(&client, &base_url, &email, &token, change, &current)
-    })
-    .map(SubmitBatchOutcome::Completed)
+        submit_ordered_changes(changes, |change| {
+            submit_change(&client, &base_url, &email, &token, change, &current)
+        })
+        .map(SubmitBatchOutcome::Completed)
+    })();
+    result.unwrap_or_else(SubmitBatchOutcome::PreflightError)
 }
 
 fn submit_ordered_changes(
@@ -631,6 +636,7 @@ fn submit_ordered_changes(
         let change = &changes[index];
         let parent = change_parent(change);
         if let Some(parent) = parent.as_deref()
+            && parent.starts_with("NEW-")
             && failed.contains(parent)
         {
             failed.insert(change.id.clone());
@@ -697,7 +703,18 @@ fn commit_order(changes: &[TicketChange]) -> Result<Vec<usize>, String> {
             &mut ordered,
         )?;
     }
-    Ok(ordered)
+    let mut deletion_order = ordered
+        .iter()
+        .rev()
+        .copied()
+        .filter(|index| changes[*index].kind == ChangeKind::Deleted)
+        .collect::<Vec<_>>();
+    let mut commit_order = ordered
+        .into_iter()
+        .filter(|index| changes[*index].kind != ChangeKind::Deleted)
+        .collect::<Vec<_>>();
+    commit_order.append(&mut deletion_order);
+    Ok(commit_order)
 }
 
 fn visit_commit_change(
@@ -727,17 +744,19 @@ fn visit_commit_change(
 }
 
 fn change_parent(change: &TicketChange) -> Option<String> {
-    change
-        .updated
-        .as_ref()
-        .or(change.original.as_ref())
-        .and_then(|ticket| ticket.parent_key.clone())
+    let ticket = if change.kind == ChangeKind::Deleted {
+        change.original.as_ref()
+    } else {
+        change.updated.as_ref().or(change.original.as_ref())
+    };
+    ticket.and_then(|ticket| ticket.parent_key.clone())
 }
 
 fn submit_failure(message: String) -> SubmitFailure {
     SubmitFailure {
         message,
         refresh: None,
+        retry_blocked: false,
     }
 }
 
@@ -775,6 +794,7 @@ fn submit_change(
                 .ok_or_else(|| SubmitFailure {
                     message: "Jira ticket was not found during commit".into(),
                     refresh: None,
+                    retry_blocked: false,
                 })?;
             Ok(SubmissionSnapshot {
                 original: Some(ticket.clone()),
@@ -790,6 +810,7 @@ fn submit_change(
                 SubmitFailure {
                     message,
                     refresh: None,
+                    retry_blocked: false,
                 }
             })?;
             Ok(SubmissionSnapshot {
@@ -803,9 +824,12 @@ fn submit_change(
                 .as_ref()
                 .expect("modified ticket has original");
             let desired = change.updated.as_ref().expect("modified ticket has update");
-            match update_issue(client, base_url, email, token, original, desired) {
+            let current = current
+                .get(&original.key)
+                .expect("current ticket was checked");
+            match update_issue(client, base_url, email, token, current, desired) {
                 Ok(updated) => Ok(SubmissionSnapshot {
-                    original: current.get(&original.key).cloned(),
+                    original: Some(current.clone()),
                     updated: Some(updated),
                 }),
                 Err(message) => Err(failed_with_refresh(
@@ -884,12 +908,14 @@ fn create_issue(
         return Err(SubmitFailure {
             message: "Choose a Jira project before committing the new ticket".into(),
             refresh: None,
+            retry_blocked: false,
         });
     }
     if desired.kind == TicketKind::Subtask && desired.parent_key.is_none() {
         return Err(SubmitFailure {
             message: "A sub-task needs a parent before it can be committed".into(),
             refresh: None,
+            retry_blocked: false,
         });
     }
     let issue_type = create_issue_types(client, base_url, email, token, &desired.project_key)
@@ -897,12 +923,14 @@ fn create_issue(
         .map_err(|message| SubmitFailure {
             message,
             refresh: None,
+            retry_blocked: false,
         })?;
     let account_id =
         resolve_assignee(client, base_url, email, token, desired).map_err(|message| {
             SubmitFailure {
                 message,
                 refresh: None,
+                retry_blocked: false,
             }
         })?;
     let fields = create_issue_fields(desired, account_id.as_deref(), &issue_type);
@@ -912,23 +940,18 @@ fn create_issue(
         .header("Accept", "application/json")
         .json(&json!({ "fields": fields }))
         .send()
-        .map_err(|error| SubmitFailure {
-            message: error.to_string(),
-            refresh: None,
-        })?;
-    let created = response_json::<CreatedIssue>(response).map_err(|message| SubmitFailure {
-        message,
-        refresh: None,
-    })?;
+        .map_err(|error| ambiguous_create_failure(error.to_string()))?;
+    if !response.status().is_success() {
+        return Err(create_response_failure(
+            response.status(),
+            response_json::<CreatedIssue>(response).unwrap_err(),
+        ));
+    }
+    let created = response_json::<CreatedIssue>(response).map_err(ambiguous_create_failure)?;
     let mut created_desired = desired.clone();
     created_desired.key = created.key.clone();
-    let created_ticket =
-        fetch_ticket(client, base_url, email, token, &created.key).map_err(|message| {
-            SubmitFailure {
-                message,
-                refresh: Some(Box::new((created_desired.clone(), created_desired.clone()))),
-            }
-        })?;
+    let created_ticket = fetch_ticket(client, base_url, email, token, &created.key)
+        .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
     if created_ticket.status != desired.status
         && let Err(message) = transition_issue(
             client,
@@ -939,7 +962,7 @@ fn create_issue(
             &desired.status,
         )
     {
-        return Err(failed_with_refresh(
+        return Err(failed_created_with_refresh(
             client,
             base_url,
             email,
@@ -949,10 +972,8 @@ fn create_issue(
             message,
         ));
     }
-    fetch_ticket(client, base_url, email, token, &created.key).map_err(|message| SubmitFailure {
-        message,
-        refresh: None,
-    })
+    fetch_ticket(client, base_url, email, token, &created.key)
+        .map_err(|message| created_issue_failure(message, created_desired, None))
 }
 
 fn update_issue(
@@ -966,6 +987,7 @@ fn update_issue(
     if desired.kind == TicketKind::Subtask && desired.parent_key.is_none() {
         return Err("A sub-task cannot be moved to Root in Jira".into());
     }
+    ensure_description_can_be_overwritten(original, desired)?;
     let account_id = resolve_assignee(client, base_url, email, token, desired)?;
     let payload = update_payload(original, desired, account_id.as_deref())?;
     let response = client
@@ -1115,8 +1137,16 @@ fn update_payload(
     if desired.kind == TicketKind::Subtask && desired.parent_key.is_none() {
         return Err("A sub-task cannot be moved to Root in Jira".into());
     }
+    ensure_description_can_be_overwritten(original, desired)?;
     let mut payload = Map::new();
-    payload.insert("fields".into(), issue_fields(desired, account_id, false));
+    let mut fields = issue_fields(desired, account_id, false)
+        .as_object()
+        .expect("issue fields must be an object")
+        .clone();
+    if original.description == desired.description {
+        fields.remove("description");
+    }
+    payload.insert("fields".into(), Value::Object(fields));
     if original.parent_key.is_some() && desired.parent_key.is_none() {
         payload.insert(
             "update".into(),
@@ -1124,6 +1154,18 @@ fn update_payload(
         );
     }
     Ok(Value::Object(payload))
+}
+
+fn ensure_description_can_be_overwritten(
+    original: &Ticket,
+    desired: &Ticket,
+) -> Result<(), String> {
+    if original.description != desired.description && !original.description_safe_to_overwrite {
+        return Err(
+            "Jira description contains unsupported formatting and cannot be edited safely".into(),
+        );
+    }
+    Ok(())
 }
 
 fn failed_with_refresh(
@@ -1143,13 +1185,65 @@ fn failed_with_refresh(
             desired.project_key = current.project_key.clone();
             Box::new((current, desired))
         });
-    SubmitFailure { message, refresh }
+    SubmitFailure {
+        message,
+        refresh,
+        retry_blocked: false,
+    }
+}
+
+fn ambiguous_create_failure(message: String) -> SubmitFailure {
+    SubmitFailure {
+        message: format!(
+            "Jira create outcome is unknown: {message}. Jira may have created the ticket; retry is blocked to prevent a duplicate. Search Jira, then remove or reconcile this draft."
+        ),
+        refresh: None,
+        retry_blocked: true,
+    }
+}
+
+fn create_response_failure(status: StatusCode, message: String) -> SubmitFailure {
+    if status.is_server_error() {
+        ambiguous_create_failure(message)
+    } else {
+        submit_failure(message)
+    }
+}
+
+fn failed_created_with_refresh(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    key: &str,
+    desired: &Ticket,
+    message: String,
+) -> SubmitFailure {
+    created_issue_failure(
+        message,
+        desired.clone(),
+        fetch_ticket(client, base_url, email, token, key).ok(),
+    )
+}
+
+fn created_issue_failure(
+    message: String,
+    desired: Ticket,
+    recovered: Option<Ticket>,
+) -> SubmitFailure {
+    let original = recovered.unwrap_or_else(|| desired.clone());
+    SubmitFailure {
+        message,
+        refresh: Some(Box::new((original, desired))),
+        retry_blocked: false,
+    }
 }
 
 fn same_jira_content(left: &Ticket, right: &Ticket) -> bool {
     left.key == right.key
         && left.title == right.title
         && left.description == right.description
+        && left.description_safe_to_overwrite == right.description_safe_to_overwrite
         && left.kind == right.kind
         && left.status == right.status
         && left.priority == right.priority
@@ -1227,6 +1321,7 @@ fn to_ticket(issue: JiraIssue) -> Ticket {
             .into(),
         title: field("summary").as_str().unwrap_or(&issue.key).into(),
         description: adf_to_markdown(field("description")),
+        description_safe_to_overwrite: adf_is_safe_to_overwrite(field("description")),
         kind: field("issuetype")
             .get("name")
             .and_then(Value::as_str)

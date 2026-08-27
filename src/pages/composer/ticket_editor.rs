@@ -13,13 +13,13 @@ use tuicore::{
     AnimationSettings, ChildKey, CrossAlign, DataView, DataViewTypedEvent, Dialog, DialogAction,
     DialogBackdrop, DialogLayer, Dropdown, DropdownPopupDirection, EventCtx, EventOutcome,
     EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, Key, KeyEvent,
-    KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    MainAlign, Panel, PanelHost, Paragraph, RenderCtx, ScrollContainer, SpeedReader, Spinner,
-    Split, TextInput, TextInputKeyBindings, TickResult, TuiEvent, TuiNode, keybindings,
+    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, MainAlign, Panel,
+    PanelHost, Paragraph, RenderCtx, ScrollContainer, SpeedReader, Spinner, Split, TextInput,
+    TextInputKeyBindings, TickResult, TuiEvent, TuiNode, keybindings,
 };
 
 use crate::{
-    app_settings::AppSettings,
+    app_settings::{AppSettings, ComposerKeyBinding, ComposerKeyBindings},
     service::AppService,
     speed_reader_settings::SpeedReaderSettings,
     store::composer::{ChangeKind, ComposerAction, ComposerState, PlacementTarget, TicketKind},
@@ -55,6 +55,7 @@ struct CreateTicketForm {
     kind: Dropdown<TicketKind, TicketKind>,
     selected_kind: Rc<Cell<TicketKind>>,
     feedback: TitleFeedback,
+    submit_key: ComposerKeyBinding,
     on_ctrl_enter: Box<dyn Fn(String)>,
     input_area: Rect,
     feedback_area: Rect,
@@ -66,6 +67,7 @@ impl CreateTicketForm {
         kind: Dropdown<TicketKind, TicketKind>,
         selected_kind: Rc<Cell<TicketKind>>,
         feedback: TitleFeedback,
+        submit_key: ComposerKeyBinding,
         on_ctrl_enter: impl Fn(String) + 'static,
     ) -> Self {
         let mut input = input;
@@ -75,6 +77,7 @@ impl CreateTicketForm {
             kind,
             selected_kind,
             feedback,
+            submit_key,
             on_ctrl_enter: Box::new(on_ctrl_enter),
             input_area: Rect::default(),
             feedback_area: Rect::default(),
@@ -99,13 +102,12 @@ impl CreateTicketForm {
     }
 
     fn submit_on_ctrl_enter(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
-        let TuiEvent::Key(KeyEvent {
-            code: Key::Enter,
-            modifiers: KeyModifiers::CONTROL,
-        }) = event
-        else {
+        let TuiEvent::Key(key) = event else {
             return false;
         };
+        if !self.submit_key.matches(*key) {
+            return false;
+        }
         (self.on_ctrl_enter)(self.input.current_value().to_owned());
         ctx.request_redraw();
         ctx.stop_propagation();
@@ -341,6 +343,11 @@ impl TicketEditor {
     ) -> Self {
         let pending = Rc::new(RefCell::new(Vec::new()));
         let description_actions = Rc::new(RefCell::new(Vec::new()));
+        let keys = settings
+            .read()
+            .expect("settings lock poisoned")
+            .composer_keys
+            .clone();
         let ticket_list = Panel::new()
             .top_left("Change sets")
             .one_row(true)
@@ -351,12 +358,7 @@ impl TicketEditor {
             Rc::clone(&pending),
             Rc::clone(&description_actions),
             service.clone(),
-            settings
-                .read()
-                .expect("settings lock poisoned")
-                .composer_keys
-                .view
-                .clone(),
+            keys.clone(),
         );
         let body = Split::vertical(ticket_list, detail).ratio(1, 2);
         let toolbar_events = Rc::new(RefCell::new(Vec::new()));
@@ -373,11 +375,7 @@ impl TicketEditor {
                 Rc::clone(&can_add_child),
                 Rc::clone(&can_refresh),
                 Rc::clone(&can_submit),
-                settings
-                    .read()
-                    .expect("settings lock poisoned")
-                    .composer_keys
-                    .clone(),
+                keys.clone(),
             ),
             body,
         )
@@ -419,10 +417,10 @@ impl TicketEditor {
             .top_left("Create ticket")
             .actions([
                 DialogAction::new("OK")
-                    .hotkey(KeySpec::plain('o'))
+                    .hotkey(keys.create_confirm.spec())
                     .on_trigger(move || ok_submit(ok_title.borrow().clone())),
                 DialogAction::new("Cancel")
-                    .hotkey(KeySpec::plain('c'))
+                    .hotkey(keys.dialog_cancel.spec())
                     .on_trigger(move || cancel_action.set(true)),
             ])
             .close_on_unfocus_from_descendants(true)
@@ -449,6 +447,7 @@ impl TicketEditor {
                 }),
                 Rc::clone(&selected_kind),
                 title_feedback,
+                keys.create_submit.clone(),
                 move |title| submit_ticket(title),
             ));
         let create_layer = DialogLayer::new(workspace, create_dialog)
@@ -688,7 +687,7 @@ impl TicketEditor {
                         .borrow_mut()
                         .dispatch(ComposerAction::SetViewMode(
                             crate::store::composer::ComposerViewMode::Changes,
-                        ))
+                        ));
                 }
                 DescriptionAction::Focus { edit } => {
                     self.detail_mut().focus_description(edit, ctx);
@@ -733,10 +732,16 @@ impl TicketEditor {
             self.view.base_mut().set_active_with_context(false, ctx);
         }
         if submit_confirmed {
-            self.start_submit();
+            self.start_submit(ctx);
         }
         if reparent_confirmed && let Some(action) = self.pending_reparent.borrow_mut().take() {
-            self.state.borrow_mut().dispatch(action);
+            if let Err(error) = self.state.borrow_mut().dispatch(action) {
+                self.service
+                    .report_notification(tuicore::Notification::error(
+                        "Change blocked",
+                        error.to_string(),
+                    ));
+            }
             if let Some(set) = self.state.borrow().active_set().cloned() {
                 self.service.save_change_set(set);
             }
@@ -812,23 +817,36 @@ impl TicketEditor {
                 ComposerAction::CreateTicket { .. } | ComposerAction::CreateTicketAt { .. }
             )
         });
-        let ticket_action = actions.iter().any(|action| {
-            matches!(
-                action,
-                ComposerAction::MarkTicketDeleted(_)
-                    | ComposerAction::RemoveTicket(_)
-                    | ComposerAction::RestoreTicket(_)
-                    | ComposerAction::ResetTicket(_)
-            )
-        });
-        let persist = actions.iter().any(ComposerAction::affects_persistence);
+        let mut ticket_action = false;
+        let mut persist = false;
         for action in actions {
             if let ComposerAction::ReparentTicket { .. } = action
                 && self.request_reparent_confirmation(action.clone(), ctx)
             {
                 continue;
             }
-            self.state.borrow_mut().dispatch(action);
+            if let ComposerAction::RemoveTicket(id) = &action
+                && let Err(error) = self.state.borrow().removal_preview(id)
+            {
+                self.service
+                    .report_notification(tuicore::Notification::error("Remove blocked", error));
+                continue;
+            }
+            ticket_action |= matches!(
+                action,
+                ComposerAction::MarkTicketDeleted(_)
+                    | ComposerAction::RemoveTicket(_)
+                    | ComposerAction::RestoreTicket(_)
+                    | ComposerAction::ResetTicket(_)
+            );
+            persist |= action.affects_persistence();
+            if let Err(error) = self.state.borrow_mut().dispatch(action) {
+                self.service
+                    .report_notification(tuicore::Notification::error(
+                        "Change blocked",
+                        error.to_string(),
+                    ));
+            }
         }
         if persist && let Some(set) = self.state.borrow().active_set().cloned() {
             self.service.save_change_set(set);
@@ -848,7 +866,6 @@ impl TicketEditor {
         self.source.ensure_selected();
         ctx.request_layout();
         self.drain_toolbar_events(ctx);
-        self.submission.drain_notices(ctx);
         ctx.request_redraw();
     }
 
@@ -1047,7 +1064,7 @@ impl TicketEditor {
         }
     }
 
-    fn start_submit(&mut self) {
+    fn start_submit(&mut self, ctx: &mut EventCtx<()>) {
         if self.submission.is_submitting() {
             return;
         }
@@ -1060,7 +1077,7 @@ impl TicketEditor {
                 return;
             }
         };
-        self.submission.start(changes);
+        self.submission.start(changes, ctx);
         self.sync();
     }
 
@@ -1070,19 +1087,41 @@ impl TicketEditor {
         }
         self.ticket_dialog_close_requested.set(false);
         self.submit_confirmation_requested.set(false);
+        let selected = self.table().selected_ids();
+        let changes = match self.state.borrow().commit_changes(&selected) {
+            Ok(changes) => changes,
+            Err(error) => {
+                self.service
+                    .report_notification(tuicore::Notification::error("Commit blocked", error));
+                return;
+            }
+        };
         let confirm_submit = Rc::clone(&self.submit_confirmation_requested);
         let cancel_submit = Rc::clone(&self.ticket_dialog_close_requested);
+        let keys = self.composer_keys();
+        let content = {
+            let state = self.state.borrow();
+            let mut content = vec![format!("Commit {} ticket changes to Jira:", changes.len())];
+            content.extend(changes.into_iter().map(|change| {
+                let title = state
+                    .changes_for_change(&change)
+                    .map(|ticket| ticket.title.as_str())
+                    .unwrap_or("Unavailable ticket");
+                format!("• {} · {title}", change.id)
+            }));
+            content
+        };
         let dialog = self.view.base_mut().layer_mut();
         dialog.set_top_left("Commit changes");
         dialog.set_actions([
             DialogAction::new("Commit")
-                .hotkey(KeySpec::plain('s'))
+                .hotkey(keys.submit_confirm.spec())
                 .on_trigger(move || confirm_submit.set(true)),
             DialogAction::new("Cancel")
-                .hotkey(KeySpec::plain('c'))
+                .hotkey(keys.dialog_cancel.spec())
                 .on_trigger(move || cancel_submit.set(true)),
         ]);
-        dialog.set_content(["Commit selected ticket changes to Jira?"]);
+        dialog.set_content(content);
         self.view.base_mut().set_active_with_context(true, ctx);
     }
 
@@ -1142,12 +1181,12 @@ impl TicketEditor {
         if !requires_confirmation {
             return false;
         }
-        if self
-            .state
-            .borrow()
-            .validate_placement(&id, &placement)
-            .is_err()
-        {
+        if let Err(error) = self.state.borrow().validate_placement(&id, &placement) {
+            self.service
+                .report_notification(tuicore::Notification::error(
+                    "Change blocked",
+                    error.to_string(),
+                ));
             return true;
         }
         *self.pending_reparent.borrow_mut() = Some(action);
@@ -1168,6 +1207,7 @@ impl TicketEditor {
             PlacementTarget::Root => "Root".into(),
             PlacementTarget::ChildOf(parent) => parent.clone(),
         };
+        let keys = self.composer_keys();
         let dialog = self.view.base_mut().layer_mut();
         dialog.set_top_left("Change parent");
         dialog.set_content([format!(
@@ -1175,21 +1215,44 @@ impl TicketEditor {
         )]);
         dialog.set_actions([
             DialogAction::new("Move")
-                .hotkey(KeySpec::plain('m'))
+                .hotkey(keys.reparent_confirm.spec())
                 .on_trigger(move || confirmed.set(true)),
             DialogAction::new("Cancel")
-                .hotkey(KeySpec::plain('c'))
+                .hotkey(keys.dialog_cancel.spec())
                 .on_trigger(move || cancelled.set(true)),
         ]);
         self.view.base_mut().set_active_with_context(true, ctx);
         true
     }
 
-    fn poll_submission(&mut self, ctx: &mut EventCtx<()>) {
-        if self.submission.drain_results() {
+    fn poll_submission(&mut self) -> bool {
+        let changed = self.submission.drain_results();
+        if changed {
             self.sync();
         }
-        self.submission.drain_notices(ctx);
+        changed
+    }
+
+    pub(super) fn poll_inactive_submission(&mut self) -> TickResult {
+        let changed = self.poll_submission();
+        (if self.submission.is_submitting() {
+            TickResult::scheduled_after(Duration::from_millis(50))
+        } else {
+            TickResult::IDLE
+        })
+        .merge(if changed {
+            TickResult::CHANGED
+        } else {
+            TickResult::IDLE
+        })
+    }
+
+    fn composer_keys(&self) -> ComposerKeyBindings {
+        self.settings
+            .read()
+            .expect("settings lock poisoned")
+            .composer_keys
+            .clone()
     }
 
     fn handle_toolbar_hotkey(
@@ -1207,12 +1270,7 @@ impl TicketEditor {
         let TuiEvent::Key(key) = event else {
             return None;
         };
-        let keys = self
-            .settings
-            .read()
-            .expect("settings lock poisoned")
-            .composer_keys
-            .clone();
+        let keys = self.composer_keys();
         if keys.refresh.matches(*key) && self.can_refresh.get() {
             self.toolbar_feedback.request_refresh();
             self.ensure_source(true, ctx);
@@ -1237,6 +1295,27 @@ impl TicketEditor {
         }
         let id = change.id.clone();
         let remove_sink = Rc::clone(&self.pending);
+        let keys = self.composer_keys();
+        let removal_content = {
+            let state = self.state.borrow();
+            match state.removal_preview(&id) {
+                Ok(changes) => {
+                    let mut lines = vec![
+                        "Remove these local change-set tickets. Jira tickets stay unchanged:"
+                            .into(),
+                    ];
+                    lines.extend(changes.into_iter().map(|change| {
+                        let title = state
+                            .changes_for_change(change)
+                            .map(|ticket| ticket.title.as_str())
+                            .unwrap_or("Unavailable ticket");
+                        format!("• {} · {title}", change.id)
+                    }));
+                    lines
+                }
+                Err(error) => vec![format!("Remove blocked: {error}")],
+            }
+        };
         self.ticket_dialog_close_requested.set(false);
         let mut actions = Vec::new();
         if !matches!(change.kind, ChangeKind::Added | ChangeKind::Deleted) {
@@ -1244,7 +1323,7 @@ impl TicketEditor {
             let delete_id = id.clone();
             actions.push(
                 DialogAction::new("Delete")
-                    .hotkey(KeySpec::plain('d'))
+                    .hotkey(keys.delete.spec())
                     .on_trigger(move || {
                         delete_sink
                             .borrow_mut()
@@ -1254,7 +1333,7 @@ impl TicketEditor {
         }
         actions.push(
             DialogAction::new("Remove")
-                .hotkey(KeySpec::plain('r'))
+                .hotkey(keys.remove.spec())
                 .on_trigger(move || {
                     remove_sink
                         .borrow_mut()
@@ -1264,19 +1343,13 @@ impl TicketEditor {
         let cancel_ticket_dialog = Rc::clone(&self.ticket_dialog_close_requested);
         actions.push(
             DialogAction::new("Cancel")
-                .hotkey(KeySpec::plain('c'))
+                .hotkey(keys.dialog_cancel.spec())
                 .on_trigger(move || cancel_ticket_dialog.set(true)),
         );
         let dialog = self.view.base_mut().layer_mut();
         dialog.set_top_left("Ticket action");
         dialog.set_actions(actions);
-        dialog.set_content([if change.kind == ChangeKind::Added {
-            "This ticket does not exist in Jira and can only be removed from the change set."
-        } else if change.kind == ChangeKind::Deleted {
-            "This ticket is already marked for deletion and can only be removed from the change set."
-        } else {
-            "Mark the Jira ticket for deletion, or remove it from this change set without changing Jira."
-        }]);
+        dialog.set_content(removal_content);
         self.view.base_mut().set_active_with_context(true, ctx);
         true
     }
@@ -1284,6 +1357,7 @@ impl TicketEditor {
     fn open_restore_reset_dialog(&mut self, ctx: &mut EventCtx<()>) -> bool {
         self.ticket_dialog_close_requested.set(false);
         let mut actions = Vec::new();
+        let keys = self.composer_keys();
         let change = self.state.borrow().selected_change().cloned();
         let message = if let Some(change) = &change {
             let can_recover = !change.is_submitted() && self.can_change.get();
@@ -1292,7 +1366,7 @@ impl TicketEditor {
                 let restore_id = change.id.clone();
                 actions.push(
                     DialogAction::new("Restore")
-                        .hotkey(KeySpec::plain('r'))
+                        .hotkey(keys.restore.spec())
                         .on_trigger(move || {
                             restore_sink
                                 .borrow_mut()
@@ -1305,7 +1379,7 @@ impl TicketEditor {
                 let reset_id = change.id.clone();
                 actions.push(
                     DialogAction::new("Reset")
-                        .hotkey(KeySpec::plain('s'))
+                        .hotkey(keys.reset.spec())
                         .on_trigger(move || {
                             reset_sink
                                 .borrow_mut()
@@ -1326,7 +1400,7 @@ impl TicketEditor {
         let cancel_ticket_dialog = Rc::clone(&self.ticket_dialog_close_requested);
         actions.push(
             DialogAction::new("Cancel")
-                .hotkey(KeySpec::plain('c'))
+                .hotkey(keys.dialog_cancel.spec())
                 .on_trigger(move || cancel_ticket_dialog.set(true)),
         );
         let dialog = self.view.base_mut().layer_mut();
@@ -1346,7 +1420,7 @@ impl TicketEditor {
             || self.view.base().is_active()
             || self.view.base().base().is_active()
             || self.view.base().base().base().is_active()
-            || !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Char('x'), KeyModifiers::CONTROL).matches(*key))
+            || !matches!(event, TuiEvent::Key(key) if self.composer_keys().ticket_action.matches(*key))
         {
             return None;
         }
@@ -1365,7 +1439,7 @@ impl TicketEditor {
             || self.view.base().is_active()
             || self.view.base().base().is_active()
             || self.view.base().base().base().is_active()
-            || !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Char('r'), KeyModifiers::CONTROL).matches(*key))
+            || !matches!(event, TuiEvent::Key(key) if self.composer_keys().restore_reset.matches(*key))
         {
             return None;
         }
@@ -1522,7 +1596,7 @@ impl TuiNode for TicketEditor {
             }
             return self.loading_view.event(event, ctx);
         }
-        self.poll_submission(ctx);
+        self.poll_submission();
         let create_dialog_open = self.view.base().base().base().is_active();
         let add_menu_open = self.view.base().base().is_active();
         let ticket_dialog_open = self.view.base().is_active();
@@ -1574,7 +1648,7 @@ impl TuiNode for TicketEditor {
             }
             return self.loading_view.dispatch_event(route, event, ctx);
         }
-        self.poll_submission(ctx);
+        self.poll_submission();
         let create_dialog_open = self.view.base().base().base().is_active();
         let add_menu_open = self.view.base().base().is_active();
         let ticket_dialog_open = self.view.base().is_active();
@@ -1607,7 +1681,7 @@ impl TuiNode for TicketEditor {
     }
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let was_loading = self.source.is_loading() || self.submission.is_submitting();
-        let changed = self.submission.drain_results();
+        let changed = self.poll_submission();
         self.source.ensure_selected();
         let source_changed = self.source.drain();
         if changed || source_changed {
