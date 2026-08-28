@@ -44,7 +44,8 @@ impl ComposerPage {
         service: AppService,
         settings: Arc<RwLock<AppSettings>>,
     ) -> Self {
-        let state = Rc::new(RefCell::new(ComposerState::from_change_sets(change_sets)));
+        let composer_state = ComposerState::from_change_sets(change_sets);
+        let state = Rc::new(RefCell::new(composer_state));
         Self {
             change_sets: ChangeSetListView::new(Rc::clone(&state), service.clone()),
             editor: TicketEditor::new(Rc::clone(&state), settings, service.clone()),

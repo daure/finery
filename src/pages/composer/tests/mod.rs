@@ -998,7 +998,8 @@ fn preflight_failure_clears_only_its_durable_create_attempt_marker() {
     });
     let changes = state.commit_changes(&["NEW-2".into()]).unwrap();
     let state = Rc::new(RefCell::new(state));
-    let mut submission = SubmissionController::new(Rc::clone(&state), AppService::for_tests());
+    let service = AppService::for_tests();
+    let mut submission = SubmissionController::new(Rc::clone(&state), service.clone());
 
     submission.start(changes, &mut EventCtx::default());
     for _ in 0..100 {
@@ -1020,6 +1021,13 @@ fn preflight_failure_clears_only_its_durable_create_attempt_marker() {
             .contains("unresolved Jira create attempt")
     );
     assert!(state.commit_changes(&["NEW-2".into()]).is_ok());
+    assert!(
+        service
+            .change_set_for_tests("CS-2")
+            .unwrap()
+            .submission_attempt
+            .is_none()
+    );
 }
 
 #[test]
@@ -1094,6 +1102,52 @@ fn jira_submission_waits_for_durable_create_marker_confirmation() {
 
     assert!(jira_called.load(Ordering::SeqCst));
     assert!(marker_was_durable.load(Ordering::SeqCst));
+}
+
+#[test]
+fn cancelled_durable_claim_never_contacts_jira() {
+    let service = AppService::for_tests();
+    let jira_called = Arc::new(AtomicBool::new(false));
+    let observed_jira_call = Arc::clone(&jira_called);
+    service.set_jira_submit_for_tests(Arc::new(move |_| {
+        observed_jira_call.store(true, Ordering::SeqCst);
+        crate::jira::SubmitBatchOutcome::PreflightError("must not submit".into())
+    }));
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    state.dispatch(ComposerAction::CreateTicket {
+        title: "New local ticket".into(),
+        project_key: "FIN".into(),
+    });
+    service.save_change_set(state.active_set().unwrap().clone());
+    service.flush().unwrap();
+    let changes = state.commit_changes(&["NEW-1".into()]).unwrap();
+    let state = Rc::new(RefCell::new(state));
+    let resume = service.pause_durable_change_set_saves();
+    let mut submission = SubmissionController::new(Rc::clone(&state), service.clone());
+
+    submission.start(changes, &mut EventCtx::default());
+    service
+        .composer_service()
+        .apply_change_set_patch(
+            "CS-2",
+            1,
+            vec![ChangeSetPatchOperation::UpdateDescription {
+                ticket_id: "NEW-1".into(),
+                description: "external write wins".into(),
+            }],
+        )
+        .unwrap();
+    resume.send(()).unwrap();
+    for _ in 0..100 {
+        submission.drain_results();
+        if !submission.is_submitting() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert!(!jira_called.load(Ordering::SeqCst));
 }
 
 #[test]

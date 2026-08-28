@@ -172,7 +172,11 @@ impl SettingsDialog {
         for change in self.changes.borrow_mut().drain(..) {
             match change {
                 SettingChange::JiraBaseUrl(value) => {
-                    settings.jira_base_url = value.trim().trim_end_matches('/').into();
+                    let value = value.trim().trim_end_matches('/').to_owned();
+                    if settings.jira_base_url != value {
+                        settings.jira_base_url = value;
+                        settings.invalidate_discovered_story_points();
+                    }
                     changed = true;
                 }
                 SettingChange::JiraEmail(value) => {
@@ -188,11 +192,15 @@ impl SettingsDialog {
                     changed = true;
                 }
                 SettingChange::JiraDefaultBoard(value) => {
-                    settings.jira_default_board = value.trim().into();
+                    let value = value.trim().to_owned();
+                    if settings.jira_default_board != value {
+                        settings.jira_default_board = value;
+                        settings.invalidate_discovered_story_points();
+                    }
                     changed = true;
                 }
                 SettingChange::JiraStoryPointsFieldId(value) => {
-                    settings.jira_story_points_field_id = value.trim().into();
+                    settings.set_manual_story_points_field(value.trim().into());
                     changed = true;
                 }
                 SettingChange::Wpm(value) => {

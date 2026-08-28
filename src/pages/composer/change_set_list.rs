@@ -109,7 +109,7 @@ impl ChangeSetListView {
                         self.service
                             .report_notification(tuicore::Notification::error(
                                 "Delete blocked",
-                                "Cannot delete a change set while its Jira commit is in progress",
+                                "Cannot delete a change set with an unresolved Jira submission attempt",
                             ));
                         self.sync();
                         ctx.request_layout();

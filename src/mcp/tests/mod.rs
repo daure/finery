@@ -22,6 +22,7 @@ fn change(id: &str, parent_key: Option<&str>) -> TicketChangeView {
             project_key: "FIN".into(),
             title: format!("Title for {id}"),
             description: "Must not appear in the workspace response".into(),
+            description_safe_to_overwrite: true,
             kind: TicketKindView::Story,
             status: "To Do".into(),
             priority: "Medium".into(),
@@ -34,6 +35,9 @@ fn change(id: &str, parent_key: Option<&str>) -> TicketChangeView {
         updated: None,
         submitted: false,
         selected_for_commit: false,
+        retry_blocked: false,
+        create_attempt: false,
+        submission_claimed: false,
     }
 }
 
@@ -80,6 +84,20 @@ fn workspace_ticket_tree_nests_children_without_descriptions() {
             .unwrap()
             .contains("Must not appear in the workspace response")
     );
+}
+
+#[test]
+fn workspace_ticket_tree_uses_submitted_draft_keys_as_parent_aliases() {
+    let mut parent = change("NEW-1", None);
+    parent.updated = parent.original.clone();
+    parent.original = None;
+    parent.updated.as_mut().unwrap().key = "FIN-1".into();
+    parent.submitted = true;
+    let tickets = workspace_change_ticket_tree(vec![parent, change("NEW-2", Some("FIN-1"))]);
+
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0].id, "NEW-1");
+    assert_eq!(tickets[0].children[0].id, "NEW-2");
 }
 
 fn work_item(index: usize) -> WorkItem {

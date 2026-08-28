@@ -7,11 +7,15 @@ use serde_json::{Map, Value, json};
 use crate::{
     app_settings::AppSettings,
     store::composer::{
-        ChangeKind, SubmissionSnapshot, Ticket, TicketChange, TicketKind,
-        jira_adf::{adf_is_safe_to_overwrite, adf_to_markdown, markdown_to_adf},
+        ChangeKind, SubmissionSnapshot, Ticket, TicketChange, TicketKind, change_parent,
+        jira_adf::markdown_to_adf,
     },
     store::work_items::{BacklogSnapshot, RankPlan, Sprint, WorkItem},
 };
+
+mod mapping;
+
+use mapping::*;
 
 const ISSUE_FIELDS: [&str; 9] = [
     "summary",
@@ -44,6 +48,7 @@ pub(crate) struct BacklogLoad {
 pub(crate) struct DiscoveredStoryPoints {
     pub board_id: String,
     pub field_id: String,
+    pub discovery_complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +101,12 @@ struct SearchResponse {
 #[derive(Deserialize)]
 struct AgileBoardPage {
     values: Vec<AgileBoard>,
+    #[serde(default, rename = "isLast")]
+    is_last: bool,
+    #[serde(default, rename = "startAt")]
+    start_at: usize,
+    #[serde(default, rename = "maxResults")]
+    max_results: usize,
 }
 
 #[derive(Deserialize)]
@@ -140,9 +151,9 @@ struct AgileIssuePage {
 }
 
 #[derive(Deserialize)]
-struct JiraIssue {
-    key: String,
-    fields: Value,
+pub(super) struct JiraIssue {
+    pub(super) key: String,
+    pub(super) fields: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -244,13 +255,8 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         } else {
             (None, None)
         };
-    let story_points_field_id = discovered_story_points
-        .as_ref()
-        .map(|discovery| discovery.field_id.as_str())
-        .or_else(|| {
-            (!settings.jira_story_points_field_id.trim().is_empty())
-                .then_some(settings.jira_story_points_field_id.as_str())
-        });
+    let story_points_field_id =
+        story_points_field_for_load(settings, discovered_story_points.as_ref());
     let sprints = board_sprints(&client, &base_url, &email, &token, board.id)?;
     let (sprints, work_items) = std::thread::scope(|scope| -> Result<_, String> {
         let backlog_client = client.clone();
@@ -379,13 +385,25 @@ fn backlog_board(
             settings.jira_default_project.trim().to_owned(),
         ));
     }
-    let response = client
-        .get(format!("{base_url}/rest/agile/1.0/board"))
-        .basic_auth(email, Some(token))
-        .query(&query)
-        .send()
-        .map_err(|error| error.to_string())?;
-    select_backlog_board(response_json::<AgileBoardPage>(response)?.values).ok_or_else(|| {
+    let mut boards = Vec::new();
+    let mut start_at = 0;
+    loop {
+        let mut page_query = query.clone();
+        page_query.push(("startAt", start_at.to_string()));
+        let response = client
+            .get(format!("{base_url}/rest/agile/1.0/board"))
+            .basic_auth(email, Some(token))
+            .query(&page_query)
+            .send()
+            .map_err(|error| error.to_string())?;
+        let page = response_json::<AgileBoardPage>(response)?;
+        boards.extend(page.values);
+        if page.is_last || page.max_results == 0 {
+            break;
+        }
+        start_at = page.start_at.saturating_add(page.max_results);
+    }
+    select_backlog_board(boards).ok_or_else(|| {
         if settings.jira_default_project.trim().is_empty() {
             "No Jira boards are available; set a default board ID in Settings".into()
         } else {
@@ -468,9 +486,27 @@ fn story_points_field_id(configuration: &Value) -> String {
 }
 
 fn should_discover_story_points(settings: &AppSettings, board_id: u64) -> bool {
+    if settings.story_points_field_is_manual() {
+        return false;
+    }
     let known_board = settings.jira_story_points_board_id.trim();
-    settings.jira_story_points_field_id.trim().is_empty()
-        || (!known_board.is_empty() && known_board != board_id.to_string())
+    if known_board.is_empty() {
+        return true;
+    }
+    known_board != board_id.to_string() || !settings.jira_story_points_discovery_complete
+}
+
+fn story_points_field_for_load<'a>(
+    settings: &'a AppSettings,
+    discovery: Option<&'a DiscoveredStoryPoints>,
+) -> Option<&'a str> {
+    discovery
+        .map(|discovery| discovery.field_id.trim())
+        .filter(|field_id| !field_id.is_empty())
+        .or_else(|| {
+            let field_id = settings.jira_story_points_field_id.trim();
+            (!field_id.is_empty()).then_some(field_id)
+        })
 }
 
 fn discover_story_points(
@@ -482,26 +518,21 @@ fn discover_story_points(
         return (None, None);
     }
     match result {
-        Ok(field_id) if !field_id.trim().is_empty() => (
+        Ok(field_id) => (
             Some(DiscoveredStoryPoints {
                 board_id: board_id.to_string(),
                 field_id,
+                discovery_complete: true,
             }),
             None,
         ),
-        Ok(_) => (None, None),
         Err(error) => (
             None,
             Some(format!(
-                "Could not discover the Jira story-points field: {error}. Loaded tickets without it; retry on the next backlog refresh."
+                "Could not discover the Jira story-points field: {error}. Loaded tickets using any stored field ID; retry on the next backlog refresh."
             )),
         ),
     }
-}
-
-fn configured_story_points_field(settings: &AppSettings) -> Option<&str> {
-    (!settings.jira_story_points_field_id.trim().is_empty())
-        .then_some(settings.jira_story_points_field_id.as_str())
 }
 
 fn sprint_issues(
@@ -512,33 +543,34 @@ fn sprint_issues(
     sprint_id: u64,
     story_points_field_id: Option<&str>,
 ) -> Result<Vec<WorkItem>, String> {
-    let mut next_page_token = None;
+    let mut start_at = 0;
     let mut work_items = Vec::new();
     loop {
         let query = vec![
+            ("startAt", start_at.to_string()),
             ("maxResults", "100".to_string()),
             ("fields", backlog_fields(story_points_field_id).join(",")),
         ];
-        let mut request = client
+        let response = client
             .get(format!(
-                "{base_url}/rest/software/1.0/sprint/{sprint_id}/issue"
+                "{base_url}/rest/agile/1.0/sprint/{sprint_id}/issue"
             ))
             .basic_auth(email, Some(token))
-            .query(&query);
-        if let Some(page_token) = next_page_token.as_deref() {
-            request = request.query(&[("nextPageToken", page_token)]);
-        }
-        let response = request.send().map_err(|error| error.to_string())?;
+            .query(&query)
+            .send()
+            .map_err(|error| error.to_string())?;
         let page = response_json::<AgileIssuePage>(response)?;
+        let loaded = page.issues.len();
+        let complete = backlog_page_complete(&page, loaded);
         work_items.extend(
             page.issues
                 .into_iter()
                 .map(|issue| to_work_item(issue, story_points_field_id)),
         );
-        let Some(page_token) = page.next_page_token else {
+        if complete {
             return Ok(work_items);
-        };
-        next_page_token = Some(page_token);
+        }
+        start_at = page.start_at.saturating_add(page.max_results.max(loaded));
     }
 }
 
@@ -580,6 +612,7 @@ fn backlog_page_complete(page: &AgileIssuePage, loaded: usize) -> bool {
     page.is_last
         || loaded == 0
         || (page.total > 0 && page.start_at.saturating_add(page.max_results) >= page.total)
+        || (page.max_results == 0 && page.next_page_token.is_none())
 }
 
 fn board_backlog_query(
@@ -1021,15 +1054,6 @@ fn visit_commit_change(
     visited[index] = true;
     ordered.push(index);
     Ok(())
-}
-
-fn change_parent(change: &TicketChange) -> Option<String> {
-    let ticket = if change.kind == ChangeKind::Deleted {
-        change.original.as_ref()
-    } else {
-        change.updated.as_ref().or(change.original.as_ref())
-    };
-    ticket.and_then(|ticket| ticket.parent_key.clone())
 }
 
 fn submit_failure(message: String) -> SubmitFailure {
@@ -1599,179 +1623,6 @@ fn request_search(
     response
         .json::<SearchResponse>()
         .map_err(|error| (Some(status.as_u16()), error.to_string()))
-}
-
-fn to_ticket(issue: JiraIssue) -> Ticket {
-    let field = |name: &str| issue.fields.get(name).unwrap_or(&Value::Null);
-    let (parent_key, parent_title) = parent_metadata(field("parent"));
-    Ticket {
-        key: issue.key.clone(),
-        project_key: field("project")
-            .get("key")
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| issue.key.split_once('-').map_or("", |(key, _)| key))
-            .into(),
-        title: field("summary").as_str().unwrap_or(&issue.key).into(),
-        description: adf_to_markdown(field("description")),
-        description_safe_to_overwrite: adf_is_safe_to_overwrite(field("description")),
-        kind: field("issuetype")
-            .get("name")
-            .and_then(Value::as_str)
-            .map(ticket_kind)
-            .unwrap_or(TicketKind::Task),
-        status: named_field(field("status")).unwrap_or_default(),
-        priority: named_field(field("priority")).unwrap_or_default(),
-        assignee: field("assignee")
-            .get("displayName")
-            .and_then(Value::as_str)
-            .unwrap_or("Unassigned")
-            .into(),
-        assignee_account_id: field("assignee")
-            .get("accountId")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .into(),
-        parent_key,
-        parent_title,
-        parent_kind: field("parent")
-            .pointer("/fields/issuetype/name")
-            .and_then(Value::as_str)
-            .map(ticket_kind),
-        has_children: field("subtasks")
-            .as_array()
-            .is_some_and(|subtasks| !subtasks.is_empty()),
-    }
-}
-
-fn to_work_item(issue: JiraIssue, story_points_field_id: Option<&str>) -> WorkItem {
-    let field = |name: &str| issue.fields.get(name).unwrap_or(&Value::Null);
-    let (parent_key, parent_title) = parent_metadata(field("parent"));
-    WorkItem {
-        key: issue.key.clone(),
-        title: field("summary").as_str().unwrap_or(&issue.key).into(),
-        kind: named_field(field("issuetype")).unwrap_or_else(|| "Issue".into()),
-        status: named_field(field("status")).unwrap_or_default(),
-        priority: named_field(field("priority")).unwrap_or_default(),
-        assignee: field("assignee")
-            .get("displayName")
-            .and_then(Value::as_str)
-            .unwrap_or("Unassigned")
-            .into(),
-        parent_key,
-        parent_title,
-        has_children: field("subtasks")
-            .as_array()
-            .is_some_and(|subtasks| !subtasks.is_empty()),
-        story_points: story_points_field_id.and_then(|field_id| {
-            field(field_id)
-                .as_f64()
-                .or_else(|| field(field_id).as_str()?.parse().ok())
-        }),
-    }
-}
-
-fn story_points_warning(snapshot: &BacklogSnapshot) -> Option<String> {
-    let tickets = snapshot
-        .sprints
-        .iter()
-        .flat_map(|sprint| &sprint.work_items)
-        .chain(&snapshot.work_items)
-        .collect::<Vec<_>>();
-    (!tickets.is_empty() && tickets.iter().all(|ticket| ticket.story_points.is_none())).then(|| {
-        "No loaded backlog tickets have story-point values. Check the Jira story-points custom-field ID in Settings.".into()
-    })
-}
-
-fn parent_metadata(parent: &Value) -> (Option<String>, Option<String>) {
-    let parent_key = parent.get("key").and_then(Value::as_str).map(str::to_owned);
-    let parent_title = parent_key.as_ref().map(|key| {
-        parent
-            .pointer("/fields/summary")
-            .and_then(Value::as_str)
-            .unwrap_or(key)
-            .into()
-    });
-    (parent_key, parent_title)
-}
-
-fn named_field(value: &Value) -> Option<String> {
-    value.get("name").and_then(Value::as_str).map(str::to_owned)
-}
-
-fn ticket_kind(name: &str) -> TicketKind {
-    match name.to_ascii_lowercase().as_str() {
-        "epic" => TicketKind::Epic,
-        "story" => TicketKind::Story,
-        "bug" => TicketKind::Bug,
-        "subtask" | "sub-task" => TicketKind::Subtask,
-        _ => TicketKind::Task,
-    }
-}
-
-fn ticket_kind_name(kind: TicketKind) -> &'static str {
-    match kind {
-        TicketKind::Epic => "Epic",
-        TicketKind::Story => "Story",
-        TicketKind::Task => "Task",
-        TicketKind::Bug => "Bug",
-        TicketKind::Subtask => "Sub-task",
-    }
-}
-
-fn search_jql(query: &str) -> String {
-    let query = query.trim();
-    if query.is_empty() {
-        return "updated >= -90d ORDER BY updated DESC".into();
-    }
-    let escaped = query.replace('\\', "\\\\").replace('"', "\\\"");
-    let text = wildcard_text(query);
-    if looks_like_key(query) {
-        format!(
-            "(key = \"{escaped}\" OR summary ~ \"{text}\" OR text ~ \"{text}\") ORDER BY updated DESC"
-        )
-    } else if looks_like_project_key(query) {
-        format!(
-            "(project = \"{}\" OR summary ~ \"{text}\" OR text ~ \"{text}\") ORDER BY updated DESC",
-            escaped.to_ascii_uppercase()
-        )
-    } else {
-        text_search_jql(query)
-    }
-}
-
-fn text_search_jql(query: &str) -> String {
-    let text = wildcard_text(query);
-    format!("(summary ~ \"{text}\" OR text ~ \"{text}\") ORDER BY updated DESC")
-}
-
-fn wildcard_text(query: &str) -> String {
-    query
-        .split_whitespace()
-        .map(|term| {
-            let escaped = term.replace('\\', "\\\\").replace('"', "\\\"");
-            format!("{escaped}*")
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn looks_like_project_key(query: &str) -> bool {
-    !query.is_empty()
-        && query.len() <= 10
-        && query
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric())
-}
-
-fn looks_like_key(query: &str) -> bool {
-    query.split_once('-').is_some_and(|(project, number)| {
-        !project.is_empty()
-            && project
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric())
-            && !number.is_empty()
-            && number.chars().all(|character| character.is_ascii_digit())
-    })
 }
 
 #[cfg(test)]

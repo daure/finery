@@ -11,7 +11,8 @@ use tokio::runtime::Runtime;
 
 use crate::{
     app_settings::{
-        AppSettings, JIRA_STORY_POINTS_BOARD_ID_SETTING, JIRA_STORY_POINTS_FIELD_ID_SETTING,
+        AppSettings, JIRA_STORY_POINTS_BOARD_ID_SETTING,
+        JIRA_STORY_POINTS_DISCOVERY_COMPLETE_SETTING, JIRA_STORY_POINTS_FIELD_ID_SETTING,
     },
     jira,
     storage::{
@@ -55,13 +56,24 @@ struct DiscoveryPersistencePause {
 enum PersistenceCommand {
     SaveSettings(Vec<(&'static str, String)>),
     SaveChangeSet(ChangeSet, Option<i64>),
-    SaveChangeSetDurably(ChangeSet, Option<i64>, Sender<Result<(), String>>),
+    SaveChangeSetDurably(
+        ChangeSet,
+        Option<i64>,
+        Sender<Result<DurableSaveOutcome, String>>,
+    ),
     DeleteChangeSet(String, i64),
     PollComposerCatalogRevision,
     LoadComposerCatalog(i64),
     Flush(Sender<()>),
     #[cfg(test)]
     PauseDurableChangeSetSaves(mpsc::Receiver<()>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DurableSaveOutcome {
+    Saved,
+    Cancelled,
+    Conflict,
 }
 
 #[derive(Default)]
@@ -82,6 +94,11 @@ struct ComposerSyncState {
 pub(crate) struct LoadedComposerCatalog {
     pub catalog: VersionedChangeSetCatalog,
     pub requested_catalog_revision: i64,
+}
+
+pub(crate) struct SubmittedComposerChangeSet {
+    pub response: composer_service::SubmitChangeSetResponse,
+    pub change_sets: Vec<ChangeSet>,
 }
 
 impl ComposerSyncState {
@@ -141,13 +158,29 @@ impl ComposerSyncState {
 
     fn write_failed(&mut self, id: &str, message: String) {
         self.pending_writes = self.pending_writes.saturating_sub(1);
+        match self.revisions.get(id).copied() {
+            Some(revision) => {
+                self.queued_revisions.insert(id.into(), revision);
+            }
+            None => {
+                self.queued_revisions.remove(id);
+            }
+        }
         self.blocked_change_sets.insert(id.into());
         self.reload_required = true;
         self.alerts.push(message);
     }
 
-    fn write_cancelled(&mut self) {
+    fn write_cancelled(&mut self, id: &str) {
         self.pending_writes = self.pending_writes.saturating_sub(1);
+        match self.revisions.get(id).copied() {
+            Some(revision) => {
+                self.queued_revisions.insert(id.into(), revision);
+            }
+            None => {
+                self.queued_revisions.remove(id);
+            }
+        }
     }
 
     fn write_is_blocked(&self, id: &str) -> bool {
@@ -260,14 +293,24 @@ impl AppService {
             jira::fetch(&settings, key)
         });
         let submit_settings = Arc::clone(&self.settings);
-        let jira_submit = Arc::new(
-            move |changes: &[TicketChange]| match submit_settings.read() {
+        #[cfg(test)]
+        let test_jira_submit = Arc::clone(&self.jira_submit);
+        let jira_submit = Arc::new(move |changes: &[TicketChange]| {
+            #[cfg(test)]
+            if let Some(submit) = test_jira_submit
+                .lock()
+                .ok()
+                .and_then(|submit| submit.clone())
+            {
+                return submit(changes);
+            }
+            match submit_settings.read() {
                 Ok(settings) => jira::submit_changes(&settings, changes),
                 Err(_) => {
                     jira::SubmitBatchOutcome::PreflightError("settings lock is unavailable".into())
                 }
-            },
-        );
+            }
+        });
         composer_service::ComposerService::new(
             self.storage.clone(),
             Arc::clone(&self.runtime),
@@ -300,21 +343,70 @@ impl AppService {
     pub(crate) fn save_change_set_durably(
         &self,
         set: ChangeSet,
-    ) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+    ) -> Result<mpsc::Receiver<Result<DurableSaveOutcome, String>>, String> {
         let (sender, receiver) = mpsc::channel();
         let expected = self.queue_composer_save(&set.id)?;
+        let id = set.id.clone();
         self.persistence
             .send(PersistenceCommand::SaveChangeSetDurably(
                 set, expected, sender,
             ))
-            .map_err(|_| "persistence worker is unavailable".to_string())?;
+            .map_err(|_| {
+                self.cancel_queued_composer_write(&id);
+                "persistence worker is unavailable".to_string()
+            })?;
         Ok(receiver)
     }
 
-    pub(crate) fn save_settings_for_restart(&self, values: Vec<(&'static str, String)>) {
-        if !values.is_empty() {
-            self.send(PersistenceCommand::SaveSettings(values));
+    pub(crate) fn submit_change_set_from_snapshot(
+        &self,
+        set: ChangeSet,
+        selected_ticket_ids: Vec<String>,
+    ) -> Result<SubmittedComposerChangeSet, String> {
+        let change_set_id = set.id.clone();
+        let save = self.save_change_set_durably(set)?;
+        match save
+            .recv()
+            .map_err(|_| "persistence worker stopped before saving Composer state".to_string())?
+            .map_err(|error| error.to_string())?
+        {
+            DurableSaveOutcome::Saved => {}
+            DurableSaveOutcome::Cancelled => {
+                return Err("Composer save was cancelled before Jira submission".into());
+            }
+            DurableSaveOutcome::Conflict => {
+                return Err("Composer save conflicted before Jira submission".into());
+            }
         }
+        let expected_revision = self
+            .composer_sync
+            .lock()
+            .map_err(|_| "Composer synchronization state is unavailable".to_string())?
+            .revisions
+            .get(&change_set_id)
+            .copied()
+            .ok_or_else(|| format!("change set revision is unavailable: {change_set_id}"))?;
+        let response = self.composer_service().submit_change_set(
+            &change_set_id,
+            expected_revision,
+            selected_ticket_ids,
+        );
+        let catalog = self
+            .runtime
+            .block_on(self.storage.load_versioned_change_sets())
+            .map_err(|error| error.to_string())?;
+        self.accept_composer_catalog(&catalog);
+        let change_sets = catalog
+            .change_sets
+            .into_iter()
+            .map(|change_set| change_set.change_set)
+            .collect();
+        response
+            .map_err(|error| error.to_string())
+            .map(|response| SubmittedComposerChangeSet {
+                response,
+                change_sets,
+            })
     }
 
     pub(crate) fn delete_change_set(&self, id: String) {
@@ -448,8 +540,10 @@ impl AppService {
             self.save_discovered_story_points(
                 &settings.jira_story_points_board_id,
                 &settings.jira_story_points_field_id,
+                settings.jira_story_points_discovery_complete,
                 discovery.board_id,
                 discovery.field_id,
+                discovery.discovery_complete,
             );
         }
         Ok(backlog.snapshot)
@@ -517,27 +611,6 @@ impl AppService {
             .map_err(|_| "settings lock is unavailable".to_string())?
             .clone();
         jira::assignees(&settings, project_key, query)
-    }
-
-    pub(crate) fn submit_ticket_changes(
-        &self,
-        changes: &[TicketChange],
-    ) -> jira::SubmitBatchOutcome {
-        #[cfg(test)]
-        if let Some(submit) = self
-            .jira_submit
-            .lock()
-            .ok()
-            .and_then(|submit| submit.clone())
-        {
-            return submit(changes);
-        }
-        match self.settings.read() {
-            Ok(settings) => jira::submit_changes(&settings, changes),
-            Err(_) => {
-                jira::SubmitBatchOutcome::PreflightError("settings lock is unavailable".into())
-            }
-        }
     }
 
     pub(crate) fn take_errors(&self) -> Vec<String> {
@@ -628,22 +701,27 @@ impl AppService {
         &self,
         expected_board_id: &str,
         expected_field_id: &str,
+        expected_discovery_complete: bool,
         board_id: String,
         field_id: String,
+        discovery_complete: bool,
     ) {
         let mut settings = self.settings.write().expect("settings lock poisoned");
         if settings.jira_story_points_board_id != expected_board_id
             || settings.jira_story_points_field_id != expected_field_id
+            || settings.jira_story_points_discovery_complete != expected_discovery_complete
         {
             return;
         }
         if settings.jira_story_points_board_id == board_id
             && settings.jira_story_points_field_id == field_id
+            && settings.jira_story_points_discovery_complete == discovery_complete
         {
             return;
         }
         settings.jira_story_points_board_id = board_id;
         settings.jira_story_points_field_id = field_id;
+        settings.jira_story_points_discovery_complete = discovery_complete;
         let values = vec![
             (
                 JIRA_STORY_POINTS_BOARD_ID_SETTING,
@@ -652,6 +730,10 @@ impl AppService {
             (
                 JIRA_STORY_POINTS_FIELD_ID_SETTING,
                 settings.jira_story_points_field_id.clone(),
+            ),
+            (
+                JIRA_STORY_POINTS_DISCOVERY_COMPLETE_SETTING,
+                settings.jira_story_points_discovery_complete.to_string(),
             ),
         ];
         #[cfg(test)]
@@ -682,6 +764,12 @@ impl AppService {
             .map(|mut state| state.queue_delete(id))
             .map_err(|_| "Composer synchronization state is unavailable".to_string())?
     }
+
+    fn cancel_queued_composer_write(&self, id: &str) {
+        if let Ok(mut state) = self.composer_sync.lock() {
+            state.write_cancelled(id);
+        }
+    }
 }
 
 fn start_persistence_worker(
@@ -703,14 +791,14 @@ fn start_persistence_worker(
                         save_change_set(&storage, &runtime, &composer_sync, set, expected)
                     }
                     PersistenceCommand::SaveChangeSetDurably(set, expected, sender) => {
-                        let result =
-                            save_change_set(&storage, &runtime, &composer_sync, set, expected);
-                        let _ = sender.send(
-                            result
-                                .as_ref()
-                                .map(|_| ())
-                                .map_err(|error| error.to_string()),
+                        let result = save_change_set_durably(
+                            &storage,
+                            &runtime,
+                            &composer_sync,
+                            set,
+                            expected,
                         );
+                        let _ = sender.send(result.map_err(|error| error.to_string()));
                         continue;
                     }
                     PersistenceCommand::DeleteChangeSet(id, expected) => {
@@ -760,6 +848,47 @@ fn start_persistence_worker(
     Ok(sender)
 }
 
+fn save_change_set_durably(
+    storage: &Storage,
+    runtime: &Runtime,
+    composer_sync: &Mutex<ComposerSyncState>,
+    set: ChangeSet,
+    expected: Option<i64>,
+) -> Result<DurableSaveOutcome, Box<dyn std::error::Error>> {
+    let id = set.id.clone();
+    if let Ok(mut state) = composer_sync.lock()
+        && state.write_is_blocked(&id)
+    {
+        state.write_cancelled(&id);
+        return Ok(DurableSaveOutcome::Cancelled);
+    }
+    match runtime.block_on(storage.save_change_set_if_revision(&set, expected)) {
+        Ok(ConditionalSaveChangeSetOutcome::Saved {
+            change_set_revision,
+            catalog_revision,
+        }) => {
+            if let Ok(mut state) = composer_sync.lock() {
+                state.write_succeeded(&id, Some(change_set_revision), catalog_revision);
+            }
+            Ok(DurableSaveOutcome::Saved)
+        }
+        Ok(ConditionalSaveChangeSetOutcome::Conflict) => {
+            let message = format!("Composer save conflicted for {id}; reloading canonical state");
+            if let Ok(mut state) = composer_sync.lock() {
+                state.write_failed(&id, message);
+            }
+            Ok(DurableSaveOutcome::Conflict)
+        }
+        Err(error) => {
+            let message = format!("Composer save failed for {id}: {error}");
+            if let Ok(mut state) = composer_sync.lock() {
+                state.write_failed(&id, message.clone());
+            }
+            Err(message.into())
+        }
+    }
+}
+
 fn save_change_set(
     storage: &Storage,
     runtime: &Runtime,
@@ -771,7 +900,7 @@ fn save_change_set(
     if let Ok(mut state) = composer_sync.lock()
         && state.write_is_blocked(&id)
     {
-        state.write_cancelled();
+        state.write_cancelled(&id);
         return Ok(());
     }
     let outcome = match runtime.block_on(storage.save_change_set_if_revision(&set, expected)) {
@@ -814,7 +943,7 @@ fn delete_change_set(
     if let Ok(mut state) = composer_sync.lock()
         && state.write_is_blocked(&id)
     {
-        state.write_cancelled();
+        state.write_cancelled(&id);
         return Ok(());
     }
     let outcome = match runtime.block_on(storage.delete_change_set_if_revision(&id, expected)) {

@@ -2,7 +2,7 @@ use serde_json::json;
 
 use super::{
     ChangeKind, ComposerAction, ComposerState, ComposerViewMode, SubmissionSnapshot,
-    jira_adf::{adf_to_markdown, markdown_to_adf},
+    jira_adf::{adf_is_safe_to_overwrite, adf_to_markdown, markdown_to_adf},
 };
 
 mod placement;
@@ -224,6 +224,33 @@ fn unresolved_create_attempt_blocks_retry_after_restart() {
             .unwrap_err()
             .contains("unresolved Jira create attempt")
     );
+}
+
+#[test]
+fn restart_retains_unverified_submission_attempts() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    state.dispatch(ComposerAction::CreateTicket {
+        title: "New local ticket".into(),
+        project_key: "FIN".into(),
+    });
+    state.dispatch(ComposerAction::ClaimSubmission {
+        change_set_id: "CS-2".into(),
+        ids: vec!["NEW-1".into()],
+        owner_id: "other-client".into(),
+    });
+
+    let mut restored = ComposerState::from_change_sets(state.change_sets.clone());
+    restored.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+
+    assert!(restored.active_set().unwrap().submission_attempt.is_some());
+    assert_eq!(
+        restored.dispatch(ComposerAction::SetSelectedTickets(vec!["NEW-1".into()])),
+        Err(super::PlacementError::NotEditable)
+    );
+    restored.dispatch(ComposerAction::CloseChangeSet);
+    restored.dispatch(ComposerAction::DeleteChangeSet("CS-2".into()));
+    assert!(restored.change_sets.iter().any(|set| set.id == "CS-2"));
 }
 
 #[test]
@@ -552,4 +579,20 @@ fn supported_markdown_round_trips_through_jira_adf() {
     let markdown = "## Outcome\n\nCheckout is **safe** and [visible](https://example.com).\n\n- Retry works.\n- One order is created.\n\n```rust\nlet safe = true;\n```";
 
     assert_eq!(adf_to_markdown(&markdown_to_adf(markdown)), markdown);
+}
+
+#[test]
+fn adf_round_trips_literal_markdown_punctuation_and_adjacent_text_nodes() {
+    let adf = json!({
+        "type": "doc", "version": 1, "content": [{
+            "type": "paragraph", "content": [
+                { "type": "text", "text": "literal * _ ` [ ] ~~ and \\" },
+                { "type": "text", "text": "plain" },
+                { "type": "text", "text": "bold", "marks": [{ "type": "strong" }] },
+                { "type": "text", "text": "link", "marks": [{ "type": "link", "attrs": { "href": "https://example.com" } }] }
+            ]
+        }]
+    });
+
+    assert!(adf_is_safe_to_overwrite(&adf));
 }

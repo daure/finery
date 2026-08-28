@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::mpsc, thread};
+use std::net::SocketAddr;
 
 use clap::{Parser, Subcommand};
 
@@ -44,20 +44,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::Mcp) => finery::run_mcp(),
         Some(Command::Serve { bind }) => finery::run_http(bind),
         Some(Command::Dev { bind }) => {
-            let (startup_tx, startup_rx) = mpsc::channel();
-            thread::Builder::new()
-                .name("finery-mcp-http".into())
-                .spawn(move || {
-                    if let Err(error) = finery::run_http_with_startup(bind, startup_tx) {
-                        eprintln!("HTTP MCP stopped: {error}");
-                    }
-                })?;
-            startup_rx
-                .recv()
-                .map_err(|_| "HTTP MCP startup thread exited without status")?
-                .map_err(|error| format!("HTTP MCP startup failed: {error}"))?;
             tuicore::init();
-            finery::run()
+            finery::run_dev(bind)
         }
     }
 }

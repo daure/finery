@@ -1,10 +1,13 @@
 use std::{cell::Cell, rc::Rc, sync::mpsc};
 
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
-use tuicore::{FocusId, Key, KeyEvent, KeyModifiers, LayoutCtx, RenderCtx, TuiEvent, TuiNode};
+use tuicore::{
+    AnimationSettings, ChildKey, EventCtx, EventRoute, FocusCtx, FocusId, FocusRequest,
+    FocusTarget, Key, KeyEvent, KeyModifiers, LayoutCtx, RenderCtx, TreePath, TuiEvent, TuiNode,
+};
 
 use super::{
-    components::backlog_section,
+    components::{BacklogSectionNavigation, backlog_section},
     page::{LoadCompletion, RankRefreshRetry, RequestGenerations, should_poll, snapshot_view},
 };
 use crate::store::work_items::{BacklogSnapshot, Sprint, WorkItem, rank_plan};
@@ -21,6 +24,22 @@ fn work_item(key: &str, title: &str) -> WorkItem {
         parent_title: None,
         has_children: false,
         story_points: None,
+    }
+}
+
+fn data_focus_target() -> FocusTarget {
+    FocusTarget {
+        id: FocusId::new("data-view"),
+        path: TreePath::from_keys([ChildKey::new("data")]),
+        area: Rect::default(),
+        enabled: true,
+        tab_stop: true,
+        control: true,
+        hotkey: None,
+        hotkeys: Vec::new(),
+        hotkey_sequences: Vec::new(),
+        suppress_global_hotkeys: false,
+        focused_events_before_global_hotkeys: false,
     }
 }
 
@@ -59,7 +78,7 @@ fn sprint_sections_start_collapsed_and_backlog_starts_expanded() {
 
     assert!(text.contains("Finery · Sprint 7 (active)"));
     assert!(text.contains("Finery · Backlog"));
-    assert!(text.contains("󰄱"));
+    assert!(!text.contains("󰄱"));
     assert!(!text.contains("Ship sprint work"));
     assert!(text.contains("Plan next sprint"));
     assert!(layout.focus_targets().iter().any(|target| {
@@ -287,16 +306,18 @@ fn newer_load_invalidates_optimistic_rank_refresh_preservation() {
 }
 
 #[test]
-fn locked_backlog_blocks_move_keys_and_multi_ticket_space() {
+fn backlog_blocks_move_keys_while_locked_and_disables_selection() {
+    tuicore::init();
     let (sender, _) = mpsc::channel();
-    let section = backlog_section(
+    let mut section = backlog_section(
         "backlog",
         "Backlog",
-        &[],
+        &[work_item("FIN-1", "Plan next sprint")],
         None,
         true,
         sender,
         Rc::new(Cell::new(true)),
+        BacklogSectionNavigation::default(),
     );
     let ctrl_shift_m = TuiEvent::Key(KeyEvent {
         code: Key::Char('m'),
@@ -317,7 +338,110 @@ fn locked_backlog_blocks_move_keys_and_multi_ticket_space() {
     assert!(!section.blocks_move_gesture(&TuiEvent::Key(KeyEvent::from(Key::Down))));
 
     let space = TuiEvent::Key(KeyEvent::from(Key::Char(' ')));
-    assert!(!section.blocks_move_gesture_with_selection_count(0, &space));
-    assert!(!section.blocks_move_gesture_with_selection_count(1, &space));
-    assert!(section.blocks_move_gesture_with_selection_count(2, &space));
+    assert!(!section.blocks_move_gesture(&space));
+    section.focus(None, true, &mut FocusCtx::new(AnimationSettings::default()));
+    section.event(&space, &mut Default::default());
+    assert!(section.transient_selected_ids().is_empty());
+}
+
+#[test]
+fn navigating_across_backlog_sections_moves_to_the_requested_endpoint() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let navigation = BacklogSectionNavigation::sequence(2);
+    let mut first = backlog_section(
+        "sprint-1",
+        "Sprint 1",
+        &[work_item("FIN-1", "First sprint item")],
+        None,
+        true,
+        sender.clone(),
+        Rc::new(Cell::new(false)),
+        navigation[0].clone(),
+    );
+    let mut second = backlog_section(
+        "backlog",
+        "Backlog",
+        &[work_item("FIN-2", "Backlog item")],
+        None,
+        true,
+        sender,
+        Rc::new(Cell::new(false)),
+        navigation[1].clone(),
+    );
+    let mut focus = FocusCtx::new(AnimationSettings::default());
+    first.dispatch_focus(&data_focus_target(), true, &mut focus);
+    let mut event = EventCtx::new(AnimationSettings::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    first.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Down)),
+        &mut event,
+    );
+    first.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Down)),
+        &mut event,
+    );
+    assert!(matches!(event.focus_request(), Some(FocusRequest::Next)));
+
+    second.dispatch_focus(&data_focus_target(), true, &mut focus);
+    assert_eq!(second.highlighted_id().as_deref(), Some("parent:backlog"));
+
+    second.dispatch_event(&route, &TuiEvent::Key(KeyEvent::from(Key::Up)), &mut event);
+    assert!(matches!(
+        event.focus_request(),
+        Some(FocusRequest::Previous)
+    ));
+
+    first.dispatch_focus(&data_focus_target(), true, &mut focus);
+    assert_eq!(
+        first.highlighted_id().as_deref(),
+        Some("parent:sprint-1:work-item:FIN-1")
+    );
+}
+
+#[test]
+fn moving_a_backlog_item_does_not_change_sections_at_a_boundary() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let navigation = BacklogSectionNavigation::sequence(2);
+    let mut first = backlog_section(
+        "sprint-1",
+        "Sprint 1",
+        &[work_item("FIN-1", "First sprint item")],
+        None,
+        true,
+        sender,
+        Rc::new(Cell::new(false)),
+        navigation[0].clone(),
+    );
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    let mut focus = FocusCtx::new(AnimationSettings::default());
+    first.dispatch_focus(&data_focus_target(), true, &mut focus);
+    let mut event = EventCtx::new(AnimationSettings::default());
+    first.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Down)),
+        &mut event,
+    );
+    first.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('m'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut event,
+    );
+    assert!(first.is_reordering());
+
+    let mut move_event = EventCtx::new(AnimationSettings::default());
+    first.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Down)),
+        &mut move_event,
+    );
+
+    assert!(first.is_reordering());
+    assert_eq!(move_event.focus_request(), None);
 }

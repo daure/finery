@@ -18,7 +18,7 @@ use crate::{
     store::work_items::{BacklogSnapshot, RankPlan, rank_plan},
 };
 
-use super::components::{BacklogSectionEvent, backlog_section};
+use super::components::{BacklogSectionEvent, BacklogSectionNavigation, backlog_section};
 
 enum BacklogResult {
     Loaded {
@@ -452,7 +452,8 @@ fn snapshot_view_with_events(
     move_locked: Rc<Cell<bool>>,
 ) -> ScrollContainer<Flex<()>> {
     let mut view = Flex::column();
-    for sprint in &snapshot.sprints {
+    let navigation = BacklogSectionNavigation::sequence(snapshot.sprints.len() + 1);
+    for (index, sprint) in snapshot.sprints.iter().enumerate() {
         view = view.child(
             format!("sprint-{}", sprint.id),
             backlog_section(
@@ -466,6 +467,7 @@ fn snapshot_view_with_events(
                 false,
                 section_events.clone(),
                 move_locked.clone(),
+                navigation[index].clone(),
             ),
             FlexItem::fit_content(),
         );
@@ -480,6 +482,10 @@ fn snapshot_view_with_events(
             true,
             section_events,
             move_locked,
+            navigation
+                .last()
+                .expect("backlog navigation state exists")
+                .clone(),
         ),
         FlexItem::fit_content(),
     );

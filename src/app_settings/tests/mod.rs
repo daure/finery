@@ -48,6 +48,42 @@ fn story_points_field_id_round_trips_through_settings_values() {
 }
 
 #[test]
+fn manual_story_points_field_clears_discovery_provenance() {
+    let mut settings = AppSettings {
+        jira_story_points_board_id: "42".into(),
+        jira_story_points_discovery_complete: true,
+        ..AppSettings::default()
+    };
+
+    settings.set_manual_story_points_field("customfield_10016".into());
+
+    assert_eq!(settings.jira_story_points_field_id, "customfield_10016");
+    assert!(settings.jira_story_points_board_id.is_empty());
+    assert!(!settings.jira_story_points_discovery_complete);
+}
+
+#[test]
+fn board_changes_invalidate_discovery_without_clearing_manual_story_points() {
+    let mut discovered = AppSettings {
+        jira_story_points_field_id: "customfield_discovered".into(),
+        jira_story_points_board_id: "42".into(),
+        jira_story_points_discovery_complete: true,
+        ..AppSettings::default()
+    };
+    discovered.invalidate_discovered_story_points();
+    assert!(discovered.jira_story_points_field_id.is_empty());
+    assert!(discovered.jira_story_points_board_id.is_empty());
+
+    let mut manual = AppSettings {
+        jira_story_points_field_id: "customfield_manual".into(),
+        ..AppSettings::default()
+    };
+    manual.invalidate_discovered_story_points();
+    assert_eq!(manual.jira_story_points_field_id, "customfield_manual");
+    assert!(manual.story_points_field_is_manual());
+}
+
+#[test]
 fn composer_keys_resolve_labels_and_reject_active_duplicates() {
     let values = HashMap::from([
         (COMPOSER_ADD_SIBLING_KEY_SETTING.into(), "alt+s".into()),
@@ -89,20 +125,4 @@ fn composer_keys_resolve_labels_and_reject_active_duplicates() {
         (COMPOSER_ISSUE_TYPE_KEY_SETTING.into(), "d".into()),
     ]);
     assert!(AppSettings::resolve(&exact_across_workspace).is_err());
-}
-
-#[test]
-fn composer_bindings_can_be_updated_through_app_settings() {
-    let mut settings = AppSettings::default();
-
-    settings
-        .update_composer_binding(COMPOSER_ADD_SIBLING_KEY_SETTING, "alt+s".into())
-        .unwrap();
-
-    assert_eq!(settings.composer_keys.add_sibling.sequence(), "alt+s");
-    assert!(
-        settings
-            .update_composer_binding(COMPOSER_COMMIT_KEY_SETTING, "alt+s".into())
-            .is_err()
-    );
 }

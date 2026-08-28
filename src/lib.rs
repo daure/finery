@@ -9,7 +9,7 @@ mod speed_reader_settings;
 mod storage;
 mod store;
 
-use std::{net::SocketAddr, sync::mpsc::Sender};
+use std::{net::SocketAddr, sync::mpsc::Sender, thread};
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (service, change_sets) = service::AppService::initialize()?;
@@ -47,4 +47,34 @@ pub fn run_http_with_startup(
         }
     };
     runtime.block_on(mcp::run_http_with_startup(service, bind, startup))
+}
+
+pub fn run_dev(bind: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+    let (service, change_sets) = service::AppService::initialize()?;
+    let (startup_tx, startup_rx) = std::sync::mpsc::channel();
+    let http_service = service.clone();
+    thread::Builder::new()
+        .name("finery-mcp-http".into())
+        .spawn(move || {
+            let runtime = tokio::runtime::Runtime::new();
+            match runtime {
+                Ok(runtime) => {
+                    if let Err(error) =
+                        runtime.block_on(mcp::run_http_with_startup(http_service, bind, startup_tx))
+                    {
+                        eprintln!("HTTP MCP stopped: {error}");
+                    }
+                }
+                Err(error) => {
+                    let _ = startup_tx.send(Err(error.to_string()));
+                }
+            }
+        })?;
+    startup_rx
+        .recv()
+        .map_err(|_| "HTTP MCP startup thread exited without status")?
+        .map_err(|error| format!("HTTP MCP startup failed: {error}"))?;
+    tuicore::TreeApp::new(app::root(service.clone(), change_sets)).run()?;
+    service.flush()?;
+    Ok(())
 }

@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    net::SocketAddr,
-};
+use std::{collections::HashMap, net::SocketAddr};
 
 use rmcp::{
     Json, ServerHandler, ServiceExt,
@@ -18,14 +15,14 @@ use crate::{
         AppService,
         composer_service::{
             ChangeKindView, ChangeSetCatalogView, ChangeSetPatchOperation, ChangeSetPatchResponse,
-            ChangeSetView, ComposerService, ServiceError, SubmitChangeSetResponse,
+            ChangeSetView, ComposerService, RecoveredCreate, ServiceError, SubmitChangeSetResponse,
             TicketChangeView, TicketKindView, TicketView, Versioned,
         },
     },
     store::work_items::{BacklogSnapshot, WorkItem},
 };
 
-const MCP_INSTRUCTIONS: &str = "Read and edit Finery Composer change sets. get_workspace returns compact active/future sprint tickets, plus the top 50 unplanned Jira tickets in rank order. Full sprint lists are never capped. backlog.unplanned_ticket_limit, backlog.unplanned_total_count, and backlog.unplanned_truncated make that limit explicit. Workspace tickets never include descriptions, include direct-parent metadata and has_children, and include only open Composer change sets. It refreshes Jira baselines for tickets in those open change sets through one batched Jira request. get_change_set returns detailed, description-bearing canonical data for focused work. Revisions are optimistic-concurrency tokens: read current data before mutations and send its revision as expected_revision. apply_change_set_patch persists local edits only; it never submits Jira. refresh_change_set refreshes Jira baselines and returns the refreshed canonical change set. submit_change_set is the only Jira submission tool and requires explicit ticket IDs. A submitted ticket cannot be edited or submitted again.";
+const MCP_INSTRUCTIONS: &str = "Read and edit Finery Composer change sets. get_workspace returns compact active/future sprint tickets, plus the top 50 unplanned Jira tickets in rank order. Full sprint lists are never capped. backlog.unplanned_ticket_limit, backlog.unplanned_total_count, and backlog.unplanned_truncated make that limit explicit. Workspace tickets never include descriptions, include direct-parent metadata and has_children, and include only open Composer change sets. It refreshes Jira baselines for tickets in those open change sets through one batched Jira request. Revisions are optimistic-concurrency tokens: read current data before mutations and send its revision as expected_revision. apply_change_set_patch persists local edits only; it never submits Jira. refresh_change_set refreshes Jira baselines and returns the refreshed canonical change set. recover_submission_attempt clears safely claimed attempts or reconciles marked draft creates only after explicit Jira-key confirmation. submit_change_set is the only Jira submission tool and requires explicit ticket IDs. A submitted ticket cannot be edited or submitted again.";
 const WORKSPACE_UNPLANNED_TICKET_LIMIT: usize = 50;
 
 #[derive(Clone)]
@@ -72,6 +69,14 @@ struct SubmitChangeSet {
     expected_revision: i64,
     #[schemars(length(min = 1))]
     selected_ticket_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RecoverSubmissionAttempt {
+    change_set_id: String,
+    expected_revision: i64,
+    #[serde(default)]
+    recovered_creates: Vec<RecoveredCreate>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -150,6 +155,9 @@ fn mcp_error(error: ServiceError) -> String {
         }
         ServiceError::SubmittedTicket { ticket_id } => {
             format!("submitted_ticket: '{ticket_id}' was already submitted")
+        }
+        ServiceError::SubmissionClaimed { ticket_id } => {
+            format!("submission_claimed: '{ticket_id}' has a durable submission claim")
         }
         ServiceError::InvalidOperation { message } => format!("invalid_operation: {message}"),
         ServiceError::StaleRevision { change_set_id } => {
@@ -255,10 +263,19 @@ fn workspace_change_set_view(change_set: Versioned<ChangeSetView>) -> WorkspaceC
 }
 
 fn workspace_change_ticket_tree(tickets: Vec<TicketChangeView>) -> Vec<WorkspaceChangeTicketView> {
-    let ids = tickets
+    let aliases = tickets
         .iter()
-        .map(|ticket| ticket.id.clone())
-        .collect::<HashSet<_>>();
+        .flat_map(|ticket| {
+            let id = ticket.id.clone();
+            std::iter::once((id.clone(), id.clone())).chain(
+                ticket
+                    .updated
+                    .as_ref()
+                    .or(ticket.original.as_ref())
+                    .map(|ticket| (ticket.key.clone(), id)),
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let mut children = HashMap::<String, Vec<TicketChangeView>>::new();
     let mut roots = Vec::new();
     for ticket in tickets {
@@ -267,7 +284,7 @@ fn workspace_change_ticket_tree(tickets: Vec<TicketChangeView>) -> Vec<Workspace
             .as_ref()
             .or(ticket.original.as_ref())
             .and_then(|ticket| ticket.parent_key.as_deref());
-        if let Some(parent) = parent.filter(|parent| ids.contains(*parent)) {
+        if let Some(parent) = parent.and_then(|parent| aliases.get(parent)) {
             children.entry(parent.into()).or_default().push(ticket);
         } else {
             roots.push(ticket);
@@ -426,6 +443,24 @@ impl McpServer {
     ) -> Result<Json<ChangeSetPatchResponse>, String> {
         run_composer(self.service.composer_service(), move |service| {
             service.refresh_change_set(&input.change_set_id, input.expected_revision)
+        })
+        .await
+        .map(Json)
+    }
+
+    #[tool(
+        description = "Recover a durable abandoned submission attempt. Claimed attempts clear without contacting Jira. Marked draft creates require every local draft ID and its confirmed Jira key; Finery fetches those keys before reconciliation and never retries ambiguous creates."
+    )]
+    async fn recover_submission_attempt(
+        &self,
+        Parameters(input): Parameters<RecoverSubmissionAttempt>,
+    ) -> Result<Json<ChangeSetPatchResponse>, String> {
+        run_composer(self.service.composer_service(), move |service| {
+            service.recover_submission_attempt(
+                &input.change_set_id,
+                input.expected_revision,
+                input.recovered_creates,
+            )
         })
         .await
         .map(Json)

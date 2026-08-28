@@ -8,7 +8,8 @@ use crate::{
     storage::{ConditionalSaveChangeSetOutcome, Storage, VersionedChangeSet},
     store::composer::{
         ChangeKind, ChangeSet, ComposerAction, ComposerState, PlacementError, PlacementTarget,
-        Ticket, TicketChange, TicketKind,
+        SubmissionAttemptPhase, SubmissionSnapshot, Ticket, TicketChange, TicketKind,
+        rebase_ticket, submission_attempt_owner,
     },
 };
 
@@ -40,6 +41,9 @@ pub struct TicketChangeView {
     pub updated: Option<TicketView>,
     pub submitted: bool,
     pub selected_for_commit: bool,
+    pub retry_blocked: bool,
+    pub create_attempt: bool,
+    pub submission_claimed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -48,6 +52,7 @@ pub struct TicketView {
     pub project_key: String,
     pub title: String,
     pub description: String,
+    pub description_safe_to_overwrite: bool,
     pub kind: TicketKindView,
     pub status: String,
     pub priority: String,
@@ -143,6 +148,12 @@ pub struct ChangeSetPatchResponse {
     pub applied: Vec<AppliedOperation>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RecoveredCreate {
+    pub ticket_id: String,
+    pub jira_key: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SubmitChangeSetResponse {
     pub change_set: Versioned<ChangeSetView>,
@@ -169,6 +180,7 @@ pub struct TicketSubmissionResult {
     pub ticket_id: String,
     pub submitted: bool,
     pub retry_blocked: bool,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +189,7 @@ pub enum ServiceError {
     NotFound { resource: String, id: String },
     ClosedChangeSet { change_set_id: String },
     SubmittedTicket { ticket_id: String },
+    SubmissionClaimed { ticket_id: String },
     InvalidOperation { message: String },
     StaleRevision { change_set_id: String },
     JiraLookup { jira_key: String, message: String },
@@ -193,6 +206,9 @@ impl fmt::Display for ServiceError {
             }
             Self::SubmittedTicket { ticket_id } => {
                 write!(formatter, "ticket was submitted: {ticket_id}")
+            }
+            Self::SubmissionClaimed { ticket_id } => {
+                write!(formatter, "ticket submission is in progress: {ticket_id}")
             }
             Self::InvalidOperation { message } => formatter.write_str(message),
             Self::StaleRevision { change_set_id } => {
@@ -313,16 +329,23 @@ impl ComposerService {
             .filter(|change_set| !change_set.change_set.closed)
         {
             let mut change_set = versioned.change_set;
+            if change_set.submission_attempt_ticket_id().is_some() {
+                continue;
+            }
             let mut changed = false;
             for change in &mut change_set.tickets {
-                let Some(original) = change.original.as_mut() else {
+                let Some(original) = change.original.as_ref() else {
                     continue;
                 };
                 let Some(refreshed) = refreshed_tickets.get(&original.key) else {
                     continue;
                 };
                 if original != refreshed {
-                    *original = refreshed.clone();
+                    change.updated = change
+                        .updated
+                        .as_ref()
+                        .map(|updated| rebase_ticket(original, updated, refreshed));
+                    change.original = Some(refreshed.clone());
                     changed = true;
                 }
             }
@@ -344,6 +367,14 @@ impl ComposerService {
         }
         let versioned = self.load_expected_change_set(change_set_id, expected_revision)?;
         let mut state = open_state(versioned.change_set.clone());
+        if let Some(ticket_id) = state
+            .active_set()
+            .and_then(ChangeSet::submission_attempt_ticket_id)
+        {
+            return Err(ServiceError::SubmissionClaimed {
+                ticket_id: ticket_id.into(),
+            });
+        }
         let mut applied = Vec::with_capacity(operations.len());
         for (operation_index, operation) in operations.into_iter().enumerate() {
             let ticket_ids = self.apply_operation(&mut state, operation)?;
@@ -375,18 +406,20 @@ impl ComposerService {
     ) -> Result<ChangeSetPatchResponse, ServiceError> {
         let versioned = self.load_expected_change_set(change_set_id, expected_revision)?;
         let mut edited = versioned.change_set;
+        if let Some(ticket_id) = edited.submission_attempt_ticket_id() {
+            return Err(ServiceError::SubmissionClaimed {
+                ticket_id: ticket_id.into(),
+            });
+        }
         let targets = edited
             .tickets
             .iter()
+            .filter(|change| !change.is_submitted())
             .filter_map(|change| {
-                (!change.is_submitted())
-                    .then(|| {
-                        change
-                            .original
-                            .as_ref()
-                            .map(|ticket| (change.id.clone(), ticket.key.clone()))
-                    })
-                    .flatten()
+                change
+                    .original
+                    .as_ref()
+                    .map(|ticket| (change.id.clone(), ticket.key.clone()))
             })
             .collect::<Vec<_>>();
         if targets.is_empty() {
@@ -399,6 +432,13 @@ impl ComposerService {
                 .iter_mut()
                 .find(|change| change.id == id)
                 .expect("refresh target is present");
+            change.updated = change.updated.as_ref().map(|updated| {
+                rebase_ticket(
+                    change.original.as_ref().expect("original exists"),
+                    updated,
+                    &ticket,
+                )
+            });
             change.original = Some(ticket);
         }
         let (revision, catalog_revision) =
@@ -407,6 +447,141 @@ impl ComposerService {
             change_set: Versioned {
                 revision,
                 value: change_set_view(edited),
+            },
+            catalog_revision,
+            applied: Vec::new(),
+        })
+    }
+
+    pub fn recover_submission_attempt(
+        &self,
+        change_set_id: &str,
+        expected_revision: i64,
+        recovered_creates: Vec<RecoveredCreate>,
+    ) -> Result<ChangeSetPatchResponse, ServiceError> {
+        let versioned = self.load_expected_change_set(change_set_id, expected_revision)?;
+        let Some(attempt) = versioned.change_set.submission_attempt.clone() else {
+            return Err(invalid("change set has no submission attempt to recover"));
+        };
+        if attempt.phase != SubmissionAttemptPhase::JiraSubmissionStarted {
+            if !recovered_creates.is_empty() {
+                return Err(invalid(
+                    "Jira submission did not start; recover without Jira confirmations",
+                ));
+            }
+            return self.release_recovered_claim(
+                change_set_id,
+                expected_revision,
+                attempt.owner_id,
+            );
+        }
+        let mut state = open_state(versioned.change_set);
+        let claimed = state
+            .active_set()
+            .expect("opened change set is present")
+            .tickets
+            .iter()
+            .filter(|change| attempt.ticket_ids.contains(&change.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let creates = claimed
+            .iter()
+            .filter(|change| change.kind == ChangeKind::Added)
+            .map(|change| change.id.clone())
+            .collect::<Vec<_>>();
+        if recovered_creates.len() != creates.len()
+            || recovered_creates.iter().any(|recovered| {
+                !creates.contains(&recovered.ticket_id) || recovered.jira_key.trim().is_empty()
+            })
+            || recovered_creates
+                .iter()
+                .map(|recovered| &recovered.ticket_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != recovered_creates.len()
+        {
+            return Err(invalid(
+                "confirm every claimed draft create with its Jira key before recovery",
+            ));
+        }
+        let recovered_creates = recovered_creates
+            .into_iter()
+            .map(|recovered| (recovered.ticket_id, recovered.jira_key))
+            .collect::<HashMap<_, _>>();
+        for change in claimed {
+            let snapshot = match change.kind {
+                ChangeKind::Added => SubmissionSnapshot {
+                    original: None,
+                    updated: Some(
+                        self.fetch_jira(
+                            recovered_creates
+                                .get(&change.id)
+                                .expect("validated recovered create"),
+                        )?,
+                    ),
+                },
+                ChangeKind::Deleted => {
+                    let key = change
+                        .original
+                        .as_ref()
+                        .map(|ticket| ticket.key.as_str())
+                        .ok_or_else(|| invalid("deleted ticket is missing its Jira key"))?;
+                    if self.fetch_jira(key).is_ok() {
+                        return Err(invalid(format!(
+                            "Jira deletion is not confirmed for {}",
+                            change.id
+                        )));
+                    }
+                    SubmissionSnapshot {
+                        original: change.original,
+                        updated: None,
+                    }
+                }
+                ChangeKind::Modified | ChangeKind::Synced => {
+                    let desired = change
+                        .updated
+                        .as_ref()
+                        .or(change.original.as_ref())
+                        .ok_or_else(|| invalid("modified ticket is missing its desired state"))?;
+                    let remote = self.fetch_jira(&desired.key)?;
+                    if remote != *desired {
+                        return Err(invalid(format!(
+                            "Jira update is not confirmed for {}",
+                            change.id
+                        )));
+                    }
+                    SubmissionSnapshot {
+                        original: change.original,
+                        updated: Some(remote),
+                    }
+                }
+            };
+            dispatch(
+                &mut state,
+                ComposerAction::CompleteSubmission {
+                    change_set_id: change_set_id.into(),
+                    id: change.id,
+                    snapshot,
+                },
+            )?;
+        }
+        if !recovered_creates.is_empty() && creates.is_empty() {
+            return Err(invalid("claimed attempts do not contain draft creates"));
+        }
+        dispatch(
+            &mut state,
+            ComposerAction::ReleaseSubmissionClaim {
+                change_set_id: change_set_id.into(),
+                owner_id: attempt.owner_id,
+            },
+        )?;
+        let reconciled = state.active_set().expect("opened change set is present");
+        let (revision, catalog_revision) =
+            self.save(change_set_id, reconciled, Some(expected_revision))?;
+        Ok(ChangeSetPatchResponse {
+            change_set: Versioned {
+                revision,
+                value: change_set_view(reconciled.clone()),
             },
             catalog_revision,
             applied: Vec::new(),
@@ -428,6 +603,14 @@ impl ComposerService {
                     ticket_id: ticket_id.clone(),
                 });
             }
+            if state
+                .active_set()
+                .is_some_and(|set| set.submission_attempt.is_some())
+            {
+                return Err(ServiceError::SubmissionClaimed {
+                    ticket_id: ticket_id.clone(),
+                });
+            }
         }
         let changes = state
             .commit_changes(&selected_ticket_ids)
@@ -441,8 +624,24 @@ impl ComposerService {
             .filter(|change| change.kind == ChangeKind::Added)
             .map(|change| change.id.clone())
             .collect::<Vec<_>>();
-        let mut persisted_revision = expected_revision;
-        if !create_attempts.is_empty() {
+        let claimed_ids = changes
+            .iter()
+            .map(|change| change.id.clone())
+            .collect::<Vec<_>>();
+        let attempt_owner = submission_attempt_owner();
+        dispatch(
+            &mut state,
+            ComposerAction::ClaimSubmission {
+                change_set_id: change_set_id.into(),
+                ids: claimed_ids.clone(),
+                owner_id: attempt_owner.clone(),
+            },
+        )?;
+        let claimed = state.active_set().expect("opened change set is present");
+        let (claimed_revision, _) = self.save(change_set_id, claimed, Some(expected_revision))?;
+        let marked_revision = if create_attempts.is_empty() {
+            claimed_revision
+        } else {
             dispatch(
                 &mut state,
                 ComposerAction::MarkCreateAttempts {
@@ -450,18 +649,39 @@ impl ComposerService {
                     ids: create_attempts.clone(),
                 },
             )?;
+            dispatch(
+                &mut state,
+                ComposerAction::MarkSubmissionCreateAttempts {
+                    change_set_id: change_set_id.into(),
+                    owner_id: attempt_owner.clone(),
+                },
+            )?;
             let marked = state.active_set().expect("opened change set is present");
-            let (revision, _) = self.save(change_set_id, marked, Some(expected_revision))?;
-            persisted_revision = revision;
-        }
+            self.save(change_set_id, marked, Some(claimed_revision))?.0
+        };
+        dispatch(
+            &mut state,
+            ComposerAction::MarkSubmissionJiraStarted {
+                change_set_id: change_set_id.into(),
+                owner_id: attempt_owner.clone(),
+            },
+        )?;
+        let persisted_revision = self
+            .save(
+                change_set_id,
+                state.active_set().expect("opened change set is present"),
+                Some(marked_revision),
+            )?
+            .0;
 
         let outcome = self.jira_submit.submit_changes(&changes);
         match outcome {
-            crate::jira::SubmitBatchOutcome::PreflightError(_) => {
+            crate::jira::SubmitBatchOutcome::PreflightError(message) => {
                 self.clear_create_attempts(
                     change_set_id,
                     &mut state,
                     &create_attempts,
+                    &attempt_owner,
                     persisted_revision,
                 )?;
                 let change_set = self.change_set(change_set_id)?;
@@ -469,9 +689,7 @@ impl ComposerService {
                 Ok(SubmitChangeSetResponse {
                     change_set,
                     catalog_revision: catalog,
-                    outcome: SubmitChangeSetOutcome::PreflightError {
-                        message: "Jira submission preflight failed".into(),
-                    },
+                    outcome: SubmitChangeSetOutcome::PreflightError { message },
                 })
             }
             crate::jira::SubmitBatchOutcome::Conflict(ticket_ids) => {
@@ -479,6 +697,7 @@ impl ComposerService {
                     change_set_id,
                     &mut state,
                     &create_attempts,
+                    &attempt_owner,
                     persisted_revision,
                 )?;
                 let change_set = self.change_set(change_set_id)?;
@@ -490,7 +709,30 @@ impl ComposerService {
                 })
             }
             crate::jira::SubmitBatchOutcome::Completed(outcomes) => {
-                validate_submission_outcomes(&changes, &outcomes)?;
+                if let Err(error) = validate_submission_outcomes(&changes, &outcomes) {
+                    for ticket_id in &create_attempts {
+                        dispatch(
+                            &mut state,
+                            ComposerAction::BlockTicketRetry {
+                                change_set_id: change_set_id.into(),
+                                id: ticket_id.clone(),
+                            },
+                        )?;
+                    }
+                    dispatch(
+                        &mut state,
+                        ComposerAction::ReleaseSubmissionClaim {
+                            change_set_id: change_set_id.into(),
+                            owner_id: attempt_owner,
+                        },
+                    )?;
+                    self.save(
+                        change_set_id,
+                        state.active_set().expect("opened change set is present"),
+                        Some(persisted_revision),
+                    )?;
+                    return Err(error);
+                }
                 let mut tickets = Vec::with_capacity(outcomes.len());
                 for outcome in outcomes {
                     let ticket_id = outcome.id;
@@ -508,10 +750,12 @@ impl ComposerService {
                                 ticket_id,
                                 submitted: true,
                                 retry_blocked: false,
+                                message: None,
                             }
                         }
                         Err(failure) => {
                             let retry_blocked = failure.retry_blocked;
+                            let refresh = failure.refresh;
                             if retry_blocked {
                                 dispatch(
                                     &mut state,
@@ -520,7 +764,7 @@ impl ComposerService {
                                         id: ticket_id.clone(),
                                     },
                                 )?;
-                            } else if let Some(refresh) = failure.refresh {
+                            } else if let Some(refresh) = refresh {
                                 let (original, updated) = *refresh;
                                 dispatch(
                                     &mut state,
@@ -544,11 +788,19 @@ impl ComposerService {
                                 ticket_id,
                                 submitted: false,
                                 retry_blocked,
+                                message: Some(failure.message),
                             }
                         }
                     };
                     tickets.push(result);
                 }
+                dispatch(
+                    &mut state,
+                    ComposerAction::ReleaseSubmissionClaim {
+                        change_set_id: change_set_id.into(),
+                        owner_id: attempt_owner,
+                    },
+                )?;
                 let reconciled = state.active_set().expect("opened change set is present");
                 let (revision, catalog_revision) =
                     self.save(change_set_id, reconciled, Some(persisted_revision))?;
@@ -605,7 +857,7 @@ impl ComposerService {
                     return Err(invalid("Jira ticket key must not be empty"));
                 }
                 let ticket = self.fetch_jira(&jira_key)?;
-                if has_ticket(state, &ticket.key) {
+                if has_ticket_identity(state, &ticket.key) {
                     return Err(invalid("Jira ticket is already included"));
                 }
                 let id = ticket.key.clone();
@@ -704,9 +956,6 @@ impl ComposerService {
                 Ok(vec![ticket_id])
             }
             ChangeSetPatchOperation::SetCommitSelection { ticket_ids } => {
-                if ticket_ids.is_empty() {
-                    return Err(invalid("commit selection must not be empty"));
-                }
                 if ticket_ids.len()
                     != ticket_ids
                         .iter()
@@ -716,7 +965,7 @@ impl ComposerService {
                     return Err(invalid("commit selection contains duplicate ticket IDs"));
                 }
                 for ticket_id in &ticket_ids {
-                    editable_change(state, ticket_id)?;
+                    selectable_change(state, ticket_id)?;
                 }
                 dispatch(
                     state,
@@ -770,11 +1019,9 @@ impl ComposerService {
         change_set_id: &str,
         state: &mut ComposerState,
         create_attempts: &[String],
+        attempt_owner: &str,
         expected_revision: i64,
     ) -> Result<(), ServiceError> {
-        if create_attempts.is_empty() {
-            return Ok(());
-        }
         for ticket_id in create_attempts {
             dispatch(
                 state,
@@ -784,12 +1031,47 @@ impl ComposerService {
                 },
             )?;
         }
+        dispatch(
+            state,
+            ComposerAction::ReleaseSubmissionClaim {
+                change_set_id: change_set_id.into(),
+                owner_id: attempt_owner.into(),
+            },
+        )?;
         self.save(
             change_set_id,
             state.active_set().expect("opened change set is present"),
             Some(expected_revision),
         )?;
         Ok(())
+    }
+
+    fn release_recovered_claim(
+        &self,
+        change_set_id: &str,
+        expected_revision: i64,
+        owner_id: String,
+    ) -> Result<ChangeSetPatchResponse, ServiceError> {
+        let versioned = self.load_expected_change_set(change_set_id, expected_revision)?;
+        let mut state = open_state(versioned.change_set);
+        dispatch(
+            &mut state,
+            ComposerAction::ReleaseSubmissionClaim {
+                change_set_id: change_set_id.into(),
+                owner_id,
+            },
+        )?;
+        let reconciled = state.active_set().expect("opened change set is present");
+        let (revision, catalog_revision) =
+            self.save(change_set_id, reconciled, Some(expected_revision))?;
+        Ok(ChangeSetPatchResponse {
+            change_set: Versioned {
+                revision,
+                value: change_set_view(reconciled.clone()),
+            },
+            catalog_revision,
+            applied: Vec::new(),
+        })
     }
 
     fn save(
@@ -836,13 +1118,26 @@ fn explicit_placement(
     let Some(parent_ticket_id) = parent_ticket_id else {
         return Ok(PlacementTarget::Root);
     };
-    editable_change(state, &parent_ticket_id)?;
+    let parent = change(state, &parent_ticket_id)?;
+    if parent.kind == ChangeKind::Deleted {
+        return Err(invalid("ticket staged for deletion cannot be a parent"));
+    }
+    if !parent.is_submitted() {
+        editable_change(state, &parent_ticket_id)?;
+    }
     Ok(PlacementTarget::ChildOf(parent_ticket_id))
 }
 fn has_ticket(state: &ComposerState, ticket_id: &str) -> bool {
     state
         .active_set()
         .is_some_and(|set| set.tickets.iter().any(|change| change.id == ticket_id))
+}
+fn has_ticket_identity(state: &ComposerState, ticket_id: &str) -> bool {
+    state.active_set().is_some_and(|set| {
+        set.tickets
+            .iter()
+            .any(|change| change.matches_ticket_identity(ticket_id))
+    })
 }
 fn change<'a>(state: &'a ComposerState, ticket_id: &str) -> Result<&'a TicketChange, ServiceError> {
     state
@@ -865,6 +1160,26 @@ fn editable_change<'a>(
     }
     if change.kind == ChangeKind::Deleted {
         return Err(invalid("ticket staged for deletion is not editable"));
+    }
+    Ok(change)
+}
+fn selectable_change<'a>(
+    state: &'a ComposerState,
+    ticket_id: &str,
+) -> Result<&'a TicketChange, ServiceError> {
+    let change = change(state, ticket_id)?;
+    if change.is_submitted() {
+        return Err(ServiceError::SubmittedTicket {
+            ticket_id: ticket_id.into(),
+        });
+    }
+    if state
+        .active_set()
+        .is_some_and(|set| set.submission_attempt.is_some())
+    {
+        return Err(ServiceError::SubmissionClaimed {
+            ticket_id: ticket_id.into(),
+        });
     }
     Ok(change)
 }
@@ -951,6 +1266,7 @@ fn versioned_change_set_view(change_set: VersionedChangeSet) -> Versioned<Change
 }
 fn change_set_view(change_set: ChangeSet) -> ChangeSetView {
     let selected = change_set.selected_ticket_ids.clone();
+    let submission_claimed = change_set.submission_attempt.is_some();
     ChangeSetView {
         id: change_set.id,
         name: change_set.name,
@@ -966,6 +1282,9 @@ fn change_set_view(change_set: ChangeSet) -> ChangeSetView {
                 original: change.original.map(Into::into),
                 updated: change.updated.map(Into::into),
                 submitted: change.submitted.is_some(),
+                retry_blocked: change.retry_blocked,
+                create_attempt: change.create_attempt,
+                submission_claimed,
             })
             .collect(),
     }
@@ -1009,6 +1328,7 @@ impl From<Ticket> for TicketView {
             project_key: value.project_key,
             title: value.title,
             description: value.description,
+            description_safe_to_overwrite: value.description_safe_to_overwrite,
             kind: value.kind.into(),
             status: value.status,
             priority: value.priority,

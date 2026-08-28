@@ -19,7 +19,9 @@ pub(crate) fn markdown_to_adf(markdown: &str) -> Value {
 
 pub(crate) fn adf_is_safe_to_overwrite(value: &Value) -> bool {
     matches!(value, Value::Null | Value::String(_))
-        || (value.is_object() && markdown_to_adf(&adf_to_markdown(value)) == *value)
+        || (value.is_object()
+            && normalize_adf(markdown_to_adf(&adf_to_markdown(value)))
+                == normalize_adf(value.clone()))
 }
 
 fn render_blocks(nodes: &[Value]) -> String {
@@ -191,6 +193,7 @@ fn escape_markdown(text: &str) -> String {
         .replace('`', "\\`")
         .replace('[', "\\[")
         .replace(']', "\\]")
+        .replace('~', "\\~")
 }
 
 fn parse_blocks(markdown: &str) -> Vec<Value> {
@@ -350,6 +353,15 @@ fn parse_inline(text: &str) -> Vec<Value> {
     let mut nodes = Vec::new();
     let mut remaining = text;
     while !remaining.is_empty() {
+        if let Some(rest) = remaining.strip_prefix('\\') {
+            let Some(character) = rest.chars().next() else {
+                push_text(&mut nodes, "\\".into(), Vec::new());
+                break;
+            };
+            push_text(&mut nodes, character.to_string(), Vec::new());
+            remaining = &rest[character.len_utf8()..];
+            continue;
+        }
         if let Some(rest) = remaining.strip_prefix("  \n") {
             nodes.push(json!({ "type": "hardBreak" }));
             remaining = rest;
@@ -385,7 +397,7 @@ fn parse_inline(text: &str) -> Vec<Value> {
 
 fn marked_inline<'a>(source: &'a str, delimiter: &str, mark: &str) -> Option<(Value, &'a str)> {
     let rest = source.strip_prefix(delimiter)?;
-    let end = rest.find(delimiter)?;
+    let end = find_unescaped(rest, delimiter)?;
     let text = &rest[..end];
     let remaining = &rest[end + delimiter.len()..];
     Some((
@@ -400,9 +412,9 @@ fn marked_inline<'a>(source: &'a str, delimiter: &str, mark: &str) -> Option<(Va
 
 fn markdown_link(source: &str) -> Option<(Value, &str)> {
     let label = source.strip_prefix('[')?;
-    let label_end = label.find("](")?;
+    let label_end = find_unescaped(label, "](")?;
     let url = &label[label_end + 2..];
-    let url_end = url.find(')')?;
+    let url_end = find_unescaped(url, ")")?;
     Some((
         json!({
             "type": "text",
@@ -416,12 +428,23 @@ fn markdown_link(source: &str) -> Option<(Value, &str)> {
 fn next_inline_marker(source: &str) -> Option<usize> {
     ["**", "~~", "`", "*", "[", "\n"]
         .into_iter()
-        .filter_map(|marker| source.find(marker))
+        .filter_map(|marker| find_unescaped(source, marker))
         .min()
 }
 
 fn push_text(nodes: &mut Vec<Value>, text: String, marks: Vec<Value>) {
     if text.is_empty() {
+        return;
+    }
+    if let Some(previous) = nodes.last_mut()
+        && previous.get("type") == Some(&Value::String("text".into()))
+        && previous.get("marks") == (!marks.is_empty()).then_some(&Value::Array(marks.clone()))
+    {
+        previous["text"] = Value::String(format!(
+            "{}{}",
+            previous["text"].as_str().unwrap_or_default(),
+            text
+        ));
         return;
     }
     let mut node = json!({ "type": "text", "text": text });
@@ -448,6 +471,55 @@ fn unescape_markdown(text: &str) -> String {
         output.push('\\');
     }
     output
+}
+
+fn find_unescaped(source: &str, marker: &str) -> Option<usize> {
+    source.match_indices(marker).find_map(|(index, _)| {
+        let escaped = source[..index]
+            .chars()
+            .rev()
+            .take_while(|character| *character == '\\')
+            .count()
+            % 2
+            == 1;
+        (!escaped).then_some(index)
+    })
+}
+
+fn normalize_adf(mut value: Value) -> Value {
+    normalize_adf_node(&mut value);
+    value
+}
+
+fn normalize_adf_node(value: &mut Value) {
+    let Some(node) = value.as_object_mut() else {
+        return;
+    };
+    let Some(children) = node.get_mut("content").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for child in children.iter_mut() {
+        normalize_adf_node(child);
+    }
+    let mut normalized = Vec::with_capacity(children.len());
+    for child in std::mem::take(children) {
+        let can_merge = normalized.last().is_some_and(|previous: &Value| {
+            previous.get("type") == Some(&Value::String("text".into()))
+                && child.get("type") == Some(&Value::String("text".into()))
+                && previous.get("marks") == child.get("marks")
+        });
+        if can_merge {
+            let previous = normalized.last_mut().expect("text node exists");
+            previous["text"] = Value::String(format!(
+                "{}{}",
+                previous["text"].as_str().unwrap_or_default(),
+                child["text"].as_str().unwrap_or_default()
+            ));
+        } else {
+            normalized.push(child);
+        }
+    }
+    *children = normalized;
 }
 
 fn node_type(node: &Map<String, Value>) -> Option<&str> {

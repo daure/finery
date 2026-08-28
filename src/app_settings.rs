@@ -13,6 +13,8 @@ pub(crate) const JIRA_DEFAULT_PROJECT_SETTING: &str = "jira.default_project";
 pub(crate) const JIRA_DEFAULT_BOARD_SETTING: &str = "jira.default_board";
 pub(crate) const JIRA_STORY_POINTS_FIELD_ID_SETTING: &str = "jira.story_points_field_id";
 pub(crate) const JIRA_STORY_POINTS_BOARD_ID_SETTING: &str = "jira.story_points_board_id";
+pub(crate) const JIRA_STORY_POINTS_DISCOVERY_COMPLETE_SETTING: &str =
+    "jira.story_points_discovery_complete";
 pub(crate) const SPEED_READER_WPM_SETTING: &str = "reader.wpm";
 pub(crate) const SPEED_READER_BLOCK_DELAY_SETTING: &str = "reader.markdown_block_pause_ms";
 pub(crate) const COMPOSER_ADD_SIBLING_KEY_SETTING: &str = "composer.add_sibling_key";
@@ -42,42 +44,6 @@ pub(crate) const COMPOSER_DELETE_KEY_SETTING: &str = "composer.delete_key";
 pub(crate) const COMPOSER_REMOVE_KEY_SETTING: &str = "composer.remove_key";
 pub(crate) const COMPOSER_RESTORE_KEY_SETTING: &str = "composer.restore_key";
 pub(crate) const COMPOSER_RESET_KEY_SETTING: &str = "composer.reset_key";
-
-pub(crate) const COMPOSER_BINDING_SETTINGS: [(&str, &str); 27] = [
-    (COMPOSER_ADD_SIBLING_KEY_SETTING, "Add sibling"),
-    (COMPOSER_ADD_CHILD_KEY_SETTING, "Add child"),
-    (COMPOSER_COMMIT_KEY_SETTING, "Commit"),
-    (COMPOSER_REFRESH_KEY_SETTING, "Refresh"),
-    (COMPOSER_VIEW_KEY_SETTING, "View"),
-    (COMPOSER_TITLE_KEY_SETTING, "Title"),
-    (COMPOSER_DESCRIPTION_TAB_KEY_SETTING, "Description tab"),
-    (COMPOSER_PROPERTIES_TAB_KEY_SETTING, "Properties tab"),
-    (COMPOSER_DESCRIPTION_FOCUS_KEY_SETTING, "Description focus"),
-    (
-        COMPOSER_DESCRIPTION_EDITOR_KEY_SETTING,
-        "Description editor",
-    ),
-    (
-        COMPOSER_DESCRIPTION_READER_KEY_SETTING,
-        "Description reader",
-    ),
-    (COMPOSER_ISSUE_TYPE_KEY_SETTING, "Issue type"),
-    (COMPOSER_PARENT_KEY_SETTING, "Parent"),
-    (COMPOSER_STATUS_KEY_SETTING, "Status"),
-    (COMPOSER_PRIORITY_KEY_SETTING, "Priority"),
-    (COMPOSER_ASSIGNEE_KEY_SETTING, "Assignee"),
-    (COMPOSER_CREATE_SUBMIT_KEY_SETTING, "Create submit"),
-    (COMPOSER_CREATE_CONFIRM_KEY_SETTING, "Create confirm"),
-    (COMPOSER_DIALOG_CANCEL_KEY_SETTING, "Dialog cancel"),
-    (COMPOSER_SUBMIT_CONFIRM_KEY_SETTING, "Submit confirm"),
-    (COMPOSER_REPARENT_CONFIRM_KEY_SETTING, "Reparent confirm"),
-    (COMPOSER_TICKET_ACTION_KEY_SETTING, "Ticket action"),
-    (COMPOSER_RESTORE_RESET_KEY_SETTING, "Restore or reset"),
-    (COMPOSER_DELETE_KEY_SETTING, "Delete"),
-    (COMPOSER_REMOVE_KEY_SETTING, "Remove"),
-    (COMPOSER_RESTORE_KEY_SETTING, "Restore"),
-    (COMPOSER_RESET_KEY_SETTING, "Reset"),
-];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ComposerKeyBinding {
@@ -311,6 +277,7 @@ pub(crate) struct AppSettings {
     pub(crate) jira_default_board: String,
     pub(crate) jira_story_points_field_id: String,
     pub(crate) jira_story_points_board_id: String,
+    pub(crate) jira_story_points_discovery_complete: bool,
     pub(crate) speed_reader: SpeedReaderSettings,
     pub(crate) composer_keys: ComposerKeyBindings,
 }
@@ -341,6 +308,9 @@ impl AppSettings {
                 .get(JIRA_STORY_POINTS_BOARD_ID_SETTING)
                 .cloned()
                 .unwrap_or_default(),
+            jira_story_points_discovery_complete: values
+                .get(JIRA_STORY_POINTS_DISCOVERY_COMPLETE_SETTING)
+                .is_some_and(|value| value == "true"),
             speed_reader: SpeedReaderSettings {
                 wpm: values
                     .get(SPEED_READER_WPM_SETTING)
@@ -372,6 +342,10 @@ impl AppSettings {
             (
                 JIRA_STORY_POINTS_BOARD_ID_SETTING,
                 self.jira_story_points_board_id.clone(),
+            ),
+            (
+                JIRA_STORY_POINTS_DISCOVERY_COMPLETE_SETTING,
+                self.jira_story_points_discovery_complete.to_string(),
             ),
             (SPEED_READER_WPM_SETTING, self.speed_reader.wpm.to_string()),
             (
@@ -500,32 +474,24 @@ impl AppSettings {
             .collect()
     }
 
-    pub(crate) fn composer_binding_value(&self, setting: &str) -> String {
-        self.values()
-            .into_iter()
-            .find_map(|(key, value)| (key == setting).then_some(value))
-            .unwrap_or_default()
+    pub(crate) fn set_manual_story_points_field(&mut self, field_id: String) {
+        self.jira_story_points_field_id = field_id;
+        self.jira_story_points_board_id.clear();
+        self.jira_story_points_discovery_complete = false;
     }
 
-    pub(crate) fn update_composer_binding(
-        &mut self,
-        setting: &str,
-        value: String,
-    ) -> Result<(), String> {
-        if !COMPOSER_BINDING_SETTINGS
-            .iter()
-            .any(|(candidate, _)| *candidate == setting)
-        {
-            return Err(format!("Unknown Composer binding setting `{setting}`"));
+    pub(crate) fn invalidate_discovered_story_points(&mut self) {
+        if self.jira_story_points_board_id.is_empty() {
+            return;
         }
-        let mut values = self
-            .values()
-            .into_iter()
-            .map(|(key, value)| (key.to_owned(), value))
-            .collect::<HashMap<_, _>>();
-        values.insert(setting.to_owned(), value);
-        self.composer_keys = ComposerKeyBindings::from_values(&values)?;
-        Ok(())
+        self.jira_story_points_field_id.clear();
+        self.jira_story_points_board_id.clear();
+        self.jira_story_points_discovery_complete = false;
+    }
+
+    pub(crate) fn story_points_field_is_manual(&self) -> bool {
+        !self.jira_story_points_field_id.trim().is_empty()
+            && self.jira_story_points_board_id.trim().is_empty()
     }
 
     pub(crate) fn configured_jira(&self) -> Option<(&str, &str, &str)> {

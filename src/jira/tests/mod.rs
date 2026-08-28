@@ -1,3 +1,9 @@
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    thread,
+};
+
 use serde_json::json;
 
 use super::{
@@ -6,9 +12,9 @@ use super::{
     commit_order, create_available_statuses_from_value, create_issue_fields, create_issue_type,
     create_issue_types_from_value, create_response_failure, created_issue_failure,
     discover_story_points, issue_fields, options_from_values, rank_payload, same_jira_content,
-    search_jql, select_backlog_board, should_discover_story_points, story_points_field_id,
-    story_points_warning, submit_failure, submit_ordered_changes, text_search_jql, to_ticket,
-    to_work_item, update_payload,
+    search_jql, select_backlog_board, should_discover_story_points, sprint_issues,
+    story_points_field_for_load, story_points_field_id, story_points_warning, submit_failure,
+    submit_ordered_changes, text_search_jql, to_ticket, to_work_item, update_payload,
 };
 use crate::{
     app_settings::AppSettings,
@@ -582,6 +588,41 @@ fn failed_story_points_discovery_warns_and_retries_without_a_persisted_field() {
 }
 
 #[test]
+fn legacy_discovered_story_points_field_loads_when_rediscovery_fails() {
+    let legacy = AppSettings {
+        jira_story_points_field_id: "customfield_10016".into(),
+        jira_story_points_board_id: "1".into(),
+        ..AppSettings::default()
+    };
+    let (discovered, warning) =
+        discover_story_points(&legacy, 1, Err("Jira returned 403: forbidden".into()));
+
+    assert!(should_discover_story_points(&legacy, 1));
+    assert!(discovered.is_none());
+    assert!(warning.is_some());
+    assert_eq!(
+        story_points_field_for_load(&legacy, discovered.as_ref()),
+        Some("customfield_10016")
+    );
+}
+
+#[test]
+fn empty_story_point_field_retries_until_absence_is_confirmed() {
+    let incomplete = AppSettings {
+        jira_story_points_board_id: "1".into(),
+        ..AppSettings::default()
+    };
+    let complete = AppSettings {
+        jira_story_points_board_id: "1".into(),
+        jira_story_points_discovery_complete: true,
+        ..AppSettings::default()
+    };
+
+    assert!(should_discover_story_points(&incomplete, 1));
+    assert!(!should_discover_story_points(&complete, 1));
+}
+
+#[test]
 fn backlog_work_items_parse_numeric_story_points() {
     let work_item = to_work_item(
         JiraIssue {
@@ -654,4 +695,66 @@ fn backlog_pagination_continues_when_jira_omits_total() {
     };
 
     assert!(!backlog_page_complete(&page, page.issues.len()));
+}
+
+#[test]
+fn sprint_loading_uses_agile_offset_pagination_across_pages() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for (index, issue) in ["FIN-1", "FIN-2"].into_iter().enumerate() {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            let size = stream.read(&mut request).unwrap();
+            requests.push(String::from_utf8_lossy(&request[..size]).into_owned());
+            let body = json!({
+                "issues": [{ "key": issue, "fields": { "summary": issue } }],
+                "isLast": false,
+                "startAt": index,
+                "maxResults": 1,
+                "total": 2
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        }
+        requests
+    });
+
+    let items = sprint_issues(
+        &reqwest::blocking::Client::new(),
+        &base_url,
+        "user@example.com",
+        "token",
+        42,
+        None,
+    )
+    .unwrap();
+    let requests = server.join().unwrap();
+
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item.key.as_str())
+            .collect::<Vec<_>>(),
+        ["FIN-1", "FIN-2"]
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.contains("/rest/agile/1.0/sprint/42/issue"))
+    );
+    assert!(requests[0].contains("startAt=0"));
+    assert!(requests[1].contains("startAt=1"));
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.contains("nextPageToken"))
+    );
 }

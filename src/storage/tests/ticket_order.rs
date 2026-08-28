@@ -15,6 +15,7 @@ fn ticket_changes_load_in_persisted_sibling_order() {
             name: "Order".into(),
             closed: false,
             selected_ticket_ids: Vec::new(),
+            submission_attempt: None,
             tickets: vec![
                 TicketChange {
                     id: "OPS-9".into(),
@@ -70,6 +71,7 @@ fn column_order_overrides_legacy_json_order_and_round_trips() {
             name: "Legacy order".into(),
             closed: false,
             selected_ticket_ids: Vec::new(),
+            submission_attempt: None,
             tickets: vec![
                 TicketChange {
                     id: "OPS-2".into(),

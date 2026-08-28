@@ -7,7 +7,7 @@ use sqlx::{
     sqlite::SqliteConnectOptions,
 };
 
-use crate::store::composer::{ChangeSet, TicketChange};
+use crate::store::composer::{ChangeSet, SubmissionAttempt, TicketChange};
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
@@ -148,23 +148,34 @@ impl Storage {
         &self,
         id: &str,
     ) -> Result<Option<VersionedChangeSet>, Box<dyn std::error::Error>> {
+        let mut transaction = self.pool.begin().await?;
+        if self.dialect == SqlDialect::Postgres {
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                .execute(&mut *transaction)
+                .await?;
+        }
         let closed_column = match self.dialect {
             SqlDialect::Sqlite => "CAST(closed AS INTEGER) AS closed",
             SqlDialect::Postgres => "closed",
         };
         let query = format!(
-            "SELECT public_id, name, selected_ticket_ids, {closed_column}, revision FROM change_sets WHERE public_id = {}",
+            "SELECT public_id, name, selected_ticket_ids, submission_attempt, {closed_column}, revision FROM change_sets WHERE public_id = {}",
             self.dialect.placeholder(1)
         );
         let Some(row) = sqlx::query(AssertSqlSafe(query.as_str()))
             .bind(id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *transaction)
             .await?
         else {
+            transaction.commit().await?;
             return Ok(None);
         };
 
-        Ok(Some(self.versioned_change_set_from_row(row).await?))
+        let change_set = self
+            .versioned_change_set_from_row_in_transaction(row, &mut transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(Some(change_set))
     }
 
     pub(crate) async fn load_versioned_change_sets(
@@ -181,7 +192,7 @@ impl Storage {
             SqlDialect::Postgres => "closed",
         };
         let query = format!(
-            "SELECT public_id, name, selected_ticket_ids, {closed_column}, revision FROM change_sets ORDER BY created_at, public_id"
+            "SELECT public_id, name, selected_ticket_ids, submission_attempt, {closed_column}, revision FROM change_sets ORDER BY created_at, public_id"
         );
         let rows = sqlx::query(AssertSqlSafe(query.as_str()))
             .fetch_all(&mut *transaction)
@@ -222,16 +233,18 @@ impl Storage {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut transaction = self.pool.begin().await?;
         let upsert = format!(
-            "INSERT INTO change_sets (public_id, name, selected_ticket_ids, closed) VALUES ({}, {}, {}, {}) ON CONFLICT (public_id) DO UPDATE SET name = excluded.name, selected_ticket_ids = excluded.selected_ticket_ids, closed = excluded.closed, revision = change_sets.revision + 1, updated_at = CURRENT_TIMESTAMP",
+            "INSERT INTO change_sets (public_id, name, selected_ticket_ids, submission_attempt, closed) VALUES ({}, {}, {}, {}, {}) ON CONFLICT (public_id) DO UPDATE SET name = excluded.name, selected_ticket_ids = excluded.selected_ticket_ids, submission_attempt = excluded.submission_attempt, closed = excluded.closed, revision = change_sets.revision + 1, updated_at = CURRENT_TIMESTAMP",
             self.dialect.placeholder(1),
             self.dialect.placeholder(2),
             self.dialect.placeholder(3),
-            self.dialect.placeholder(4)
+            self.dialect.placeholder(4),
+            self.dialect.placeholder(5)
         );
         sqlx::query(AssertSqlSafe(upsert.as_str()))
             .bind(&set.id)
             .bind(&set.name)
             .bind(serde_json::to_string(&set.selected_ticket_ids)?)
+            .bind(serde_json::to_string(&set.submission_attempt)?)
             .bind(set.closed)
             .execute(&mut *transaction)
             .await?;
@@ -250,16 +263,18 @@ impl Storage {
         let change_set_revision = match expected_revision {
             Some(revision) => {
                 let update = format!(
-                    "UPDATE change_sets SET name = {}, selected_ticket_ids = {}, closed = {}, revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE public_id = {} AND revision = {}",
+                    "UPDATE change_sets SET name = {}, selected_ticket_ids = {}, submission_attempt = {}, closed = {}, revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE public_id = {} AND revision = {}",
                     self.dialect.placeholder(1),
                     self.dialect.placeholder(2),
                     self.dialect.placeholder(3),
                     self.dialect.placeholder(4),
-                    self.dialect.placeholder(5)
+                    self.dialect.placeholder(5),
+                    self.dialect.placeholder(6)
                 );
                 let result = sqlx::query(AssertSqlSafe(update.as_str()))
                     .bind(&set.name)
                     .bind(serde_json::to_string(&set.selected_ticket_ids)?)
+                    .bind(serde_json::to_string(&set.submission_attempt)?)
                     .bind(set.closed)
                     .bind(&set.id)
                     .bind(revision)
@@ -272,16 +287,18 @@ impl Storage {
             }
             None => {
                 let insert = format!(
-                    "INSERT INTO change_sets (public_id, name, selected_ticket_ids, closed) VALUES ({}, {}, {}, {}) ON CONFLICT (public_id) DO NOTHING",
+                    "INSERT INTO change_sets (public_id, name, selected_ticket_ids, submission_attempt, closed) VALUES ({}, {}, {}, {}, {}) ON CONFLICT (public_id) DO NOTHING",
                     self.dialect.placeholder(1),
                     self.dialect.placeholder(2),
                     self.dialect.placeholder(3),
-                    self.dialect.placeholder(4)
+                    self.dialect.placeholder(4),
+                    self.dialect.placeholder(5)
                 );
                 let result = sqlx::query(AssertSqlSafe(insert.as_str()))
                     .bind(&set.id)
                     .bind(&set.name)
                     .bind(serde_json::to_string(&set.selected_ticket_ids)?)
+                    .bind(serde_json::to_string(&set.submission_attempt)?)
                     .bind(set.closed)
                     .execute(&mut *transaction)
                     .await?;
@@ -297,45 +314,6 @@ impl Storage {
         Ok(ConditionalSaveChangeSetOutcome::Saved {
             change_set_revision,
             catalog_revision,
-        })
-    }
-
-    async fn versioned_change_set_from_row(
-        &self,
-        row: sqlx::any::AnyRow,
-    ) -> Result<VersionedChangeSet, Box<dyn std::error::Error>> {
-        let id: String = row.try_get("public_id")?;
-        let closed = match self.dialect {
-            SqlDialect::Sqlite => row.try_get::<i64, _>("closed")? != 0,
-            SqlDialect::Postgres => row.try_get("closed")?,
-        };
-        let query = format!(
-            "SELECT sibling_order, payload FROM ticket_changes WHERE change_set_id = {} ORDER BY sibling_order, ticket_id",
-            self.dialect.placeholder(1)
-        );
-        let tickets = sqlx::query(AssertSqlSafe(query.as_str()))
-            .bind(&id)
-            .fetch_all(&self.pool)
-            .await?
-            .into_iter()
-            .map(|row| {
-                let payload: String = row.try_get("payload")?;
-                let mut change = serde_json::from_str::<TicketChange>(&payload)?;
-                change.sibling_order = usize::try_from(row.try_get::<i64, _>("sibling_order")?)?;
-                Ok(change)
-            })
-            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
-        Ok(VersionedChangeSet {
-            change_set: ChangeSet {
-                id,
-                name: row.try_get("name")?,
-                tickets,
-                selected_ticket_ids: serde_json::from_str(
-                    &row.try_get::<String, _>("selected_ticket_ids")?,
-                )?,
-                closed,
-            },
-            revision: row.try_get("revision")?,
         })
     }
 
@@ -373,6 +351,11 @@ impl Storage {
                 selected_ticket_ids: serde_json::from_str(
                     &row.try_get::<String, _>("selected_ticket_ids")?,
                 )?,
+                submission_attempt: row
+                    .try_get::<Option<String>, _>("submission_attempt")?
+                    .map(|value| serde_json::from_str::<Option<SubmissionAttempt>>(&value))
+                    .transpose()?
+                    .flatten(),
                 closed,
             },
             revision: row.try_get("revision")?,

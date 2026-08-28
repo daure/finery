@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -67,6 +70,29 @@ pub(crate) struct TicketChange {
     pub sibling_order: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SubmissionAttempt {
+    pub owner_id: String,
+    pub ticket_ids: Vec<String>,
+    pub phase: SubmissionAttemptPhase,
+}
+
+pub(crate) fn submission_attempt_owner() -> String {
+    static NEXT_ATTEMPT: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "{}-{}",
+        std::process::id(),
+        NEXT_ATTEMPT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum SubmissionAttemptPhase {
+    Claimed,
+    CreateAttemptsMarked,
+    JiraSubmissionStarted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PlacementTarget {
     Root,
@@ -110,6 +136,36 @@ impl TicketChange {
     pub(crate) fn is_submitted(&self) -> bool {
         self.submitted.is_some()
     }
+
+    pub(crate) fn matches_ticket_identity(&self, key: &str) -> bool {
+        self.id == key
+            || self
+                .original
+                .as_ref()
+                .is_some_and(|ticket| ticket.key == key)
+            || self
+                .updated
+                .as_ref()
+                .is_some_and(|ticket| ticket.key == key)
+            || self.submitted.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .original
+                    .as_ref()
+                    .is_some_and(|ticket| ticket.key == key)
+                    || snapshot
+                        .updated
+                        .as_ref()
+                        .is_some_and(|ticket| ticket.key == key)
+            })
+    }
+}
+
+impl ChangeSet {
+    pub(crate) fn submission_attempt_ticket_id(&self) -> Option<&str> {
+        self.submission_attempt
+            .as_ref()
+            .and_then(|attempt| attempt.ticket_ids.first().map(String::as_str))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +177,8 @@ pub(crate) struct ChangeSet {
     pub selected_ticket_ids: Vec<String>,
     #[serde(default)]
     pub closed: bool,
+    #[serde(default)]
+    pub submission_attempt: Option<SubmissionAttempt>,
 }
 
 impl ChangeSet {
@@ -223,6 +281,23 @@ pub(crate) enum ComposerAction {
         change_set_id: String,
         id: String,
     },
+    ClaimSubmission {
+        change_set_id: String,
+        ids: Vec<String>,
+        owner_id: String,
+    },
+    MarkSubmissionCreateAttempts {
+        change_set_id: String,
+        owner_id: String,
+    },
+    MarkSubmissionJiraStarted {
+        change_set_id: String,
+        owner_id: String,
+    },
+    ReleaseSubmissionClaim {
+        change_set_id: String,
+        owner_id: String,
+    },
 }
 
 impl ComposerState {
@@ -284,6 +359,7 @@ impl ComposerState {
                         },
                     ],
                     selected_ticket_ids: Vec::new(),
+                    submission_attempt: None,
                 },
                 ChangeSet {
                     id: "CS-2".into(),
@@ -291,6 +367,7 @@ impl ComposerState {
                     tickets: Vec::new(),
                     selected_ticket_ids: Vec::new(),
                     closed: false,
+                    submission_attempt: None,
                 },
             ],
             active_change_set: None,
@@ -337,7 +414,11 @@ impl ComposerState {
     }
 
     pub(crate) fn begin_submission(&mut self, change_set_id: &str) -> bool {
-        if self.change_sets.iter().any(|set| set.id == change_set_id) {
+        if self
+            .change_sets
+            .iter()
+            .any(|set| set.id == change_set_id && set.submission_attempt.is_none())
+        {
             self.submitting_change_sets.insert(change_set_id.into());
             true
         } else {
@@ -351,19 +432,17 @@ impl ComposerState {
 
     pub(crate) fn change_set_is_submitting(&self, change_set_id: &str) -> bool {
         self.submitting_change_sets.contains(change_set_id)
+            || self
+                .change_sets
+                .iter()
+                .find(|set| set.id == change_set_id)
+                .is_some_and(|set| set.submission_attempt.is_some())
     }
 
     fn active_change_set_is_submitting(&self) -> bool {
         self.active_change_set
             .as_deref()
             .is_some_and(|id| self.change_set_is_submitting(id))
-    }
-
-    pub(crate) fn has_change(&self, change_set_id: &str, id: &str) -> bool {
-        self.change_sets
-            .iter()
-            .find(|set| set.id == change_set_id)
-            .is_some_and(|set| set.tickets.iter().any(|change| change.id == id))
     }
 
     pub(crate) fn remote_queries_allowed(&self) -> bool {
@@ -612,10 +691,8 @@ impl ComposerState {
             if change.is_submitted() {
                 continue;
             }
-            let Some(parent) = self
-                .changes_for_change(change)
-                .and_then(|ticket| ticket.parent_key.as_deref())
-            else {
+            let parent = change_parent(change);
+            let Some(parent) = parent.as_deref() else {
                 continue;
             };
             if !parent.starts_with("NEW-") {
@@ -681,6 +758,7 @@ impl ComposerState {
                     tickets: Vec::new(),
                     selected_ticket_ids: Vec::new(),
                     closed: false,
+                    submission_attempt: None,
                 });
             }
             ComposerAction::DeleteChangeSet(id) => {
@@ -773,6 +851,23 @@ impl ComposerState {
             ComposerAction::ResolveCreateAttempt { change_set_id, id } => {
                 self.resolve_create_attempt(&change_set_id, &id)?
             }
+            ComposerAction::ClaimSubmission {
+                change_set_id,
+                ids,
+                owner_id,
+            } => self.claim_submission(&change_set_id, &ids, owner_id)?,
+            ComposerAction::MarkSubmissionCreateAttempts {
+                change_set_id,
+                owner_id,
+            } => self.mark_submission_create_attempts(&change_set_id, &owner_id)?,
+            ComposerAction::MarkSubmissionJiraStarted {
+                change_set_id,
+                owner_id,
+            } => self.mark_submission_jira_started(&change_set_id, &owner_id)?,
+            ComposerAction::ReleaseSubmissionClaim {
+                change_set_id,
+                owner_id,
+            } => self.release_submission_claim(&change_set_id, &owner_id)?,
         }
         Ok(())
     }
@@ -793,13 +888,25 @@ impl ComposerState {
         {
             return;
         }
+        let submission_in_progress = self
+            .change_sets
+            .iter()
+            .find(|set| set.id == change_set_id)
+            .is_some_and(|set| set.submission_attempt.is_some());
         let Some(change) = self
             .change_set_mut(change_set_id)
             .and_then(|set| set.tickets.iter_mut().find(|change| change.id == id))
         else {
             return;
         };
-        if !change.is_submitted() && change.original.is_some() {
+        if !change.is_submitted() && !submission_in_progress && change.original.is_some() {
+            change.updated = change.updated.as_ref().map(|updated| {
+                rebase_ticket(
+                    change.original.as_ref().expect("original exists"),
+                    updated,
+                    &ticket,
+                )
+            });
             change.original = Some(ticket.clone());
         }
         self.sources.insert((change_set_id.to_owned(), id), ticket);
@@ -905,12 +1012,7 @@ impl ComposerState {
         let existing_id = self.active_set().and_then(|set| {
             set.tickets
                 .iter()
-                .find(|change| {
-                    change.id == id
-                        || self
-                            .changes_for_change(change)
-                            .is_some_and(|candidate| candidate.key == id)
-                })
+                .find(|change| change.matches_ticket_identity(&id))
                 .map(|change| change.id.clone())
         });
         if let Some(existing_id) = existing_id {
@@ -1104,8 +1206,11 @@ impl ComposerState {
             .and_then(|set| set.tickets.iter_mut().find(|change| change.id == id))
             .ok_or(PlacementError::UnknownTicket)?;
         sources.insert((change_set_id.to_owned(), id.to_owned()), original.clone());
+        change.updated = change
+            .original
+            .as_ref()
+            .map(|prior_original| rebase_ticket(prior_original, &updated, &original));
         change.original = Some(original);
-        change.updated = Some(updated);
         change.kind = ChangeKind::Modified;
         change.retry_blocked = false;
         change.create_attempt = false;
@@ -1147,6 +1252,75 @@ impl ComposerState {
             .and_then(|set| set.tickets.iter_mut().find(|change| change.id == id))
             .ok_or(PlacementError::UnknownTicket)?;
         change.create_attempt = false;
+        Ok(())
+    }
+
+    fn claim_submission(
+        &mut self,
+        change_set_id: &str,
+        ids: &[String],
+        owner_id: String,
+    ) -> Result<(), PlacementError> {
+        let set = self
+            .change_set_mut(change_set_id)
+            .ok_or(PlacementError::UnknownTicket)?;
+        if set.submission_attempt.is_none() {
+            set.submission_attempt = Some(SubmissionAttempt {
+                owner_id,
+                ticket_ids: ids.to_vec(),
+                phase: SubmissionAttemptPhase::Claimed,
+            });
+        }
+        Ok(())
+    }
+
+    fn mark_submission_create_attempts(
+        &mut self,
+        change_set_id: &str,
+        owner_id: &str,
+    ) -> Result<(), PlacementError> {
+        let set = self
+            .change_set_mut(change_set_id)
+            .ok_or(PlacementError::UnknownTicket)?;
+        if let Some(attempt) = set.submission_attempt.as_mut()
+            && attempt.owner_id == owner_id
+        {
+            attempt.phase = SubmissionAttemptPhase::CreateAttemptsMarked;
+        }
+        Ok(())
+    }
+
+    fn mark_submission_jira_started(
+        &mut self,
+        change_set_id: &str,
+        owner_id: &str,
+    ) -> Result<(), PlacementError> {
+        let set = self
+            .change_set_mut(change_set_id)
+            .ok_or(PlacementError::UnknownTicket)?;
+        if let Some(attempt) = set.submission_attempt.as_mut()
+            && attempt.owner_id == owner_id
+        {
+            attempt.phase = SubmissionAttemptPhase::JiraSubmissionStarted;
+        }
+        Ok(())
+    }
+
+    fn release_submission_claim(
+        &mut self,
+        change_set_id: &str,
+        owner_id: &str,
+    ) -> Result<(), PlacementError> {
+        let set = self
+            .change_set_mut(change_set_id)
+            .ok_or(PlacementError::UnknownTicket)?;
+        if set
+            .submission_attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.owner_id == owner_id)
+        {
+            set.submission_attempt = None;
+        }
         Ok(())
     }
 
@@ -1488,6 +1662,49 @@ impl ComposerState {
     }
 }
 
+pub(crate) fn change_parent(change: &TicketChange) -> Option<String> {
+    let ticket = if change.kind == ChangeKind::Deleted {
+        change.original.as_ref()
+    } else {
+        change.updated.as_ref().or(change.original.as_ref())
+    };
+    ticket.and_then(|ticket| ticket.parent_key.clone())
+}
+
+pub(crate) fn rebase_ticket(original: &Ticket, updated: &Ticket, refreshed: &Ticket) -> Ticket {
+    let mut rebased = refreshed.clone();
+    if original.project_key != updated.project_key {
+        rebased.project_key = updated.project_key.clone();
+    }
+    if original.title != updated.title {
+        rebased.title = updated.title.clone();
+    }
+    if original.description != updated.description {
+        rebased.description = updated.description.clone();
+    }
+    if original.kind != updated.kind {
+        rebased.kind = updated.kind;
+    }
+    if original.status != updated.status {
+        rebased.status = updated.status.clone();
+    }
+    if original.priority != updated.priority {
+        rebased.priority = updated.priority.clone();
+    }
+    if original.assignee != updated.assignee {
+        rebased.assignee = updated.assignee.clone();
+    }
+    if original.assignee_account_id != updated.assignee_account_id {
+        rebased.assignee_account_id = updated.assignee_account_id.clone();
+    }
+    if original.parent_key != updated.parent_key {
+        rebased.parent_key = updated.parent_key.clone();
+        rebased.parent_title = updated.parent_title.clone();
+        rebased.parent_kind = updated.parent_kind;
+    }
+    rebased
+}
+
 fn next_ticket_id(change_sets: &[ChangeSet]) -> usize {
     change_sets
         .iter()
@@ -1560,6 +1777,7 @@ impl ComposerAction {
                 | Self::UpdateStatus(_)
                 | Self::UpdatePriority(_)
                 | Self::UpdateAssignee { .. }
+                | Self::SetSelectedTickets(_)
         )
     }
 
@@ -1586,6 +1804,8 @@ impl ComposerAction {
                 | Self::BlockTicketRetry { .. }
                 | Self::MarkCreateAttempts { .. }
                 | Self::ResolveCreateAttempt { .. }
+                | Self::ClaimSubmission { .. }
+                | Self::ReleaseSubmissionClaim { .. }
         )
     }
 }

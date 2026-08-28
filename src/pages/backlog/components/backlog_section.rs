@@ -9,8 +9,8 @@ use ratatui::{
 use tuicore::{
     CellContext, Column, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget, Key,
     KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    ListControl, ListControlEvent, ListControlKeyBindings, RenderCtx, SelectionGlyphs,
-    SelectionMode, SelectionTrigger, TickResult, TreeAdapter, TuiEvent, TuiNode,
+    ListControl, ListControlEvent, ListControlKeyBindings, RenderCtx, SelectionMode,
+    SelectionTrigger, TickResult, TreeAdapter, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -44,6 +44,52 @@ enum BacklogRowContent {
     WorkItem(WorkItemRow),
 }
 
+#[derive(Clone, Copy)]
+enum NavigationEndpoint {
+    First,
+    Last,
+}
+
+#[derive(Clone, Default)]
+pub(in crate::pages::backlog) struct BacklogSectionNavigation {
+    entry: Rc<Cell<Option<NavigationEndpoint>>>,
+    previous: Option<Rc<Cell<Option<NavigationEndpoint>>>>,
+    next: Option<Rc<Cell<Option<NavigationEndpoint>>>>,
+}
+
+impl BacklogSectionNavigation {
+    fn new(
+        entry: Rc<Cell<Option<NavigationEndpoint>>>,
+        previous: Option<Rc<Cell<Option<NavigationEndpoint>>>>,
+        next: Option<Rc<Cell<Option<NavigationEndpoint>>>>,
+    ) -> Self {
+        Self {
+            entry,
+            previous,
+            next,
+        }
+    }
+
+    pub(in crate::pages::backlog) fn sequence(count: usize) -> Vec<Self> {
+        let entries = (0..count)
+            .map(|_| Rc::new(Cell::new(None)))
+            .collect::<Vec<_>>();
+        entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                Self::new(
+                    entry.clone(),
+                    index
+                        .checked_sub(1)
+                        .map(|previous| entries[previous].clone()),
+                    entries.get(index + 1).cloned(),
+                )
+            })
+            .collect()
+    }
+}
+
 pub(in crate::pages::backlog) fn backlog_section(
     section_id: impl Into<String>,
     title: impl Into<String>,
@@ -52,6 +98,7 @@ pub(in crate::pages::backlog) fn backlog_section(
     expanded: bool,
     events: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
+    navigation: BacklogSectionNavigation,
 ) -> BacklogSection {
     let section_id = section_id.into();
     let parent_id = format!("parent:{section_id}");
@@ -67,9 +114,8 @@ pub(in crate::pages::backlog) fn backlog_section(
         |row, parent_id| row.parent_id = parent_id,
     ))
     .expanded(expanded.then_some(parent_id))
-    .selection_mode(SelectionMode::Multi)
+    .selection_mode(SelectionMode::None)
     .selection_trigger(SelectionTrigger::Manual)
-    .selection_glyphs(SelectionGlyphs::NERD_FONT)
     .max_rows(usize::MAX)
     .panel_visible(false)
     .keybindings(
@@ -101,6 +147,7 @@ pub(in crate::pages::backlog) fn backlog_section(
         control,
         events,
         move_locked,
+        navigation,
     }
 }
 
@@ -110,24 +157,27 @@ pub(in crate::pages::backlog) struct BacklogSection {
     control: ListControl<BacklogRow, String>,
     events: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
+    navigation: BacklogSectionNavigation,
 }
 
 impl BacklogSection {
     pub(in crate::pages::backlog) fn blocks_move_gesture(&self, event: &TuiEvent) -> bool {
-        blocks_move_gesture(
-            self.move_locked.get(),
-            self.control.transient_selected_ids().len(),
-            event,
-        )
+        blocks_move_gesture(self.move_locked.get(), event)
     }
 
     #[cfg(test)]
-    pub(in crate::pages::backlog) fn blocks_move_gesture_with_selection_count(
-        &self,
-        selected_ticket_count: usize,
-        event: &TuiEvent,
-    ) -> bool {
-        blocks_move_gesture(self.move_locked.get(), selected_ticket_count, event)
+    pub(in crate::pages::backlog) fn highlighted_id(&self) -> Option<String> {
+        self.control.data_view().highlighted_id()
+    }
+
+    #[cfg(test)]
+    pub(in crate::pages::backlog) fn transient_selected_ids(&self) -> Vec<String> {
+        self.control.transient_selected_ids()
+    }
+
+    #[cfg(test)]
+    pub(in crate::pages::backlog) fn is_reordering(&self) -> bool {
+        self.control.is_reordering()
     }
 
     fn issue_keys(&self) -> Vec<String> {
@@ -186,13 +236,65 @@ impl BacklogSection {
             let _ = self.events.send(event);
         }
     }
+
+    fn move_focus_at_boundary(&self, endpoint: NavigationEndpoint, ctx: &mut EventCtx<()>) {
+        let target = match endpoint {
+            NavigationEndpoint::First => &self.navigation.next,
+            NavigationEndpoint::Last => &self.navigation.previous,
+        };
+        let Some(target) = target else {
+            return;
+        };
+        target.set(Some(endpoint));
+        match endpoint {
+            NavigationEndpoint::First => ctx.focus_next(),
+            NavigationEndpoint::Last => ctx.focus_previous(),
+        }
+    }
+
+    fn apply_pending_navigation(&mut self, ctx: &mut FocusCtx<()>) {
+        let Some(endpoint) = self.navigation.entry.take() else {
+            return;
+        };
+        let parent_id = self.parent_id.clone();
+        let target_id = match endpoint {
+            NavigationEndpoint::First => parent_id.clone(),
+            NavigationEndpoint::Last => self
+                .issue_keys()
+                .last()
+                .map(|key| work_item_row_id(&parent_id, key))
+                .unwrap_or_else(|| parent_id.clone()),
+        };
+        let view = self.control.data_view_mut();
+        view.highlight_id(&target_id);
+        if view.highlighted_id().as_ref() != Some(&target_id) {
+            view.highlight_id(&parent_id);
+        }
+        ctx.request_redraw();
+    }
+
+    fn handle_navigation_boundary(
+        &self,
+        event: &TuiEvent,
+        highlighted_before: Option<String>,
+        outcome: EventOutcome,
+        ctx: &mut EventCtx<()>,
+    ) {
+        if self.control.is_reordering() {
+            return;
+        }
+        let Some(endpoint) = navigation_endpoint(event) else {
+            return;
+        };
+        if highlighted_before == self.control.data_view().highlighted_id()
+            && matches!(outcome, EventOutcome::Handled)
+        {
+            self.move_focus_at_boundary(endpoint, ctx);
+        }
+    }
 }
 
-pub(in crate::pages::backlog) fn blocks_move_gesture(
-    move_locked: bool,
-    selected_ticket_count: usize,
-    event: &TuiEvent,
-) -> bool {
+pub(in crate::pages::backlog) fn blocks_move_gesture(move_locked: bool, event: &TuiEvent) -> bool {
     const MOVE_GESTURES: [KeySpec; 3] = [
         KeySpec::key_with_modifiers(Key::Char('m'), KeyModifiers::CONTROL),
         KeySpec::plain('<'),
@@ -204,8 +306,36 @@ pub(in crate::pages::backlog) fn blocks_move_gesture(
             event,
             TuiEvent::Key(key)
                 if MOVE_GESTURES.into_iter().any(|binding| binding.matches(*key))
-                    || (selected_ticket_count >= 2 && KeySpec::plain(' ').matches(*key))
         )
+}
+
+fn blocks_selection_gesture(event: &TuiEvent) -> bool {
+    let TuiEvent::Key(key) = event else {
+        return false;
+    };
+    if KeySpec::plain(' ').matches(*key) {
+        return true;
+    }
+    let is_range_modifier = matches!(key.modifiers, KeyModifiers::SHIFT | KeyModifiers::CONTROL);
+    if !is_range_modifier {
+        return false;
+    }
+    let bindings = tuicore::keybindings();
+    bindings.line_up_matches(*key) || bindings.line_down_matches(*key)
+}
+
+fn navigation_endpoint(event: &TuiEvent) -> Option<NavigationEndpoint> {
+    let TuiEvent::Key(key) = event else {
+        return None;
+    };
+    let bindings = tuicore::keybindings();
+    if bindings.line_down_matches(*key) || bindings.page_down_matches(*key) {
+        Some(NavigationEndpoint::First)
+    } else if bindings.line_up_matches(*key) || bindings.page_up_matches(*key) {
+        Some(NavigationEndpoint::Last)
+    } else {
+        None
+    }
 }
 
 impl TuiNode for BacklogSection {
@@ -227,13 +357,15 @@ impl TuiNode for BacklogSection {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        if self.blocks_move_gesture(event) {
+        if self.blocks_move_gesture(event) || blocks_selection_gesture(event) {
             ctx.stop_propagation();
             return EventOutcome::Handled;
         }
         let source_order = self.issue_keys();
+        let highlighted_before = self.control.data_view().highlighted_id();
         let outcome = self.control.event(event, ctx);
         self.drain_events(source_order);
+        self.handle_navigation_boundary(event, highlighted_before, outcome, ctx);
         outcome
     }
 
@@ -243,13 +375,15 @@ impl TuiNode for BacklogSection {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        if self.blocks_move_gesture(event) {
+        if self.blocks_move_gesture(event) || blocks_selection_gesture(event) {
             ctx.stop_propagation();
             return EventOutcome::Handled;
         }
         let source_order = self.issue_keys();
+        let highlighted_before = self.control.data_view().highlighted_id();
         let outcome = self.control.dispatch_event(route, event, ctx);
         self.drain_events(source_order);
+        self.handle_navigation_boundary(event, highlighted_before, outcome, ctx);
         outcome
     }
 
@@ -259,10 +393,16 @@ impl TuiNode for BacklogSection {
 
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
         self.control.focus(target, focused, ctx);
+        if focused {
+            self.apply_pending_navigation(ctx);
+        }
     }
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
         self.control.dispatch_focus(target, focused, ctx);
+        if focused {
+            self.apply_pending_navigation(ctx);
+        }
     }
 
     fn focus_reveal_area(&self, target: &FocusTarget) -> Option<ratatui::layout::Rect> {

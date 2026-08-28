@@ -15,11 +15,16 @@ enum SourceRequest {
     All(String),
 }
 
+enum SourceResponse {
+    Selected(u64, String, String, Result<Ticket, String>),
+    Refresh(u64, String, Vec<(String, Result<Ticket, String>)>),
+}
+
 pub(super) struct SourceController {
     state: Rc<RefCell<ComposerState>>,
     service: AppService,
-    sender: Sender<(u64, String, String, Result<Ticket, String>)>,
-    receiver: Receiver<(u64, String, String, Result<Ticket, String>)>,
+    sender: Sender<SourceResponse>,
+    receiver: Receiver<SourceResponse>,
     generation: u64,
     requested: Option<SourceRequest>,
     loading: usize,
@@ -94,7 +99,12 @@ impl SourceController {
         if let Err(error) = std::thread::Builder::new()
             .name(format!("finery-jira-source-{generation}"))
             .spawn(move || {
-                let _ = sender.send((generation, change_set_id, id, service.fetch_jira(&key)));
+                let _ = sender.send(SourceResponse::Selected(
+                    generation,
+                    change_set_id,
+                    id,
+                    service.fetch_jira(&key),
+                ));
             })
         {
             self.loading = 0;
@@ -133,14 +143,11 @@ impl SourceController {
         if let Err(error) = std::thread::Builder::new()
             .name(format!("finery-jira-source-refresh-{generation}"))
             .spawn(move || {
-                for (id, key) in targets {
-                    let _ = sender.send((
-                        generation,
-                        change_set_id.clone(),
-                        id,
-                        service.fetch_jira(&key),
-                    ));
-                }
+                let results = targets
+                    .into_iter()
+                    .map(|(id, key)| (id, service.fetch_jira(&key)))
+                    .collect();
+                let _ = sender.send(SourceResponse::Refresh(generation, change_set_id, results));
             })
         {
             self.loading = 0;
@@ -157,29 +164,58 @@ impl SourceController {
 
     pub(super) fn drain(&mut self) -> bool {
         let mut changed = false;
-        while let Ok((generation, change_set_id, id, result)) = self.receiver.try_recv() {
+        while let Ok(response) = self.receiver.try_recv() {
+            let (generation, change_set_id, responses, refreshing) = match response {
+                SourceResponse::Selected(generation, change_set_id, id, result) => {
+                    (generation, change_set_id, vec![(id, result)], false)
+                }
+                SourceResponse::Refresh(generation, change_set_id, responses) => {
+                    (generation, change_set_id, responses, true)
+                }
+            };
             if generation != self.generation {
                 continue;
             }
-            let Some(refreshing) = self.accepts_response(&change_set_id, &id) else {
+            let response_id = responses.first().map(|(id, _)| id.as_str());
+            let Some(request_refreshing) = self.accepts_response(&change_set_id, response_id)
+            else {
                 continue;
             };
-            self.loading = self.loading.saturating_sub(1);
-            match result {
-                Ok(ticket) => {
+            if refreshing != request_refreshing {
+                continue;
+            }
+            self.loading = if refreshing {
+                0
+            } else {
+                self.loading.saturating_sub(1)
+            };
+            let failures = responses
+                .iter()
+                .filter_map(|(_, result)| result.as_ref().err())
+                .cloned()
+                .collect::<Vec<_>>();
+            if failures.is_empty() {
+                for (id, result) in responses {
+                    let Ok(ticket) = result else {
+                        unreachable!();
+                    };
                     let _ = self.state.borrow_mut().dispatch(ComposerAction::SetSource {
-                        change_set_id,
+                        change_set_id: change_set_id.clone(),
                         id,
                         ticket,
                     });
                 }
-                Err(error) => {
-                    if refreshing {
-                        self.refresh_failures = self.refresh_failures.saturating_add(1);
-                    }
-                    self.service
-                        .report_error(format!("Jira source refresh failed: {error}"));
+                if refreshing && let Some(set) = self.state.borrow().active_set().cloned() {
+                    self.service.save_change_set(set);
                 }
+            } else {
+                if refreshing {
+                    self.refresh_failures = self.refresh_failures.saturating_add(failures.len());
+                }
+                self.service.report_error(format!(
+                    "Jira source refresh failed: {}",
+                    failures.join("; ")
+                ));
             }
             if refreshing && self.loading == 0 {
                 self.requested = None;
@@ -189,7 +225,7 @@ impl SourceController {
         changed
     }
 
-    fn accepts_response(&self, change_set_id: &str, id: &str) -> Option<bool> {
+    fn accepts_response(&self, change_set_id: &str, response_id: Option<&str>) -> Option<bool> {
         let state = self.state.borrow();
         if !state.remote_queries_allowed()
             || state.active_change_set.as_deref() != Some(change_set_id)
@@ -200,7 +236,8 @@ impl SourceController {
             SourceRequest::Selected {
                 change_set_id: requested_change_set_id,
                 id: requested_id,
-            } => (requested_change_set_id == change_set_id && requested_id == id).then_some(false),
+            } => (requested_change_set_id == change_set_id && response_id == Some(requested_id))
+                .then_some(false),
             SourceRequest::All(requested_change_set_id) => {
                 (requested_change_set_id == change_set_id).then_some(true)
             }

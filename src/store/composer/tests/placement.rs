@@ -109,6 +109,7 @@ fn opening_a_change_set_selects_the_first_visible_ticket() {
         ],
         selected_ticket_ids: Vec::new(),
         closed: false,
+        submission_attempt: None,
     }]);
 
     state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
@@ -525,6 +526,7 @@ fn tasks_allow_subtask_children() {
             sibling_order: 0,
         }],
         selected_ticket_ids: Vec::new(),
+        submission_attempt: None,
     }]);
     state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
     state.dispatch(ComposerAction::SelectTicket(Some("TASK-1".into())));
