@@ -5,7 +5,7 @@ use crate::store::{
         Ticket, TicketKind,
         jira_adf::{adf_is_safe_to_overwrite, adf_to_markdown},
     },
-    work_items::{BacklogSnapshot, WorkItem},
+    work_items::{BacklogSnapshot, SubtaskProgress, WorkItem},
 };
 
 use super::JiraIssue;
@@ -55,6 +55,7 @@ pub(super) fn to_ticket(issue: JiraIssue) -> Ticket {
 pub(super) fn to_work_item(issue: JiraIssue, story_points_field_id: Option<&str>) -> WorkItem {
     let field = |name: &str| issue.fields.get(name).unwrap_or(&Value::Null);
     let (parent_key, parent_title) = parent_metadata(field("parent"));
+    let subtask_progress = subtask_progress(field("subtasks"));
     WorkItem {
         key: issue.key.clone(),
         title: field("summary").as_str().unwrap_or(&issue.key).into(),
@@ -68,15 +69,57 @@ pub(super) fn to_work_item(issue: JiraIssue, story_points_field_id: Option<&str>
             .into(),
         parent_key,
         parent_title,
-        has_children: field("subtasks")
-            .as_array()
-            .is_some_and(|subtasks| !subtasks.is_empty()),
+        has_children: subtask_progress.is_some(),
+        subtask_progress,
+        fix_versions: fix_versions(field("fixVersions")),
+        epic_name: epic_name(field("parent")),
         story_points: story_points_field_id.and_then(|field_id| {
             field(field_id)
                 .as_f64()
                 .or_else(|| field(field_id).as_str()?.parse().ok())
         }),
     }
+}
+
+fn subtask_progress(subtasks: &Value) -> Option<SubtaskProgress> {
+    let subtasks = subtasks.as_array()?;
+    (!subtasks.is_empty()).then(|| SubtaskProgress {
+        completed: subtasks
+            .iter()
+            .filter(|subtask| {
+                subtask
+                    .pointer("/fields/status/statusCategory/key")
+                    .and_then(Value::as_str)
+                    .is_some_and(|category| category.eq_ignore_ascii_case("done"))
+            })
+            .count(),
+        total: subtasks.len(),
+    })
+}
+
+fn fix_versions(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|version| version.get("name").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn epic_name(parent: &Value) -> Option<String> {
+    parent
+        .pointer("/fields/issuetype/name")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("epic"))
+        .then(|| {
+            parent
+                .pointer("/fields/summary")
+                .and_then(Value::as_str)
+                .or_else(|| parent.get("key").and_then(Value::as_str))
+                .map(str::to_owned)
+        })
+        .flatten()
 }
 
 pub(super) fn story_points_warning(snapshot: &BacklogSnapshot) -> Option<String> {

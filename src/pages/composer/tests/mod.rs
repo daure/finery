@@ -1549,7 +1549,7 @@ fn added_subtask_uses_project_draft_key_until_submission() {
         }
     }
 
-    assert!(text.contains("A • FIN-DRAFT • To Do"));
+    assert!(text.contains("A • FIN-DRAFT • @-- • To Do"));
     assert!(!text.contains("Root -> NEW-1"));
 
     let mut submitted = state.selected_changes().unwrap().clone();
@@ -1578,7 +1578,7 @@ fn added_subtask_uses_project_draft_key_until_submission() {
         }
     }
 
-    assert!(text.contains("A • FIN-200 • To Do"));
+    assert!(text.contains("A • FIN-200 • @-- • To Do"));
 }
 
 #[test]

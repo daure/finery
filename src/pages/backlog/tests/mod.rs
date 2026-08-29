@@ -1,6 +1,6 @@
 use std::sync::mpsc;
 
-use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Modifier};
 use tuicore::{
     AnimationSettings, ChildKey, EventCtx, EventRoute, FocusCtx, FocusId, FocusTarget, Key,
     KeyEvent, KeyModifiers, LayoutCtx, RenderCtx, TreePath, TuiEvent, TuiNode,
@@ -15,7 +15,10 @@ use super::{
         source_transfer_highlight_key, transfer_destinations, transfer_reconciliation_highlight,
     },
 };
-use crate::store::work_items::{BacklogSnapshot, Sprint, WorkItem, rank_plan};
+use crate::store::work_items::{
+    BacklogSnapshot, RunwayCapacitySource, Sprint, SubtaskProgress, WorkItem, apply_capacity,
+    rank_plan,
+};
 
 fn work_item(key: &str, title: &str) -> WorkItem {
     WorkItem {
@@ -28,6 +31,9 @@ fn work_item(key: &str, title: &str) -> WorkItem {
         parent_key: None,
         parent_title: None,
         has_children: false,
+        subtask_progress: None,
+        fix_versions: Vec::new(),
+        epic_name: None,
         story_points: None,
     }
 }
@@ -40,10 +46,14 @@ fn snapshot() -> BacklogSnapshot {
             id: 7,
             name: "Sprint 7".into(),
             state: "active".into(),
+            start_date: Some("2026-06-18T09:00:00.000Z".into()),
+            end_date: Some("2026-07-02T09:00:00.000Z".into()),
             work_items: vec![work_item("FIN-7", "Ship sprint work")],
+            capacity: None,
         }],
         work_items: vec![work_item("FIN-8", "Plan next sprint")],
         warnings: Vec::new(),
+        runway: None,
     }
 }
 
@@ -93,6 +103,15 @@ fn unified_backlog_tree_shows_collapsed_sprints_and_expanded_backlog() {
     let mut snapshot = snapshot();
     snapshot.story_points_configured = true;
     snapshot.work_items[0].assignee = "Unassigned".into();
+    snapshot.sprints.push(Sprint {
+        id: 8,
+        name: "Sprint 8".into(),
+        state: "future".into(),
+        start_date: Some("2026-07-03T09:00:00.000Z".into()),
+        end_date: Some("2026-07-17T09:00:00.000Z".into()),
+        work_items: Vec::new(),
+        capacity: None,
+    });
     let mut view = backlog_tree(&snapshot, sender, Default::default());
     let area = Rect::new(0, 0, 80, 16);
     view.layout(area, &mut LayoutCtx::new());
@@ -110,18 +129,231 @@ fn unified_backlog_tree_shows_collapsed_sprints_and_expanded_backlog() {
             text.push_str(terminal.backend().buffer().cell((x, y)).unwrap().symbol());
         }
     }
-    assert!(text.contains("Finery · Sprint 7 (active)"));
-    assert!(text.contains("Finery · Backlog"));
+    assert!(text.contains(" Sprint 7 • 18 Jun - 2 Jul"));
+    assert!(text.contains(" Sprint 8 • 3 Jul - 17 Jul"));
+    assert!(text.contains("Backlog"));
+    assert!(!text.contains("Finery"));
     assert!(!text.contains("Ship sprint work"));
     assert!(text.contains("Plan next sprint"));
-    assert!(text.contains("FIN-8 • To Do • @-- • -"));
+    assert!(text.contains("FIN-8 Plan next sprint"));
+    assert!(text.contains("- • @-- • To Do"));
+}
+
+#[test]
+fn backlog_story_rows_show_identity_then_subtask_release_and_epic_metadata() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let mut snapshot = snapshot();
+    snapshot.story_points_configured = true;
+    let story = &mut snapshot.work_items[0];
+    story.story_points = Some(3.0);
+    story.assignee = "Maya Voss".into();
+    story.subtask_progress = Some(SubtaskProgress {
+        completed: 0,
+        total: 2,
+    });
+    story.fix_versions = vec!["1.4.0".into()];
+    story.epic_name = Some("Shopping cart".into());
+    let mut view = backlog_tree(&snapshot, sender, Default::default());
+    let area = Rect::new(0, 0, 100, 16);
+    view.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            view.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let lines = rendered_lines(&terminal, area);
+    let text = lines.concat();
+
+    assert!(text.contains("FIN-8 Plan next sprint"));
+    assert!(text.contains("3 • @MV • 0/2  • To Do • 1.4.0 • Shopping cart"));
+    let (ticket_y, ticket_line) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.contains("FIN-8 Plan next sprint"))
+        .unwrap();
+    let key_x = cell_position(ticket_line, "FIN-8").unwrap() as u16;
+    assert_eq!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((key_x, ticket_y as u16))
+            .unwrap()
+            .fg,
+        tuicore::theme().muted_fg()
+    );
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((key_x, ticket_y as u16))
+            .unwrap()
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    let title_x = cell_position(ticket_line, "Plan next sprint").unwrap() as u16;
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((title_x, ticket_y as u16))
+            .unwrap()
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    let (metadata_y, metadata_line) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.contains("1.4.0"))
+        .unwrap();
+    let version_x = cell_position(metadata_line, "1.4.0").unwrap() as u16;
+    let epic_x = cell_position(metadata_line, "Shopping cart").unwrap() as u16;
+    let metadata_cell = terminal
+        .backend()
+        .buffer()
+        .cell((version_x, metadata_y as u16))
+        .unwrap();
+    assert!(!metadata_cell.modifier.contains(Modifier::BOLD));
+    assert_eq!(metadata_cell.bg, tuicore::theme().highlight_bg());
+    assert_eq!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((epic_x, metadata_y as u16))
+            .unwrap()
+            .fg,
+        tuicore::theme().accent_fg()
+    );
+}
+
+#[test]
+fn backlog_shows_runway_summary_and_non_structural_capacity_markers() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    snapshot.work_items = vec![
+        WorkItem {
+            story_points: Some(8.0),
+            ..work_item("FIN-8", "Plan next sprint")
+        },
+        WorkItem {
+            story_points: Some(14.0),
+            ..work_item("FIN-9", "Refine the next sprint")
+        },
+        work_item("FIN-10", "Estimate this ticket"),
+    ];
+    apply_capacity(
+        &mut snapshot,
+        20.0,
+        Some((3.0, false)),
+        RunwayCapacitySource::Fixed,
+        20,
+    );
+    let (sender, _) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot, sender, Default::default());
+    let area = Rect::new(0, 0, 100, 16);
+    view.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            view.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let mut text = String::new();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            text.push_str(terminal.backend().buffer().cell((x, y)).unwrap().symbol());
+        }
+    }
+
+    assert!(text.contains("Velocity 20"));
+    assert!(text.contains("┃"));
+    assert!(text.contains("3 • @AD • To Do"));
+    assert!(!text.contains("assumed"));
+    let lines = rendered_lines(&terminal, area);
+    let ticket_position = |key| {
+        lines
+            .iter()
+            .enumerate()
+            .find_map(|(y, line)| cell_position(line, key).map(|x| (x as u16, y as u16)))
+            .unwrap()
+    };
+    let (first_x, first_y) = ticket_position("FIN-8");
+    let (second_x, second_y) = ticket_position("FIN-9");
+    let (third_x, third_y) = ticket_position("FIN-10");
+    assert_eq!(first_x, third_x);
+    assert_eq!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((first_x, first_y))
+            .unwrap()
+            .bg,
+        tuicore::theme().surface_bg()
+    );
+    assert_ne!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((second_x, second_y))
+            .unwrap()
+            .bg,
+        tuicore::theme().surface_bg()
+    );
+    assert_eq!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((third_x, third_y))
+            .unwrap()
+            .bg,
+        tuicore::theme().surface_bg()
+    );
+
+    apply_capacity(
+        &mut snapshot,
+        20.0,
+        Some((5.4, true)),
+        RunwayCapacitySource::JiraVelocity,
+        20,
+    );
+    view.set_snapshot(&snapshot);
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            view.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    text.clear();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            text.push_str(terminal.backend().buffer().cell((x, y)).unwrap().symbol());
+        }
+    }
+    assert!(text.contains("Velocity ~20"));
+    assert!(text.contains("  • 5.4 pts • 18 Jun - 2 Jul • Sprint 7"));
+    assert!(text.contains("~5.4 • @AD • To Do"));
 }
 
 #[test]
 fn space_toggles_the_highlighted_backlog_section() {
     tuicore::init();
     let (sender, _) = mpsc::channel();
-    let mut tree = backlog_tree(&snapshot(), sender, Default::default());
+    let mut snapshot = snapshot();
+    snapshot.story_points_configured = true;
+    apply_capacity(
+        &mut snapshot,
+        20.0,
+        Some((5.4, true)),
+        RunwayCapacitySource::Fixed,
+        20,
+    );
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
     let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
     tree.dispatch_focus(
         &data_focus_target(),
@@ -152,6 +384,7 @@ fn space_toggles_the_highlighted_backlog_section() {
         }
     }
     assert!(text.contains("Ship sprint work"));
+    assert!(text.contains("~5.4 • @AD • To Do"));
 }
 
 #[test]
@@ -166,6 +399,7 @@ fn long_backlog_titles_wrap_to_the_available_viewport_width() {
         )],
         warnings: Vec::new(),
         story_points_configured: false,
+        runway: None,
     };
     let (sender, _) = mpsc::channel();
     let mut view = backlog_tree(&snapshot, sender, Default::default());
@@ -188,13 +422,37 @@ fn long_backlog_titles_wrap_to_the_available_viewport_width() {
                 .collect::<String>()
         })
         .collect::<Vec<_>>();
-    assert!(lines.iter().any(|line| line.contains("viewport edge")));
+    let title_line = lines
+        .iter()
+        .find(|line| line.contains("A backlog title"))
+        .unwrap();
+    let title_start = cell_position(title_line, "A backlog title").unwrap();
+    let continuation = lines.iter().find(|line| line.contains("viewport")).unwrap();
+    assert_eq!(
+        continuation.chars().position(|character| character != ' '),
+        Some(title_start),
+    );
+}
+
+fn cell_position(line: &str, content: &str) -> Option<usize> {
+    line.find(content)
+        .map(|position| line[..position].chars().count())
+}
+
+fn rendered_lines(terminal: &Terminal<TestBackend>, area: Rect) -> Vec<String> {
+    (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| terminal.backend().buffer().cell((x, y)).unwrap().symbol())
+                .collect()
+        })
+        .collect()
 }
 
 #[test]
-fn backlog_search_filters_tickets_by_key_and_title() {
+fn backlog_search_filters_tickets_and_hides_runway_bands() {
     tuicore::init();
-    let snapshot = BacklogSnapshot {
+    let mut snapshot = BacklogSnapshot {
         board_name: "Finery".into(),
         story_points_configured: false,
         sprints: Vec::new(),
@@ -203,7 +461,15 @@ fn backlog_search_filters_tickets_by_key_and_title() {
             work_item("FIN-2", "Ship release"),
         ],
         warnings: Vec::new(),
+        runway: None,
     };
+    apply_capacity(
+        &mut snapshot,
+        9.1,
+        Some((3.0, false)),
+        RunwayCapacitySource::JiraVelocity,
+        20,
+    );
     let (sender, _) = mpsc::channel();
     let mut tree = backlog_tree(&snapshot, sender, Default::default());
     let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
@@ -244,6 +510,20 @@ fn backlog_search_filters_tickets_by_key_and_title() {
     }
     assert!(text.contains("FIN-2"));
     assert!(!text.contains("FIN-1"));
+    assert!(!text.contains("┃"));
+    let matching_y = rendered_lines(&terminal, area)
+        .iter()
+        .position(|line| line.contains("FIN-2"))
+        .unwrap() as u16;
+    assert!(
+        (matching_y..matching_y + 2).all(|y| {
+            (0..area.width).all(|x| {
+                terminal.backend().buffer().cell((x, y)).unwrap().bg
+                    != tuicore::theme().surface_bg()
+            })
+        }),
+        "search results must not retain virtual sprint background bands"
+    );
 }
 
 #[test]
@@ -255,6 +535,7 @@ fn backlog_search_requires_contiguous_text() {
         sprints: Vec::new(),
         work_items: vec![work_item("FIN-1", "A shopper can narrow products")],
         warnings: Vec::new(),
+        runway: None,
     };
     let (sender, _) = mpsc::channel();
     let mut tree = backlog_tree(&snapshot, sender, Default::default());
@@ -306,6 +587,7 @@ fn unified_tree_uses_same_section_transient_selection_for_the_quick_menu() {
         sprints: Vec::new(),
         work_items: vec![work_item("FIN-1", "First"), work_item("FIN-2", "Second")],
         warnings: Vec::new(),
+        runway: None,
     };
     let (sender, receiver) = mpsc::channel();
     let mut tree = backlog_tree(&snapshot, sender, Default::default());
@@ -383,6 +665,7 @@ fn stale_rank_refresh_keeps_the_optimistic_order() {
             work_item("FIN-3", "Third"),
         ],
         warnings: Vec::new(),
+        runway: None,
     };
     let mut optimistic = rollback.clone();
     optimistic.work_items.swap(0, 1);

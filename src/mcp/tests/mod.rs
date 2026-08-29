@@ -111,6 +111,9 @@ fn work_item(index: usize) -> WorkItem {
         parent_key: None,
         parent_title: None,
         has_children: false,
+        subtask_progress: None,
+        fix_versions: Vec::new(),
+        epic_name: None,
         story_points: Some(index as f64),
     }
 }
@@ -139,10 +142,14 @@ fn workspace_limits_only_unplanned_tickets_and_omits_closed_change_sets() {
                 id: 1,
                 name: "Sprint 1".into(),
                 state: "active".into(),
+                start_date: None,
+                end_date: None,
                 work_items: (0..51).map(work_item).collect(),
+                capacity: None,
             }],
             work_items: (51..102).map(work_item).collect(),
             warnings: vec!["Story points are unavailable".into()],
+            runway: None,
         },
         Versioned {
             revision: 7,

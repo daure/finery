@@ -206,6 +206,7 @@ pub(crate) struct BacklogPage {
     snapshot: Option<BacklogSnapshot>,
     pending_transfer: Option<PendingTransfer>,
     pending_rank: Option<PendingRank>,
+    settings_revision: u64,
 }
 
 impl BacklogPage {
@@ -213,6 +214,7 @@ impl BacklogPage {
         let (sender, receiver) = mpsc::channel();
         let (section_sender, section_receiver) = mpsc::channel();
         let move_locked = Rc::new(Cell::new(false));
+        let settings_revision = service.settings_revision();
         Self {
             service,
             sender,
@@ -233,6 +235,7 @@ impl BacklogPage {
             snapshot: None,
             pending_transfer: None,
             pending_rank: None,
+            settings_revision,
         }
     }
 
@@ -413,7 +416,7 @@ impl BacklogPage {
                 for warning in &snapshot.warnings {
                     self.service
                         .report_notification(tuicore::Notification::warning(
-                            "Jira story points unavailable",
+                            "Jira backlog warning",
                             warning.clone(),
                         ));
                 }
@@ -871,6 +874,16 @@ impl BacklogPage {
         self.load(true, preserve_optimistic_view);
         true
     }
+
+    fn refresh_for_settings_change(&mut self) -> bool {
+        let settings_revision = self.service.settings_revision();
+        if settings_revision == self.settings_revision || self.loading || self.ranking {
+            return false;
+        }
+        self.settings_revision = settings_revision;
+        self.load(false, false);
+        true
+    }
 }
 
 fn source_order(snapshot: Option<&BacklogSnapshot>, section_id: &str) -> Vec<String> {
@@ -1125,6 +1138,7 @@ fn empty_snapshot() -> BacklogSnapshot {
         sprints: Vec::new(),
         work_items: Vec::new(),
         warnings: Vec::new(),
+        runway: None,
     }
 }
 
@@ -1217,7 +1231,8 @@ impl TuiNode for BacklogPage {
         } else {
             self.retry_rank_refresh(dt)
         };
-        let changed = result_changed || retry_started;
+        let settings_refresh_started = !result_changed && self.refresh_for_settings_change();
+        let changed = result_changed || retry_started || settings_refresh_started;
         let result = if changed {
             result.merge(TickResult {
                 changed: true,

@@ -117,6 +117,8 @@ fn ticket_row(state: &ComposerState, change: &TicketChange) -> Option<TicketRow>
             assignee: ticket.assignee.clone(),
             story_points: None,
             show_story_points: false,
+            story_points_estimated: false,
+            story_points_from_average: false,
             change_badge: Some(change_badge(change.kind)),
             submitted: change.is_submitted(),
         },

@@ -15,6 +15,12 @@ pub(crate) const JIRA_STORY_POINTS_FIELD_ID_SETTING: &str = "jira.story_points_f
 pub(crate) const JIRA_STORY_POINTS_BOARD_ID_SETTING: &str = "jira.story_points_board_id";
 pub(crate) const JIRA_STORY_POINTS_DISCOVERY_COMPLETE_SETTING: &str =
     "jira.story_points_discovery_complete";
+pub(crate) const BACKLOG_USE_JIRA_VELOCITY_SETTING: &str = "backlog.use_jira_velocity";
+pub(crate) const BACKLOG_FIXED_SPRINT_CAPACITY_SETTING: &str = "backlog.fixed_sprint_capacity";
+pub(crate) const BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING: &str = "backlog.use_average_ticket_size";
+pub(crate) const BACKLOG_FIXED_TICKET_SIZE_SETTING: &str = "backlog.fixed_ticket_size";
+pub(crate) const BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING: &str =
+    "backlog.sprint_tolerance_percent";
 pub(crate) const SPEED_READER_WPM_SETTING: &str = "reader.wpm";
 pub(crate) const SPEED_READER_BLOCK_DELAY_SETTING: &str = "reader.markdown_block_pause_ms";
 pub(crate) const COMPOSER_ADD_SIBLING_KEY_SETTING: &str = "composer.add_sibling_key";
@@ -268,7 +274,7 @@ fn sequences_conflict(sequence: &str, candidate: &str) -> bool {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct AppSettings {
     pub(crate) jira_base_url: String,
     pub(crate) jira_email: String,
@@ -278,8 +284,30 @@ pub(crate) struct AppSettings {
     pub(crate) jira_story_points_field_id: String,
     pub(crate) jira_story_points_board_id: String,
     pub(crate) jira_story_points_discovery_complete: bool,
+    pub(crate) backlog_runway: BacklogRunwaySettings,
     pub(crate) speed_reader: SpeedReaderSettings,
     pub(crate) composer_keys: ComposerKeyBindings,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BacklogRunwaySettings {
+    pub(crate) use_jira_velocity: bool,
+    pub(crate) fixed_sprint_capacity: f64,
+    pub(crate) use_average_ticket_size: bool,
+    pub(crate) fixed_ticket_size: f64,
+    pub(crate) sprint_tolerance_percent: u8,
+}
+
+impl Default for BacklogRunwaySettings {
+    fn default() -> Self {
+        Self {
+            use_jira_velocity: false,
+            fixed_sprint_capacity: 20.0,
+            use_average_ticket_size: false,
+            fixed_ticket_size: 3.0,
+            sprint_tolerance_percent: 20,
+        }
+    }
 }
 
 impl AppSettings {
@@ -311,6 +339,31 @@ impl AppSettings {
             jira_story_points_discovery_complete: values
                 .get(JIRA_STORY_POINTS_DISCOVERY_COMPLETE_SETTING)
                 .is_some_and(|value| value == "true"),
+            backlog_runway: BacklogRunwaySettings {
+                use_jira_velocity: values
+                    .get(BACKLOG_USE_JIRA_VELOCITY_SETTING)
+                    .is_some_and(|value| value == "true"),
+                fixed_sprint_capacity: setting_number(
+                    values,
+                    BACKLOG_FIXED_SPRINT_CAPACITY_SETTING,
+                    defaults.backlog_runway.fixed_sprint_capacity,
+                    false,
+                ),
+                use_average_ticket_size: values
+                    .get(BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING)
+                    .is_some_and(|value| value == "true"),
+                fixed_ticket_size: setting_number(
+                    values,
+                    BACKLOG_FIXED_TICKET_SIZE_SETTING,
+                    defaults.backlog_runway.fixed_ticket_size,
+                    true,
+                ),
+                sprint_tolerance_percent: values
+                    .get(BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING)
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .filter(|value| *value <= 100)
+                    .unwrap_or(defaults.backlog_runway.sprint_tolerance_percent),
+            },
             speed_reader: SpeedReaderSettings {
                 wpm: values
                     .get(SPEED_READER_WPM_SETTING)
@@ -346,6 +399,26 @@ impl AppSettings {
             (
                 JIRA_STORY_POINTS_DISCOVERY_COMPLETE_SETTING,
                 self.jira_story_points_discovery_complete.to_string(),
+            ),
+            (
+                BACKLOG_USE_JIRA_VELOCITY_SETTING,
+                self.backlog_runway.use_jira_velocity.to_string(),
+            ),
+            (
+                BACKLOG_FIXED_SPRINT_CAPACITY_SETTING,
+                self.backlog_runway.fixed_sprint_capacity.to_string(),
+            ),
+            (
+                BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING,
+                self.backlog_runway.use_average_ticket_size.to_string(),
+            ),
+            (
+                BACKLOG_FIXED_TICKET_SIZE_SETTING,
+                self.backlog_runway.fixed_ticket_size.to_string(),
+            ),
+            (
+                BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING,
+                self.backlog_runway.sprint_tolerance_percent.to_string(),
             ),
             (SPEED_READER_WPM_SETTING, self.speed_reader.wpm.to_string()),
             (
@@ -508,6 +581,19 @@ impl AppSettings {
     pub(crate) fn block_delay(&self) -> Duration {
         self.speed_reader.markdown_block_pause
     }
+}
+
+fn setting_number(
+    values: &HashMap<String, String>,
+    key: &str,
+    default: f64,
+    permits_zero: bool,
+) -> f64 {
+    values
+        .get(key)
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && (permits_zero || *value > 0.0) && *value >= 0.0)
+        .unwrap_or(default)
 }
 
 fn parse_composer_key(value: &str) -> Option<KeySpec> {

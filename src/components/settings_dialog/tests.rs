@@ -47,3 +47,26 @@ fn board_changes_preserve_manual_story_points_field() {
         "customfield_manual"
     );
 }
+
+#[test]
+fn backlog_runway_changes_apply_to_live_settings() {
+    let service = AppService::for_tests();
+    let settings = service.settings();
+    let dialog = SettingsDialog::new(settings.clone(), service.clone());
+    dialog.changes.borrow_mut().extend([
+        SettingChange::BacklogUseJiraVelocity(true),
+        SettingChange::BacklogFixedSprintCapacity("18.5".into()),
+        SettingChange::BacklogUseAverageTicketSize(true),
+        SettingChange::BacklogFixedTicketSize("2.5".into()),
+        SettingChange::BacklogSprintTolerancePercent("15".into()),
+    ]);
+
+    dialog.apply_changes(&mut EventCtx::default());
+
+    let settings = settings.read().unwrap();
+    assert!(settings.backlog_runway.use_jira_velocity);
+    assert_eq!(settings.backlog_runway.fixed_sprint_capacity, 18.5);
+    assert!(settings.backlog_runway.use_average_ticket_size);
+    assert_eq!(settings.backlog_runway.fixed_ticket_size, 2.5);
+    assert_eq!(settings.backlog_runway.sprint_tolerance_percent, 15);
+}

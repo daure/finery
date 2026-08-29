@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex, RwLock,
+        atomic::{AtomicU64, Ordering},
         mpsc::{self, Sender},
     },
     thread,
@@ -31,6 +32,7 @@ mod tests;
 #[derive(Clone)]
 pub(crate) struct AppService {
     settings: Arc<RwLock<AppSettings>>,
+    settings_revision: Arc<AtomicU64>,
     storage: Storage,
     runtime: Arc<Runtime>,
     errors: Arc<Mutex<Vec<String>>>,
@@ -234,6 +236,7 @@ impl AppService {
         Ok((
             Self {
                 settings: Arc::new(RwLock::new(settings)),
+                settings_revision: Arc::new(AtomicU64::new(0)),
                 storage,
                 runtime,
                 errors,
@@ -268,6 +271,7 @@ impl AppService {
         .unwrap();
         Self {
             settings: Arc::new(RwLock::new(AppSettings::default())),
+            settings_revision: Arc::new(AtomicU64::new(0)),
             storage,
             runtime,
             errors,
@@ -281,6 +285,10 @@ impl AppService {
 
     pub(crate) fn settings(&self) -> Arc<RwLock<AppSettings>> {
         Arc::clone(&self.settings)
+    }
+
+    pub(crate) fn settings_revision(&self) -> u64 {
+        self.settings_revision.load(Ordering::Relaxed)
     }
 
     pub(crate) fn composer_service(&self) -> composer_service::ComposerService {
@@ -324,6 +332,7 @@ impl AppService {
         let changed_values = settings.changed_values(&current);
         *current = settings;
         if !changed_values.is_empty() {
+            self.settings_revision.fetch_add(1, Ordering::Relaxed);
             self.send(PersistenceCommand::SaveSettings(changed_values));
         }
         drop(current);

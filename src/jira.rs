@@ -10,7 +10,10 @@ use crate::{
         ChangeKind, SubmissionSnapshot, Ticket, TicketChange, TicketKind, change_parent,
         jira_adf::markdown_to_adf,
     },
-    store::work_items::{BacklogSnapshot, RankPlan, Sprint, WorkItem},
+    store::work_items::{
+        BacklogSnapshot, RankPlan, RunwayCapacitySource, Sprint, WorkItem, apply_capacity,
+        loaded_story_point_average,
+    },
 };
 
 mod mapping;
@@ -29,7 +32,7 @@ const ISSUE_FIELDS: [&str; 9] = [
     "subtasks",
 ];
 
-const BACKLOG_FIELDS: [&str; 7] = [
+const BACKLOG_FIELDS: [&str; 8] = [
     "summary",
     "issuetype",
     "status",
@@ -37,6 +40,7 @@ const BACKLOG_FIELDS: [&str; 7] = [
     "assignee",
     "parent",
     "subtasks",
+    "fixVersions",
 ];
 const BACKLOG_JQL: &str = "issuetype not in subTaskIssueTypes() AND issuetype != Epic";
 
@@ -133,6 +137,10 @@ struct JiraSprint {
     id: u64,
     name: String,
     state: String,
+    #[serde(rename = "startDate")]
+    start_date: Option<String>,
+    #[serde(rename = "endDate")]
+    end_date: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -257,6 +265,10 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         };
     let story_points_field_id =
         story_points_field_for_load(settings, discovered_story_points.as_ref());
+    let velocity = settings
+        .backlog_runway
+        .use_jira_velocity
+        .then(|| board_velocity(&client, &base_url, &email, &token, board.id));
     let sprints = board_sprints(&client, &base_url, &email, &token, board.id)?;
     let (sprints, work_items) = std::thread::scope(|scope| -> Result<_, String> {
         let backlog_client = client.clone();
@@ -311,7 +323,10 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
                     id: sprint.id,
                     name: sprint.name,
                     state: sprint.state,
+                    start_date: sprint.start_date,
+                    end_date: sprint.end_date,
                     work_items,
+                    capacity: None,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -323,6 +338,7 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         sprints,
         work_items,
         warnings: Vec::new(),
+        runway: None,
     };
     if let Some(warning) = discovery_warning {
         snapshot.warnings.push(warning);
@@ -330,6 +346,39 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
     if let Some(warning) = story_points_warning(&snapshot) {
         snapshot.warnings.push(warning);
     }
+    let (capacity, source) = match velocity {
+        Some(Ok(capacity)) => (capacity, RunwayCapacitySource::JiraVelocity),
+        Some(Err(error)) => {
+            snapshot.warnings.push(format!(
+                "Could not load Jira velocity; using the fixed sprint capacity instead: {error}"
+            ));
+            (
+                settings.backlog_runway.fixed_sprint_capacity,
+                RunwayCapacitySource::FixedFallback,
+            )
+        }
+        None => (
+            settings.backlog_runway.fixed_sprint_capacity,
+            RunwayCapacitySource::Fixed,
+        ),
+    };
+    let assumed_ticket_size = if settings.backlog_runway.use_average_ticket_size {
+        loaded_story_point_average(&snapshot).map(|size| (size, true))
+    } else {
+        Some((settings.backlog_runway.fixed_ticket_size, false))
+    };
+    if assumed_ticket_size.is_none() {
+        snapshot.warnings.push(
+            "Could not calculate an assumed ticket size because no loaded tickets have story points. Set a fixed assumed ticket size in Settings.".into(),
+        );
+    }
+    apply_capacity(
+        &mut snapshot,
+        capacity,
+        assumed_ticket_size,
+        source,
+        settings.backlog_runway.sprint_tolerance_percent,
+    );
     Ok(BacklogLoad {
         snapshot,
         discovered_story_points,
@@ -491,6 +540,48 @@ fn board_sprints(
         }
         start_at = page.start_at.saturating_add(page.max_results);
     }
+}
+
+fn board_velocity(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    board_id: u64,
+) -> Result<f64, String> {
+    let response = client
+        .get(format!(
+            "{base_url}/rest/greenhopper/1.0/rapid/charts/velocity.json"
+        ))
+        .basic_auth(email, Some(token))
+        .query(&[("rapidViewId", board_id.to_string())])
+        .send()
+        .map_err(|error| error.to_string())?;
+    response_json::<Value>(response).and_then(velocity_average)
+}
+
+fn velocity_average(chart: Value) -> Result<f64, String> {
+    let entries = chart
+        .get("velocityStatEntries")
+        .and_then(|entries| match entries {
+            Value::Array(entries) => Some(entries.iter().collect::<Vec<_>>()),
+            Value::Object(entries) => Some(entries.values().collect::<Vec<_>>()),
+            _ => None,
+        })
+        .ok_or_else(|| "Jira velocity chart did not contain sprint entries".to_string())?;
+    let completed = entries
+        .into_iter()
+        .filter_map(|entry| {
+            entry
+                .pointer("/completed/value")
+                .or_else(|| entry.get("completed"))
+                .and_then(Value::as_f64)
+        })
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .collect::<Vec<_>>();
+    (!completed.is_empty())
+        .then(|| completed.iter().sum::<f64>() / completed.len() as f64)
+        .ok_or_else(|| "Jira velocity chart did not contain completed estimates".to_string())
 }
 
 fn board_story_points_field(

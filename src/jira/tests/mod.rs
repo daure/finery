@@ -15,7 +15,7 @@ use super::{
     same_jira_content, search_jql, select_backlog_board, should_discover_story_points,
     sprint_issues, story_points_field_for_load, story_points_field_id, story_points_warning,
     submit_failure, submit_ordered_changes, text_search_jql, to_ticket, to_work_item,
-    update_payload,
+    update_payload, velocity_average,
 };
 use crate::{
     app_settings::AppSettings,
@@ -515,25 +515,41 @@ fn board_backlog_query_excludes_subtasks_and_epics_hidden_by_the_web_backlog_lis
 }
 
 #[test]
-fn backlog_items_expose_whether_jira_reports_subtasks() {
+fn backlog_items_include_subtask_progress_releases_and_epic_names() {
     assert!(BACKLOG_FIELDS.contains(&"parent"));
     assert!(BACKLOG_FIELDS.contains(&"subtasks"));
+    assert!(BACKLOG_FIELDS.contains(&"fixVersions"));
 
     let work_item = to_work_item(
         JiraIssue {
             key: "FIN-1".into(),
             fields: json!({
                 "summary": "Parent",
-                "parent": { "key": "FIN-0", "fields": { "summary": "Grandparent" } },
-                "subtasks": [{ "key": "FIN-2" }]
+                "parent": {
+                    "key": "FIN-0",
+                    "fields": {
+                        "summary": "Shopping cart",
+                        "issuetype": { "name": "Epic" }
+                    }
+                },
+                "subtasks": [
+                    { "key": "FIN-2", "fields": { "status": { "statusCategory": { "key": "done" } } } },
+                    { "key": "FIN-3", "fields": { "status": { "statusCategory": { "key": "indeterminate" } } } }
+                ],
+                "fixVersions": [{ "name": "1.2.0" }]
             }),
         },
         None,
     );
 
     assert_eq!(work_item.parent_key.as_deref(), Some("FIN-0"));
-    assert_eq!(work_item.parent_title.as_deref(), Some("Grandparent"));
+    assert_eq!(work_item.parent_title.as_deref(), Some("Shopping cart"));
     assert!(work_item.has_children);
+    let progress = work_item.subtask_progress.as_ref().unwrap();
+    assert_eq!(progress.completed, 1);
+    assert_eq!(progress.total, 2);
+    assert_eq!(work_item.fix_versions, ["1.2.0"]);
+    assert_eq!(work_item.epic_name.as_deref(), Some("Shopping cart"));
 }
 
 #[test]
@@ -658,6 +674,7 @@ fn backlog_warns_when_loaded_tickets_lack_story_points() {
             Some("customfield_10016"),
         )],
         warnings: Vec::new(),
+        runway: None,
     };
 
     assert!(
@@ -665,6 +682,19 @@ fn backlog_warns_when_loaded_tickets_lack_story_points() {
             .unwrap()
             .contains("No loaded backlog tickets have story-point values")
     );
+}
+
+#[test]
+fn velocity_chart_average_uses_completed_estimates() {
+    let average = velocity_average(json!({
+        "velocityStatEntries": {
+            "101": { "completed": { "value": 16.0 } },
+            "102": { "completed": { "value": 24.0 } }
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(average, 20.0);
 }
 
 #[test]

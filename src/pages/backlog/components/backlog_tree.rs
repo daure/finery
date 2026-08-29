@@ -4,18 +4,27 @@ use ratatui::{
     Frame,
     layout::Constraint,
     style::{Modifier, Style},
-    text::{Line, Text},
+    text::{Line, Span, Text},
 };
 use tuicore::{
     CellContext, Column, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget, Key,
     KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    ListControl, ListControlEvent, ListControlKeyBindings, RenderCtx, SearchMode, TickResult,
-    TreeAdapter, TuiEvent, TuiNode,
+    ListControl, ListControlEvent, ListControlKeyBindings, Paragraph, RenderCtx, SearchMode,
+    TickResult, TreeAdapter, TuiEvent, TuiNode,
 };
 
 use crate::{
-    components::work_item_rows::{WorkItemKind, WorkItemRow, work_item_text},
-    store::work_items::{BacklogSnapshot, WorkItem},
+    components::{
+        avatar::bubble_span,
+        work_item_rows::{
+            WorkItemKind, WorkItemRow, story_points_label, work_item_title_prefix_width,
+            work_item_title_with_key_line,
+        },
+    },
+    store::work_items::{
+        BacklogSnapshot, RunwayCapacitySource, RunwayTicket, Sprint, SprintCapacityState,
+        SubtaskProgress, WorkItem,
+    },
 };
 
 #[derive(Clone)]
@@ -28,7 +37,17 @@ struct BacklogRow {
 #[derive(Clone)]
 enum BacklogRowContent {
     Section { title: String },
-    WorkItem(WorkItemRow),
+    WorkItem(BacklogWorkItem),
+}
+
+#[derive(Clone)]
+struct BacklogWorkItem {
+    item: WorkItemRow,
+    runway: Option<RunwayTicket>,
+    alternate_background: bool,
+    subtask_progress: Option<SubtaskProgress>,
+    fix_versions: Vec<String>,
+    epic_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +99,8 @@ pub(in crate::pages::backlog) fn backlog_tree(
             .remove([]),
     )
     .empty_message("No stories");
+    let runway_markers_visible = Rc::new(Cell::new(true));
+    let row_marker_visible = Rc::clone(&runway_markers_visible);
     control
         .data_view_mut()
         .set_row_height_by(|row| match row.content {
@@ -87,22 +108,53 @@ pub(in crate::pages::backlog) fn backlog_tree(
             BacklogRowContent::WorkItem(_) => 2,
         });
     control.data_view_mut().set_wrap_cells(true);
+    control
+        .data_view_mut()
+        .set_row_style_by(|row| match &row.content {
+            BacklogRowContent::WorkItem(item) if item.alternate_background => {
+                Some(Style::default().bg(tuicore::theme().surface_bg()))
+            }
+            _ => None,
+        });
+    control
+        .data_view_mut()
+        .set_left_gutter_marker_by(move |row| match &row.content {
+            BacklogRowContent::WorkItem(item) => Some(
+                (row_marker_visible.get()
+                    && item
+                        .runway
+                        .as_ref()
+                        .is_some_and(|runway| runway.virtual_sprint % 2 == 1))
+                .then(|| Span::styled("┃", Style::default().fg(tuicore::theme().accent_fg())))
+                .unwrap_or_else(|| Span::raw(" ")),
+            ),
+            _ => None,
+        });
     BacklogTree {
         control,
+        summary: backlog_summary(snapshot),
+        summary_area: ratatui::layout::Rect::default(),
+        control_area: ratatui::layout::Rect::default(),
         events,
         move_locked,
+        runway_markers_visible,
     }
 }
 
 pub(in crate::pages::backlog) struct BacklogTree {
     control: ListControl<BacklogRow, String>,
+    summary: Paragraph,
+    summary_area: ratatui::layout::Rect,
+    control_area: ratatui::layout::Rect,
     events: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
+    runway_markers_visible: Rc<Cell<bool>>,
 }
 
 impl BacklogTree {
     pub(in crate::pages::backlog) fn set_snapshot(&mut self, snapshot: &BacklogSnapshot) {
         self.control.set_rows(backlog_rows(snapshot));
+        self.summary = backlog_summary(snapshot);
         let parents = self
             .control
             .transient_selected_ids()
@@ -158,7 +210,7 @@ impl BacklogTree {
                 return None;
             }
             section = Some(parent);
-            keys.push(item.key.clone());
+            keys.push(item.item.key.clone());
         }
         let section = section?;
         let order = self.issue_keys_in_section(&section);
@@ -173,7 +225,7 @@ impl BacklogTree {
             .iter()
             .filter_map(|row| {
                 (row.parent_id.as_deref() == Some(parent.as_str())).then(|| match &row.content {
-                    BacklogRowContent::WorkItem(item) => Some(item.key.clone()),
+                    BacklogRowContent::WorkItem(item) => Some(item.item.key.clone()),
                     BacklogRowContent::Section { .. } => None,
                 })?
             })
@@ -289,7 +341,7 @@ impl BacklogTree {
             .filter_map(|row| {
                 (ids.contains(&row.id) && source_parents.contains_key(&row.id)).then(
                     || match &row.content {
-                        BacklogRowContent::WorkItem(item) => Some(item.key.clone()),
+                        BacklogRowContent::WorkItem(item) => Some(item.item.key.clone()),
                         BacklogRowContent::Section { .. } => None,
                     },
                 )?
@@ -319,6 +371,16 @@ impl BacklogTree {
             .map(|row| (row.id.clone(), row.parent_id.clone().unwrap_or_default()))
             .collect();
         let outcome = dispatch(&mut self.control, ctx);
+        let show_runway_bands = self
+            .control
+            .data_view()
+            .transform_state()
+            .search
+            .trim()
+            .is_empty();
+        if self.runway_markers_visible.replace(show_runway_bands) != show_runway_bands {
+            ctx.request_redraw();
+        }
         self.drain_events(source_parents);
         outcome
     }
@@ -329,15 +391,24 @@ impl TuiNode for BacklogTree {
         self.control.measure(proposal)
     }
     fn layout(&mut self, area: ratatui::layout::Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        self.control.layout(area, ctx)
+        let summary_height = u16::from(!area.is_empty());
+        self.summary_area = ratatui::layout::Rect::new(area.x, area.y, area.width, summary_height);
+        self.control_area = ratatui::layout::Rect::new(
+            area.x,
+            area.y.saturating_add(summary_height),
+            area.width,
+            area.height.saturating_sub(summary_height),
+        );
+        self.control.layout(self.control_area, ctx)
     }
     fn render<'a>(
         &'a self,
         frame: &mut Frame,
-        area: ratatui::layout::Rect,
+        _area: ratatui::layout::Rect,
         ctx: &mut RenderCtx<'a>,
     ) {
-        self.control.render(frame, area, ctx);
+        self.summary.render(frame, self.summary_area);
+        self.control.render(frame, self.control_area, ctx);
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
         self.handle_event(event, ctx, |control, ctx| control.event(event, ctx))
@@ -379,30 +450,38 @@ fn backlog_rows(snapshot: &BacklogSnapshot) -> Vec<BacklogRow> {
     let mut rows = Vec::new();
     for sprint in &snapshot.sprints {
         let section = format!("sprint-{}", sprint.id);
-        rows.push(section_row(
-            &section,
-            format!(
-                "{} · {} ({})",
-                snapshot.board_name, sprint.name, sprint.state
-            ),
-        ));
-        rows.extend(
-            sprint
-                .work_items
-                .iter()
-                .map(|item| work_item_row(item, &section, snapshot.story_points_configured)),
-        );
+        rows.push(section_row(&section, sprint_title(sprint)));
+        rows.extend(sprint.work_items.iter().enumerate().map(|(index, item)| {
+            work_item_row(
+                item,
+                &section,
+                snapshot.story_points_configured,
+                None,
+                sprint.capacity.as_ref().map(|capacity| {
+                    (
+                        capacity.assumed_ticket_size,
+                        capacity.assumed_ticket_size_from_average,
+                    )
+                }),
+                index % 2 == 0,
+            )
+        }));
     }
-    rows.push(section_row(
-        "backlog",
-        format!("{} · Backlog", snapshot.board_name),
-    ));
-    rows.extend(
-        snapshot
-            .work_items
-            .iter()
-            .map(|item| work_item_row(item, "backlog", snapshot.story_points_configured)),
-    );
+    rows.push(section_row("backlog", backlog_title(snapshot)));
+    rows.extend(snapshot.work_items.iter().enumerate().map(|(index, item)| {
+        work_item_row(
+            item,
+            "backlog",
+            snapshot.story_points_configured,
+            snapshot
+                .runway
+                .as_ref()
+                .and_then(|runway| runway.tickets.get(index))
+                .cloned(),
+            None,
+            index % 2 == 0,
+        )
+    }));
     rows
 }
 
@@ -416,22 +495,47 @@ fn section_row(section: &str, title: String) -> BacklogRow {
 fn section_row_id(section: &str) -> String {
     format!("section:{section}")
 }
-fn work_item_row(item: &WorkItem, section: &str, show_story_points: bool) -> BacklogRow {
+fn work_item_row(
+    item: &WorkItem,
+    section: &str,
+    show_story_points: bool,
+    runway: Option<RunwayTicket>,
+    assumed_ticket_size: Option<(f64, bool)>,
+    alternate_background: bool,
+) -> BacklogRow {
+    let assumed_ticket_size = runway
+        .as_ref()
+        .filter(|runway| runway.assumed)
+        .map(|runway| (runway.effective_points, runway.assumed_from_average))
+        .or(assumed_ticket_size);
     BacklogRow {
         id: format!("ticket:{}", item.key),
         parent_id: Some(section_row_id(section)),
-        content: BacklogRowContent::WorkItem(WorkItemRow {
-            id: item.key.clone(),
-            key: item.key.clone(),
-            title: item.title.clone(),
-            kind: work_item_kind(&item.kind),
-            priority: item.priority.clone(),
-            status: item.status.clone(),
-            assignee: item.assignee.clone(),
-            story_points: item.story_points,
-            show_story_points,
-            change_badge: None,
-            submitted: false,
+        content: BacklogRowContent::WorkItem(BacklogWorkItem {
+            item: WorkItemRow {
+                id: item.key.clone(),
+                key: item.key.clone(),
+                title: item.title.clone(),
+                kind: work_item_kind(&item.kind),
+                priority: item.priority.clone(),
+                status: item.status.clone(),
+                assignee: item.assignee.clone(),
+                story_points: item
+                    .story_points
+                    .or_else(|| assumed_ticket_size.map(|(points, _)| points)),
+                show_story_points: show_story_points || assumed_ticket_size.is_some(),
+                story_points_estimated: item.story_points.is_none()
+                    && assumed_ticket_size.is_some(),
+                story_points_from_average: item.story_points.is_none()
+                    && assumed_ticket_size.is_some_and(|(_, from_average)| from_average),
+                change_badge: None,
+                submitted: false,
+            },
+            runway,
+            alternate_background,
+            subtask_progress: item.subtask_progress.clone(),
+            fix_versions: item.fix_versions.clone(),
+            epic_name: item.epic_name.clone(),
         }),
     }
 }
@@ -447,14 +551,176 @@ fn backlog_column() -> Column<BacklogRow, String> {
                     .fg(tuicore::theme().accent_fg())
                     .add_modifier(Modifier::BOLD),
             )),
-            BacklogRowContent::WorkItem(item) => work_item_text(item),
+            BacklogRowContent::WorkItem(item) => backlog_work_item_text(item),
         },
     )
     .constrained()
+    .wrap_continuation_indent_by(|row| match &row.content {
+        BacklogRowContent::Section { .. } => 0,
+        BacklogRowContent::WorkItem(item) => tuicore::preset()
+            .data_view()
+            .tree_indent_width()
+            .saturating_add(1)
+            .saturating_add(2)
+            .saturating_add(work_item_title_prefix_width(&item.item)),
+    })
     .search_key(|row| match &row.content {
         BacklogRowContent::Section { title } => title.clone(),
-        BacklogRowContent::WorkItem(item) => format!("{} {}", item.key, item.title),
+        BacklogRowContent::WorkItem(item) => format!("{} {}", item.item.key, item.item.title),
     })
+}
+
+fn backlog_work_item_text(row: &BacklogWorkItem) -> Text<'static> {
+    let theme = tuicore::theme();
+    let text_style = Style::default().fg(theme.text_fg());
+    let muted_style = Style::default().fg(theme.muted_fg());
+    let mut metadata = Vec::new();
+    if row.item.show_story_points {
+        let style = (row.item.story_points.is_some() && !row.item.story_points_estimated)
+            .then_some(text_style)
+            .unwrap_or(muted_style);
+        metadata.push(Span::styled(story_points_label(&row.item), style));
+    }
+    append_metadata(&mut metadata, bubble_span(&row.item.assignee));
+    if let Some(progress) = &row.subtask_progress {
+        append_metadata(
+            &mut metadata,
+            Span::styled(
+                format!("{}/{} ", progress.completed, progress.total),
+                text_style,
+            ),
+        );
+    }
+    if !row.item.status.is_empty() {
+        append_metadata(
+            &mut metadata,
+            Span::styled(row.item.status.clone(), text_style),
+        );
+    }
+    if !row.fix_versions.is_empty() {
+        append_metadata(
+            &mut metadata,
+            Span::styled(
+                row.fix_versions.join(", "),
+                Style::default()
+                    .fg(theme.highlight_fg())
+                    .bg(theme.highlight_bg()),
+            ),
+        );
+    }
+    if let Some(epic_name) = &row.epic_name {
+        append_metadata(
+            &mut metadata,
+            Span::styled(epic_name.clone(), Style::default().fg(theme.accent_fg())),
+        );
+    }
+    Text::from(vec![
+        work_item_title_with_key_line(&row.item),
+        Line::from(metadata),
+    ])
+}
+
+fn append_metadata(metadata: &mut Vec<Span<'static>>, value: Span<'static>) {
+    if !metadata.is_empty() {
+        metadata.push(Span::raw(" • "));
+    }
+    metadata.push(value);
+}
+
+fn sprint_title(sprint: &Sprint) -> String {
+    let icon = sprint_icon(&sprint.state);
+    let date_range = sprint_date_range(sprint)
+        .map(|range| format!(" • {range}"))
+        .unwrap_or_default();
+    let Some(capacity) = sprint.capacity.as_ref() else {
+        return format!("{icon} {}{date_range}", sprint.name);
+    };
+    format!(
+        "{icon} {} • {} pts{date_range} • {}",
+        sprint_capacity_icon(capacity.state),
+        points_label(capacity.effective_points),
+        sprint.name,
+    )
+}
+
+fn backlog_title(_: &BacklogSnapshot) -> String {
+    " Backlog".into()
+}
+
+fn backlog_summary(snapshot: &BacklogSnapshot) -> Paragraph {
+    let text = snapshot.runway.as_ref().map_or_else(
+        || "Velocity unavailable".into(),
+        |runway| {
+            format!(
+                "Velocity {}",
+                velocity_label(runway.capacity, runway.source)
+            )
+        },
+    );
+    Paragraph::new(text).style(Style::default().fg(tuicore::theme().accent_fg()))
+}
+
+fn sprint_icon(state: &str) -> &'static str {
+    match state {
+        "active" => "",
+        "future" => "",
+        _ => "•",
+    }
+}
+
+fn sprint_capacity_icon(state: SprintCapacityState) -> &'static str {
+    match state {
+        SprintCapacityState::OnTarget => "",
+        SprintCapacityState::OverCommitted => "",
+        SprintCapacityState::UnderCommitted => "",
+    }
+}
+
+fn sprint_date_range(sprint: &Sprint) -> Option<String> {
+    Some(format!(
+        "{} - {}",
+        sprint_date_label(sprint.start_date.as_deref()?)?,
+        sprint_date_label(sprint.end_date.as_deref()?)?,
+    ))
+}
+
+fn sprint_date_label(date: &str) -> Option<String> {
+    let mut parts = date.get(..10)?.split('-');
+    let year = parts.next()?.parse::<u16>().ok()?;
+    let month = parts.next()?.parse::<u8>().ok()?;
+    let day = parts.next()?.parse::<u8>().ok()?;
+    let month = match month {
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
+        5 => "May",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        12 => "Dec",
+        _ => return None,
+    };
+    (year > 0 && (1..=31).contains(&day) && parts.next().is_none())
+        .then(|| format!("{day} {month}"))
+}
+
+fn velocity_label(capacity: f64, source: RunwayCapacitySource) -> String {
+    let prefix = matches!(source, RunwayCapacitySource::JiraVelocity)
+        .then_some("~")
+        .unwrap_or("");
+    format!("{prefix}{}", points_label(capacity))
+}
+
+fn points_label(points: f64) -> String {
+    if points.fract().abs() < f64::EPSILON {
+        format!("{points:.0}")
+    } else {
+        format!("{points:.1}")
+    }
 }
 fn work_item_kind(kind: &str) -> WorkItemKind {
     match kind.to_ascii_lowercase().as_str() {

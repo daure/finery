@@ -9,7 +9,7 @@ use ratatui::{Frame, layout::Rect};
 use tuicore::{
     AnimationSettings, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId,
     FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    PasswordInput, RenderCtx, TextInput, TickResult, TuiEvent, TuiNode,
+    PasswordInput, RenderCtx, TextInput, TickResult, Toggle, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -28,6 +28,11 @@ enum SettingChange {
     JiraDefaultProject(String),
     JiraDefaultBoard(String),
     JiraStoryPointsFieldId(String),
+    BacklogUseJiraVelocity(bool),
+    BacklogFixedSprintCapacity(String),
+    BacklogUseAverageTicketSize(bool),
+    BacklogFixedTicketSize(String),
+    BacklogSprintTolerancePercent(String),
     Wpm(String),
     MarkdownBlockPause(String),
 }
@@ -49,6 +54,11 @@ impl SettingsDialog {
         let project_changes = Rc::clone(&changes);
         let board_changes = Rc::clone(&changes);
         let story_points_changes = Rc::clone(&changes);
+        let velocity_changes = Rc::clone(&changes);
+        let sprint_capacity_changes = Rc::clone(&changes);
+        let average_ticket_size_changes = Rc::clone(&changes);
+        let ticket_size_changes = Rc::clone(&changes);
+        let tolerance_changes = Rc::clone(&changes);
         let wpm_changes = Rc::clone(&changes);
         let delay_changes = Rc::clone(&changes);
         let root = Flex::column()
@@ -131,6 +141,68 @@ impl SettingsDialog {
                 FlexItem::fixed(3),
             )
             .child(
+                "backlog-use-jira-velocity",
+                Toggle::new("Backlog capacity: use Jira velocity")
+                    .checked(values.backlog_runway.use_jira_velocity)
+                    .on_change(move |value| {
+                        velocity_changes
+                            .borrow_mut()
+                            .push(SettingChange::BacklogUseJiraVelocity(value));
+                    }),
+                FlexItem::fixed(1),
+            )
+            .child(
+                "backlog-fixed-sprint-capacity",
+                TextInput::new()
+                    .value(values.backlog_runway.fixed_sprint_capacity.to_string())
+                    .panel("Backlog fixed / fallback sprint capacity")
+                    .placeholder("20")
+                    .on_edit_end(move |value| {
+                        sprint_capacity_changes
+                            .borrow_mut()
+                            .push(SettingChange::BacklogFixedSprintCapacity(value));
+                    }),
+                FlexItem::fixed(3),
+            )
+            .child(
+                "backlog-use-average-ticket-size",
+                Toggle::new("Backlog assumptions: average loaded estimates")
+                    .checked(values.backlog_runway.use_average_ticket_size)
+                    .on_change(move |value| {
+                        average_ticket_size_changes
+                            .borrow_mut()
+                            .push(SettingChange::BacklogUseAverageTicketSize(value));
+                    }),
+                FlexItem::fixed(1),
+            )
+            .child(
+                "backlog-fixed-ticket-size",
+                TextInput::new()
+                    .value(values.backlog_runway.fixed_ticket_size.to_string())
+                    .panel("Backlog fixed assumed ticket size")
+                    .placeholder("3")
+                    .on_edit_end(move |value| {
+                        ticket_size_changes
+                            .borrow_mut()
+                            .push(SettingChange::BacklogFixedTicketSize(value));
+                    }),
+                FlexItem::fixed(3),
+            )
+            .child(
+                "backlog-sprint-tolerance-percent",
+                TextInput::new()
+                    .value(values.backlog_runway.sprint_tolerance_percent.to_string())
+                    .numbers_only(true)
+                    .panel("Sprint target tolerance (%)")
+                    .placeholder("20")
+                    .on_edit_end(move |value| {
+                        tolerance_changes
+                            .borrow_mut()
+                            .push(SettingChange::BacklogSprintTolerancePercent(value));
+                    }),
+                FlexItem::fixed(3),
+            )
+            .child(
                 "speed-reader-wpm",
                 TextInput::new()
                     .value(values.speed_reader.wpm.to_string())
@@ -203,6 +275,52 @@ impl SettingsDialog {
                     settings.set_manual_story_points_field(value.trim().into());
                     changed = true;
                 }
+                SettingChange::BacklogUseJiraVelocity(value) => {
+                    settings.backlog_runway.use_jira_velocity = value;
+                    changed = true;
+                }
+                SettingChange::BacklogFixedSprintCapacity(value) => {
+                    let Some(value) = parse_positive_number(&value) else {
+                        ctx.notify(tuicore::Notification::warning(
+                            "Invalid sprint capacity",
+                            "Enter a positive number of story points.",
+                        ));
+                        continue;
+                    };
+                    settings.backlog_runway.fixed_sprint_capacity = value;
+                    changed = true;
+                }
+                SettingChange::BacklogUseAverageTicketSize(value) => {
+                    settings.backlog_runway.use_average_ticket_size = value;
+                    changed = true;
+                }
+                SettingChange::BacklogFixedTicketSize(value) => {
+                    let Some(value) = parse_nonnegative_number(&value) else {
+                        ctx.notify(tuicore::Notification::warning(
+                            "Invalid assumed ticket size",
+                            "Enter zero or a positive number of story points.",
+                        ));
+                        continue;
+                    };
+                    settings.backlog_runway.fixed_ticket_size = value;
+                    changed = true;
+                }
+                SettingChange::BacklogSprintTolerancePercent(value) => {
+                    let Some(value) = value
+                        .trim()
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|value| *value <= 100)
+                    else {
+                        ctx.notify(tuicore::Notification::warning(
+                            "Invalid sprint tolerance",
+                            "Enter a whole percentage from 0 to 100.",
+                        ));
+                        continue;
+                    };
+                    settings.backlog_runway.sprint_tolerance_percent = value;
+                    changed = true;
+                }
                 SettingChange::Wpm(value) => {
                     let Some(wpm) = parse_speed_reader_wpm(&value) else {
                         ctx.notify(tuicore::Notification::warning(
@@ -235,6 +353,18 @@ impl SettingsDialog {
             self.service.save_settings(settings);
         }
     }
+}
+
+fn parse_positive_number(value: &str) -> Option<f64> {
+    parse_nonnegative_number(value).filter(|value| *value > 0.0)
+}
+
+fn parse_nonnegative_number(value: &str) -> Option<f64> {
+    value
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
 }
 
 impl TuiNode for SettingsDialog {

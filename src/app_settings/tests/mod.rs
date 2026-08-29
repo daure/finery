@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 
 use super::{
-    AppSettings, COMPOSER_ADD_CHILD_KEY_SETTING, COMPOSER_ADD_SIBLING_KEY_SETTING,
-    COMPOSER_COMMIT_KEY_SETTING, COMPOSER_CREATE_SUBMIT_KEY_SETTING,
-    COMPOSER_DESCRIPTION_FOCUS_KEY_SETTING, COMPOSER_DESCRIPTION_READER_KEY_SETTING,
-    COMPOSER_ISSUE_TYPE_KEY_SETTING, COMPOSER_VIEW_KEY_SETTING, JIRA_STORY_POINTS_BOARD_ID_SETTING,
+    AppSettings, BACKLOG_FIXED_SPRINT_CAPACITY_SETTING, BACKLOG_FIXED_TICKET_SIZE_SETTING,
+    BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING, BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING,
+    BACKLOG_USE_JIRA_VELOCITY_SETTING, COMPOSER_ADD_CHILD_KEY_SETTING,
+    COMPOSER_ADD_SIBLING_KEY_SETTING, COMPOSER_COMMIT_KEY_SETTING,
+    COMPOSER_CREATE_SUBMIT_KEY_SETTING, COMPOSER_DESCRIPTION_FOCUS_KEY_SETTING,
+    COMPOSER_DESCRIPTION_READER_KEY_SETTING, COMPOSER_ISSUE_TYPE_KEY_SETTING,
+    COMPOSER_VIEW_KEY_SETTING, JIRA_STORY_POINTS_BOARD_ID_SETTING,
     JIRA_STORY_POINTS_FIELD_ID_SETTING, SPEED_READER_WPM_SETTING,
 };
 
@@ -45,6 +48,40 @@ fn story_points_field_id_round_trips_through_settings_values() {
             .values()
             .contains(&(JIRA_STORY_POINTS_BOARD_ID_SETTING, "42".into()))
     );
+}
+
+#[test]
+fn backlog_runway_settings_round_trip_and_reject_invalid_values() {
+    let settings = AppSettings::resolve(&HashMap::from([
+        (BACKLOG_USE_JIRA_VELOCITY_SETTING.into(), "true".into()),
+        (BACKLOG_FIXED_SPRINT_CAPACITY_SETTING.into(), "18.5".into()),
+        (
+            BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING.into(),
+            "true".into(),
+        ),
+        (BACKLOG_FIXED_TICKET_SIZE_SETTING.into(), "2.5".into()),
+        (BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING.into(), "15".into()),
+    ]))
+    .unwrap();
+
+    assert!(settings.backlog_runway.use_jira_velocity);
+    assert_eq!(settings.backlog_runway.fixed_sprint_capacity, 18.5);
+    assert!(settings.backlog_runway.use_average_ticket_size);
+    assert_eq!(settings.backlog_runway.fixed_ticket_size, 2.5);
+    assert_eq!(settings.backlog_runway.sprint_tolerance_percent, 15);
+    assert!(
+        settings
+            .values()
+            .contains(&(BACKLOG_FIXED_SPRINT_CAPACITY_SETTING, "18.5".into()))
+    );
+
+    let defaults = AppSettings::resolve(&HashMap::from([(
+        BACKLOG_FIXED_SPRINT_CAPACITY_SETTING.into(),
+        "0".into(),
+    )]))
+    .unwrap();
+    assert_eq!(defaults.backlog_runway.fixed_sprint_capacity, 20.0);
+    assert_eq!(defaults.backlog_runway.sprint_tolerance_percent, 20);
 }
 
 #[test]
