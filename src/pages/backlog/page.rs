@@ -7,9 +7,10 @@ use std::{
 
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
-    AnimationSettings, DialogBackdrop, DialogLayer, EventCtx, EventOutcome, EventRoute, FocusCtx,
-    FocusId, FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    RenderCtx, TickResult, TuiEvent, TuiNode,
+    AnimationSettings, CrossAlign, DialogBackdrop, DialogLayer, EventCtx, EventOutcome, EventRoute,
+    Flex, FlexItem, FocusCtx, FocusId, FocusTarget, LayoutCtx, LayoutProposal, LayoutResult,
+    LayoutSizeHint, LifecycleCtx, MainAlign, Paragraph, RenderCtx, ScrollContainer, Spinner,
+    TickResult, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -158,10 +159,25 @@ pub(super) struct PendingTransfer {
     pub(super) unconfirmed_refreshes: usize,
 }
 
+#[derive(Clone)]
+pub(super) struct PendingRank {
+    pub(super) rollback_snapshot: BacklogSnapshot,
+    pub(super) section_id: String,
+    pub(super) final_order: Vec<String>,
+    pub(super) unconfirmed_refreshes: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PendingTransferReconciliation {
     ConfirmedDestination,
     ConfirmedSourceRollback,
+    Unconfirmed,
+    Exhausted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PendingRankReconciliation {
+    Confirmed,
     Unconfirmed,
     Exhausted,
 }
@@ -180,6 +196,7 @@ pub(crate) struct BacklogPage {
     receiver: Receiver<BacklogResult>,
     section_receiver: Receiver<BacklogSectionEvent>,
     view: BacklogView,
+    loading_view: ScrollContainer<Flex<()>>,
     loading: bool,
     ranking: bool,
     move_locked: Rc<Cell<bool>>,
@@ -188,6 +205,7 @@ pub(crate) struct BacklogPage {
     active_rank_plan: Option<RankPlan>,
     snapshot: Option<BacklogSnapshot>,
     pending_transfer: Option<PendingTransfer>,
+    pending_rank: Option<PendingRank>,
 }
 
 impl BacklogPage {
@@ -205,6 +223,7 @@ impl BacklogPage {
                 section_sender.clone(),
                 move_locked.clone(),
             ),
+            loading_view: loading_view(),
             loading: false,
             ranking: false,
             move_locked,
@@ -213,6 +232,7 @@ impl BacklogPage {
             active_rank_plan: None,
             snapshot: None,
             pending_transfer: None,
+            pending_rank: None,
         }
     }
 
@@ -221,6 +241,13 @@ impl BacklogPage {
         let mut page = Self::new(AppService::for_tests());
         page.snapshot = Some(snapshot);
         page.restore_snapshot();
+        page
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_initial_loading_for_test() -> Self {
+        let mut page = Self::new(AppService::for_tests());
+        page.loading = true;
         page
     }
 
@@ -270,6 +297,10 @@ impl BacklogPage {
                 self.handle_load_failure(completion, error.clone(), error);
             }
         }
+    }
+
+    fn shows_initial_loading(&self) -> bool {
+        self.loading && self.snapshot.is_none()
     }
 
     fn drain_results(&mut self) -> bool {
@@ -341,6 +372,32 @@ impl BacklogPage {
                             transfer_reconciliation_highlight(reconciliation, &transfer)
                         }
                     }
+                } else if preserves_optimistic_view && self.pending_rank.is_some() {
+                    let reconciliation = reconcile_pending_rank(
+                        self.snapshot
+                            .as_mut()
+                            .expect("optimistic rank has a snapshot"),
+                        &mut self.pending_rank,
+                        snapshot,
+                    );
+                    match reconciliation {
+                        PendingRankReconciliation::Unconfirmed => {
+                            self.rank_refresh_retry.schedule(true);
+                            return true;
+                        }
+                        PendingRankReconciliation::Exhausted => {
+                            self.move_locked.set(false);
+                            self.rank_refresh_retry.cancel();
+                            self.service.report_error(
+                                "Jira did not verify the ticket rank after refresh retries".into(),
+                            );
+                            None
+                        }
+                        PendingRankReconciliation::Confirmed => {
+                            self.move_locked.set(false);
+                            None
+                        }
+                    }
                 } else {
                     self.snapshot = Some(snapshot.clone());
                     if matches!(completion, LoadCompletion::RankRefresh { .. }) {
@@ -360,7 +417,9 @@ impl BacklogPage {
                             warning.clone(),
                         ));
                 }
-                if !preserves_optimistic_view || self.pending_transfer.is_none() {
+                if !preserves_optimistic_view
+                    || (self.pending_transfer.is_none() && self.pending_rank.is_none())
+                {
                     self.view.base_mut().set_snapshot(snapshot);
                     if let Some((_, row_id)) = highlight {
                         self.view.base_mut().highlight(&row_id);
@@ -407,14 +466,15 @@ impl BacklogPage {
             Ok(()) => {
                 let plan = self
                     .active_rank_plan
-                    .take()
+                    .as_ref()
                     .expect("completed Jira rank has an active plan");
-                self.report_rank_success(&plan);
+                self.report_rank_success(plan);
+                self.active_rank_plan = None;
                 self.load(true, true);
             }
             Err(error) => {
                 self.active_rank_plan = None;
-                self.restore_snapshot();
+                self.restore_rank_snapshot();
                 self.service
                     .report_error(format!("Could not rank Jira backlog: {error}"));
                 self.load(true, false);
@@ -439,8 +499,6 @@ impl BacklogPage {
                     }
                     if !self.view.layer_mut().open(
                         section_id.clone(),
-                        section_display_label(self.snapshot.as_ref(), &section_id)
-                            .expect("rendered backlog section exists in its snapshot"),
                         keys,
                         source_order,
                         transfer_destinations(self.snapshot.as_ref(), &section_id),
@@ -550,7 +608,6 @@ impl BacklogPage {
             self.restore_snapshot();
             return;
         }
-        self.show_optimistic_order(&section_id, &final_order);
         self.rank(section_id, keys, final_order);
     }
 
@@ -694,11 +751,16 @@ impl BacklogPage {
         self.restore_snapshot();
     }
 
-    fn show_optimistic_order(&mut self, section_id: &str, order: &[String]) {
+    fn show_optimistic_order(
+        &mut self,
+        section_id: &str,
+        order: &[String],
+    ) -> Option<BacklogSnapshot> {
         let Some(snapshot) = self.snapshot.as_ref() else {
-            return;
+            return None;
         };
-        let mut optimistic = snapshot.clone();
+        let rollback_snapshot = snapshot.clone();
+        let mut optimistic = rollback_snapshot.clone();
         if section_id == "backlog" {
             sort_work_items(&mut optimistic.work_items, order);
         } else if let Some(sprint) = optimistic
@@ -708,7 +770,9 @@ impl BacklogPage {
         {
             sort_work_items(&mut sprint.work_items, order);
         }
+        self.snapshot = Some(optimistic.clone());
         self.view.base_mut().set_snapshot(&optimistic);
+        Some(rollback_snapshot)
     }
 
     fn rank(&mut self, section_id: String, moved_keys: Vec<String>, final_order: Vec<String>) {
@@ -727,6 +791,15 @@ impl BacklogPage {
                 return;
             }
         };
+        let Some(rollback_snapshot) = self.show_optimistic_order(&section_id, &final_order) else {
+            return;
+        };
+        self.pending_rank = Some(PendingRank {
+            rollback_snapshot,
+            section_id,
+            final_order,
+            unconfirmed_refreshes: 0,
+        });
         self.move_locked.set(true);
         self.start_rank(plan);
     }
@@ -751,7 +824,7 @@ impl BacklogPage {
             if self.generations.complete_rank(generation) {
                 self.ranking = false;
                 self.active_rank_plan = None;
-                self.restore_snapshot();
+                self.restore_rank_snapshot();
                 self.move_locked.set(false);
                 self.service
                     .report_error(format!("Could not start Jira rank: {error}"));
@@ -763,6 +836,14 @@ impl BacklogPage {
         if let Some(snapshot) = self.snapshot.as_ref() {
             self.view.base_mut().set_snapshot(snapshot);
         }
+    }
+
+    fn restore_rank_snapshot(&mut self) {
+        let Some(pending_rank) = self.pending_rank.take() else {
+            return;
+        };
+        self.snapshot = Some(pending_rank.rollback_snapshot);
+        self.restore_snapshot();
     }
 
     fn report_rank_success(&self, plan: &RankPlan) {
@@ -844,6 +925,29 @@ pub(super) fn reconcile_pending_transfer(
         PendingTransferReconciliation::Exhausted
     } else {
         PendingTransferReconciliation::Unconfirmed
+    }
+}
+
+pub(super) fn reconcile_pending_rank(
+    optimistic_snapshot: &mut BacklogSnapshot,
+    pending_rank: &mut Option<PendingRank>,
+    refreshed_snapshot: BacklogSnapshot,
+) -> PendingRankReconciliation {
+    let Some(rank) = pending_rank.as_mut() else {
+        return PendingRankReconciliation::Unconfirmed;
+    };
+    if source_order(Some(&refreshed_snapshot), &rank.section_id) == rank.final_order {
+        *optimistic_snapshot = refreshed_snapshot;
+        pending_rank.take();
+        return PendingRankReconciliation::Confirmed;
+    }
+    rank.unconfirmed_refreshes += 1;
+    if rank.unconfirmed_refreshes >= MAX_UNCONFIRMED_TRANSFER_REFRESHES {
+        *optimistic_snapshot = refreshed_snapshot;
+        pending_rank.take();
+        PendingRankReconciliation::Exhausted
+    } else {
+        PendingRankReconciliation::Unconfirmed
     }
 }
 
@@ -940,17 +1044,6 @@ pub(super) fn transfer_destinations(
     destinations
 }
 
-fn section_display_label(snapshot: Option<&BacklogSnapshot>, section_id: &str) -> Option<String> {
-    if section_id == "backlog" {
-        return Some("backlog".into());
-    }
-    snapshot?
-        .sprints
-        .iter()
-        .find(|sprint| format!("sprint-{}", sprint.id) == section_id)
-        .map(|sprint| format!("{} ({})", sprint.name, sprint.state))
-}
-
 fn sort_work_items(work_items: &mut [crate::store::work_items::WorkItem], order: &[String]) {
     work_items.sort_by_key(|item| {
         order
@@ -1034,20 +1127,58 @@ fn empty_snapshot() -> BacklogSnapshot {
     }
 }
 
+fn loading_view() -> ScrollContainer<Flex<()>> {
+    ScrollContainer::vertical(
+        Flex::column()
+            .justify(MainAlign::Center)
+            .align(CrossAlign::Center)
+            .child(
+                "loading",
+                Flex::row()
+                    .gap(1)
+                    .align(CrossAlign::Center)
+                    .child("spinner", Spinner::new(), FlexItem::fit_content())
+                    .child(
+                        "message",
+                        Paragraph::new("Loading Jira backlog…"),
+                        FlexItem::fit_content(),
+                    ),
+                FlexItem::fit_content(),
+            ),
+    )
+}
+
 impl TuiNode for BacklogPage {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
-        self.view.measure(proposal)
+        if self.shows_initial_loading() {
+            self.loading_view.measure(proposal)
+        } else {
+            self.view.measure(proposal)
+        }
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        self.view.layout(area, ctx)
+        if self.shows_initial_loading() {
+            ctx.with_focus_fallback(FocusId::new("backlog-loading"), area, |ctx| {
+                self.loading_view.layout(area, ctx)
+            })
+        } else {
+            self.view.layout(area, ctx)
+        }
     }
 
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
-        self.view.render(frame, area, ctx);
+        if self.shows_initial_loading() {
+            self.loading_view.render(frame, area, ctx);
+        } else {
+            self.view.render(frame, area, ctx);
+        }
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        if self.shows_initial_loading() {
+            return self.loading_view.event(event, ctx);
+        }
         let outcome = self.view.event(event, ctx);
         if self.drain_quick_menu_events(ctx) || self.drain_section_events(ctx) {
             ctx.request_redraw();
@@ -1062,6 +1193,9 @@ impl TuiNode for BacklogPage {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
+        if self.shows_initial_loading() {
+            return self.loading_view.dispatch_event(route, event, ctx);
+        }
         let outcome = self.view.dispatch_event(route, event, ctx);
         if self.drain_quick_menu_events(ctx) || self.drain_section_events(ctx) {
             ctx.request_redraw();
@@ -1071,7 +1205,11 @@ impl TuiNode for BacklogPage {
     }
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        let result = self.view.tick(dt, settings);
+        let result = if self.shows_initial_loading() {
+            self.loading_view.tick(dt, settings)
+        } else {
+            self.view.tick(dt, settings)
+        };
         let result_changed = self.drain_results();
         let retry_started = if result_changed {
             false
@@ -1101,28 +1239,40 @@ impl TuiNode for BacklogPage {
     }
 
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
-        self.view.focus(target, focused, ctx);
+        if self.shows_initial_loading() {
+            self.loading_view.focus(target, focused, ctx);
+        } else {
+            self.view.focus(target, focused, ctx);
+        }
     }
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
-        self.view.dispatch_focus(target, focused, ctx);
+        if self.shows_initial_loading() {
+            self.loading_view.dispatch_focus(target, focused, ctx);
+        } else {
+            self.view.dispatch_focus(target, focused, ctx);
+        }
     }
 
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.loading_view.init(ctx);
         self.view.init(ctx);
     }
 
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.loading_view.mount(ctx);
         self.view.mount(ctx);
         self.load(false, false);
         ctx.request_tick();
     }
 
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.loading_view.unmount(ctx);
         self.view.unmount(ctx);
     }
 
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.loading_view.destroy(ctx);
         self.view.destroy(ctx);
     }
 }

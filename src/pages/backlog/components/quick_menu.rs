@@ -18,57 +18,23 @@ const MENU_FIELD_WIDTH: u16 = 36;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(in crate::pages::backlog) enum BacklogQuickAction {
-    MoveToTop {
-        section_label: String,
-        ticket_count: usize,
-    },
-    MoveToBottom {
-        section_label: String,
-        ticket_count: usize,
-    },
+    MoveToTop,
+    MoveToBottom,
     MoveToSection(BacklogDestination),
 }
 
 impl BacklogQuickAction {
-    pub(in crate::pages::backlog) fn top_bottom(
-        section_label: impl Into<String>,
-        ticket_count: usize,
-    ) -> [Self; 2] {
-        let section_label = section_label.into();
-        [
-            Self::MoveToTop {
-                section_label: section_label.clone(),
-                ticket_count,
-            },
-            Self::MoveToBottom {
-                section_label,
-                ticket_count,
-            },
-        ]
+    pub(in crate::pages::backlog) fn top_bottom() -> [Self; 2] {
+        [Self::MoveToTop, Self::MoveToBottom]
     }
 
     pub(in crate::pages::backlog) fn label(&self) -> String {
         match self {
-            Self::MoveToTop {
-                section_label,
-                ticket_count,
-            } => move_label("top", section_label, *ticket_count),
-            Self::MoveToBottom {
-                section_label,
-                ticket_count,
-            } => move_label("bottom", section_label, *ticket_count),
-            Self::MoveToSection(destination) => format!("Move tickets to {}", destination.label),
+            Self::MoveToTop => "Move to top".into(),
+            Self::MoveToBottom => "Move to bottom".into(),
+            Self::MoveToSection(destination) => format!("Move to {}", destination.label),
         }
     }
-}
-
-fn move_label(position: &str, section_label: &str, ticket_count: usize) -> String {
-    let ticket = if ticket_count == 1 {
-        "ticket"
-    } else {
-        "tickets"
-    };
-    format!("Move {ticket} to {position} of {section_label}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -114,7 +80,7 @@ impl BacklogQuickMenu {
         let selected = Rc::new(RefCell::new(Vec::new()));
         let selected_actions = Rc::clone(&selected);
         let dropdown = Dropdown::single(
-            BacklogQuickAction::top_bottom("backlog", 0),
+            BacklogQuickAction::top_bottom(),
             |action| action.clone(),
             |action| action.label(),
         )
@@ -148,7 +114,6 @@ impl BacklogQuickMenu {
     pub(in crate::pages::backlog) fn open(
         &mut self,
         section_id: String,
-        section_label: String,
         keys: Vec<String>,
         source_order: Vec<String>,
         destinations: Vec<BacklogDestination>,
@@ -164,13 +129,11 @@ impl BacklogQuickMenu {
         self.selected.borrow_mut().clear();
         self.dropdown.clear_selection();
         self.dropdown.set_rows(
-            BacklogQuickAction::top_bottom(section_label, self.keys.len())
-                .into_iter()
-                .chain(
-                    destinations
-                        .into_iter()
-                        .map(BacklogQuickAction::MoveToSection),
-                ),
+            BacklogQuickAction::top_bottom().into_iter().chain(
+                destinations
+                    .into_iter()
+                    .map(BacklogQuickAction::MoveToSection),
+            ),
         );
         self.dropdown.set_search_query("");
         self.dropdown.open_with_context(ctx);
@@ -208,12 +171,12 @@ impl BacklogQuickMenu {
                 continue;
             };
             let event = match action {
-                BacklogQuickAction::MoveToTop { .. } => BacklogQuickMenuEvent::MoveToTop {
+                BacklogQuickAction::MoveToTop => BacklogQuickMenuEvent::MoveToTop {
                     section_id,
                     keys: self.keys.clone(),
                     source_order: self.source_order.clone(),
                 },
-                BacklogQuickAction::MoveToBottom { .. } => BacklogQuickMenuEvent::MoveToBottom {
+                BacklogQuickAction::MoveToBottom => BacklogQuickMenuEvent::MoveToBottom {
                     section_id,
                     keys: self.keys.clone(),
                     source_order: self.source_order.clone(),

@@ -9,8 +9,9 @@ use tuicore::{
 use super::{
     components::backlog_tree,
     page::{
-        MAX_UNCONFIRMED_TRANSFER_REFRESHES, PendingTransfer, PendingTransferReconciliation,
-        move_work_items, reconcile_pending_transfer, should_poll, source_transfer_highlight,
+        BacklogPage, MAX_UNCONFIRMED_TRANSFER_REFRESHES, PendingRank, PendingRankReconciliation,
+        PendingTransfer, PendingTransferReconciliation, move_work_items, reconcile_pending_rank,
+        reconcile_pending_transfer, should_poll, source_transfer_highlight,
         source_transfer_highlight_key, transfer_destinations, transfer_reconciliation_highlight,
     },
 };
@@ -59,6 +60,29 @@ fn data_focus_target() -> FocusTarget {
         suppress_global_hotkeys: false,
         focused_events_before_global_hotkeys: false,
     }
+}
+
+#[test]
+fn backlog_shows_loading_indicator_before_the_initial_snapshot_arrives() {
+    tuicore::init();
+    let mut page = BacklogPage::with_initial_loading_for_test();
+    let area = Rect::new(0, 0, 80, 16);
+    page.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            page.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let mut text = String::new();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            text.push_str(terminal.backend().buffer().cell((x, y)).unwrap().symbol());
+        }
+    }
+    assert!(text.contains("Loading Jira backlog…"));
 }
 
 #[test]
@@ -158,6 +182,41 @@ fn quick_menu_omits_its_current_section_from_transfer_destinations() {
             .map(|destination| destination.section_id.as_str())
             .collect::<Vec<_>>(),
         ["backlog"]
+    );
+}
+
+#[test]
+fn stale_rank_refresh_keeps_the_optimistic_order() {
+    let rollback = BacklogSnapshot {
+        board_name: "Finery".into(),
+        sprints: Vec::new(),
+        work_items: vec![
+            work_item("FIN-1", "First"),
+            work_item("FIN-2", "Second"),
+            work_item("FIN-3", "Third"),
+        ],
+        warnings: Vec::new(),
+    };
+    let mut optimistic = rollback.clone();
+    optimistic.work_items.swap(0, 1);
+    let mut pending = Some(PendingRank {
+        rollback_snapshot: rollback.clone(),
+        section_id: "backlog".into(),
+        final_order: vec!["FIN-2".into(), "FIN-1".into(), "FIN-3".into()],
+        unconfirmed_refreshes: 0,
+    });
+
+    assert_eq!(
+        reconcile_pending_rank(&mut optimistic, &mut pending, rollback),
+        PendingRankReconciliation::Unconfirmed
+    );
+    assert_eq!(
+        optimistic
+            .work_items
+            .iter()
+            .map(|item| item.key.as_str())
+            .collect::<Vec<_>>(),
+        ["FIN-2", "FIN-1", "FIN-3"]
     );
 }
 
