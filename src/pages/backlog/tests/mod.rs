@@ -118,6 +118,43 @@ fn unified_backlog_tree_shows_collapsed_sprints_and_expanded_backlog() {
 }
 
 #[test]
+fn space_toggles_the_highlighted_backlog_section() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot(), sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    tree.dispatch_focus(
+        &data_focus_target(),
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char(' '))),
+        &mut ctx,
+    );
+
+    let area = Rect::new(0, 0, 80, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let mut text = String::new();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            text.push_str(terminal.backend().buffer().cell((x, y)).unwrap().symbol());
+        }
+    }
+    assert!(text.contains("Ship sprint work"));
+}
+
+#[test]
 fn long_backlog_titles_wrap_to_the_available_viewport_width() {
     tuicore::init();
     let snapshot = BacklogSnapshot {

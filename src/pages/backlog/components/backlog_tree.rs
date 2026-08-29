@@ -200,11 +200,9 @@ impl BacklogTree {
         let TuiEvent::Key(key) = event else {
             return false;
         };
-        let selection = KeySpec::plain(' ').matches(*key)
-            || ((key.modifiers == KeyModifiers::SHIFT || key.modifiers == KeyModifiers::CONTROL)
-                && (tuicore::keybindings().line_up_matches(*key)
-                    || tuicore::keybindings().line_down_matches(*key)));
-        selection
+        ((key.modifiers == KeyModifiers::SHIFT || key.modifiers == KeyModifiers::CONTROL)
+            && (tuicore::keybindings().line_up_matches(*key)
+                || tuicore::keybindings().line_down_matches(*key)))
             || KeySpec::key_with_modifiers(Key::Char('m'), KeyModifiers::CONTROL).matches(*key)
     }
 
