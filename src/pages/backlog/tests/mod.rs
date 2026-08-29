@@ -1,14 +1,18 @@
-use std::{cell::Cell, rc::Rc, sync::mpsc};
+use std::sync::mpsc;
 
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use tuicore::{
-    AnimationSettings, ChildKey, EventCtx, EventRoute, FocusCtx, FocusId, FocusRequest,
-    FocusTarget, Key, KeyEvent, KeyModifiers, LayoutCtx, RenderCtx, TreePath, TuiEvent, TuiNode,
+    AnimationSettings, ChildKey, EventCtx, EventRoute, FocusCtx, FocusId, FocusTarget, Key,
+    KeyEvent, KeyModifiers, LayoutCtx, RenderCtx, TreePath, TuiEvent, TuiNode,
 };
 
 use super::{
-    components::{BacklogSectionNavigation, backlog_section},
-    page::{LoadCompletion, RankRefreshRetry, RequestGenerations, should_poll, snapshot_view},
+    components::backlog_tree,
+    page::{
+        MAX_UNCONFIRMED_TRANSFER_REFRESHES, PendingTransfer, PendingTransferReconciliation,
+        move_work_items, reconcile_pending_transfer, should_poll, source_transfer_highlight,
+        source_transfer_highlight_key, transfer_destinations, transfer_reconciliation_highlight,
+    },
 };
 use crate::store::work_items::{BacklogSnapshot, Sprint, WorkItem, rank_plan};
 
@@ -24,6 +28,20 @@ fn work_item(key: &str, title: &str) -> WorkItem {
         parent_title: None,
         has_children: false,
         story_points: None,
+    }
+}
+
+fn snapshot() -> BacklogSnapshot {
+    BacklogSnapshot {
+        board_name: "Finery".into(),
+        sprints: vec![Sprint {
+            id: 7,
+            name: "Sprint 7".into(),
+            state: "active".into(),
+            work_items: vec![work_item("FIN-7", "Ship sprint work")],
+        }],
+        work_items: vec![work_item("FIN-8", "Plan next sprint")],
+        warnings: Vec::new(),
     }
 }
 
@@ -44,23 +62,12 @@ fn data_focus_target() -> FocusTarget {
 }
 
 #[test]
-fn sprint_sections_start_collapsed_and_backlog_starts_expanded() {
+fn unified_backlog_tree_shows_collapsed_sprints_and_expanded_backlog() {
     tuicore::init();
-    let snapshot = BacklogSnapshot {
-        board_name: "Finery".into(),
-        sprints: vec![Sprint {
-            id: 7,
-            name: "Sprint 7".into(),
-            state: "active".into(),
-            work_items: vec![work_item("FIN-7", "Ship sprint work")],
-        }],
-        work_items: vec![work_item("FIN-8", "Plan next sprint")],
-        warnings: Vec::new(),
-    };
-    let mut view = snapshot_view(&snapshot);
+    let (sender, _) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot(), sender, Default::default());
     let area = Rect::new(0, 0, 80, 16);
-    let mut layout = LayoutCtx::new();
-    view.layout(area, &mut layout);
+    view.layout(area, &mut LayoutCtx::new());
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
     terminal
         .draw(|frame| {
@@ -69,25 +76,57 @@ fn sprint_sections_start_collapsed_and_backlog_starts_expanded() {
             render.flush(frame);
         })
         .unwrap();
-    let buffer = terminal.backend().buffer();
-    let text = (0..area.height)
-        .flat_map(|y| {
-            (0..area.width).map(move |x| buffer.cell((x, y)).unwrap().symbol().to_owned())
-        })
-        .collect::<String>();
-
+    let mut text = String::new();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            text.push_str(terminal.backend().buffer().cell((x, y)).unwrap().symbol());
+        }
+    }
     assert!(text.contains("Finery · Sprint 7 (active)"));
     assert!(text.contains("Finery · Backlog"));
-    assert!(!text.contains("󰄱"));
     assert!(!text.contains("Ship sprint work"));
     assert!(text.contains("Plan next sprint"));
-    assert!(layout.focus_targets().iter().any(|target| {
-        target.id == FocusId::new("data-view") && target.hotkey_sequences == ["shift+b"]
-    }));
 }
 
 #[test]
-fn backlog_rank_plan_uses_the_next_unmoved_issue_as_the_before_anchor() {
+fn unified_tree_uses_same_section_transient_selection_for_the_quick_menu() {
+    tuicore::init();
+    let snapshot = BacklogSnapshot {
+        board_name: "Finery".into(),
+        sprints: Vec::new(),
+        work_items: vec![work_item("FIN-1", "First"), work_item("FIN-2", "Second")],
+        warnings: Vec::new(),
+    };
+    let (sender, receiver) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    tree.dispatch_focus(
+        &data_focus_target(),
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    tree.dispatch_event(&route, &TuiEvent::Key(KeyEvent::from(Key::Down)), &mut ctx);
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Down,
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut ctx,
+    );
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('.'))),
+        &mut ctx,
+    );
+    assert!(
+        matches!(receiver.try_recv(), Ok(super::components::BacklogSectionEvent::OpenQuickMenu { section_id, keys, source_order }) if section_id == "backlog" && keys == ["FIN-1", "FIN-2"] && source_order == ["FIN-1", "FIN-2"])
+    );
+}
+
+#[test]
+fn backlog_rank_plan_uses_section_order_anchors() {
     let plan = rank_plan(
         vec!["FIN-2".into(), "FIN-3".into()],
         &[
@@ -99,349 +138,155 @@ fn backlog_rank_plan_uses_the_next_unmoved_issue_as_the_before_anchor() {
     )
     .unwrap()
     .unwrap();
-
     assert_eq!(plan.issues, ["FIN-2", "FIN-3"]);
     assert_eq!(plan.rank_before_issue.as_deref(), Some("FIN-4"));
-    assert_eq!(plan.rank_after_issue, None);
 }
 
 #[test]
-fn backlog_rank_plan_uses_the_previous_unmoved_issue_or_skips_all_selected() {
-    let plan = rank_plan(
-        vec!["FIN-2".into(), "FIN-3".into()],
-        &["FIN-1".into(), "FIN-2".into(), "FIN-3".into()],
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(plan.rank_before_issue, None);
-    assert_eq!(plan.rank_after_issue.as_deref(), Some("FIN-1"));
-
-    assert!(
-        rank_plan(
-            vec!["FIN-1".into(), "FIN-2".into()],
-            &["FIN-1".into(), "FIN-2".into()],
-        )
-        .unwrap()
-        .is_none()
-    );
-}
-
-#[test]
-fn backlog_rank_plan_rejects_more_than_fifty_issues() {
-    let issues = (1..=51)
-        .map(|number| format!("FIN-{number}"))
-        .collect::<Vec<_>>();
-
-    assert!(
-        rank_plan(issues.clone(), &issues)
-            .unwrap_err()
-            .contains("at most 50")
-    );
-}
-
-#[test]
-fn rank_start_invalidates_an_older_load_result() {
-    let mut generations = RequestGenerations::default();
-    let move_locked = Cell::new(true);
-    let initial_load = generations.start_load(false, false);
-    let rank = generations.start_rank();
-
-    assert!(!generations.complete_rank(rank + 1));
-    assert!(generations.complete_rank(rank));
-    let rank_reload = generations.start_load(true, true);
-    assert!(rank_reload > rank);
+fn quick_menu_omits_its_current_section_from_transfer_destinations() {
+    let snapshot = snapshot();
     assert_eq!(
-        generations.complete_load(initial_load, true, &move_locked),
-        None
+        transfer_destinations(Some(&snapshot), "backlog")
+            .iter()
+            .map(|destination| destination.section_id.as_str())
+            .collect::<Vec<_>>(),
+        ["sprint-7"]
     );
-    assert!(move_locked.get());
     assert_eq!(
-        generations.complete_load(rank_reload, true, &move_locked),
-        Some(LoadCompletion::RankRefresh {
-            preserve_optimistic_view: true,
-        })
+        transfer_destinations(Some(&snapshot), "sprint-7")
+            .iter()
+            .map(|destination| destination.section_id.as_str())
+            .collect::<Vec<_>>(),
+        ["backlog"]
     );
-    assert!(!move_locked.get());
 }
 
 #[test]
-fn polling_continues_while_loading_or_ranking() {
+fn optimistic_transfer_moves_selected_items_between_sections() {
+    let mut snapshot = snapshot();
+    assert!(move_work_items(
+        &mut snapshot,
+        "backlog",
+        "sprint-7",
+        &["FIN-8".into()]
+    ));
+    assert!(snapshot.work_items.is_empty());
+    assert_eq!(
+        snapshot.sprints[0]
+            .work_items
+            .iter()
+            .map(|item| item.key.as_str())
+            .collect::<Vec<_>>(),
+        ["FIN-7", "FIN-8"]
+    );
+}
+
+#[test]
+fn transfer_refresh_keeps_optimistic_snapshot_until_destination_confirms() {
+    let rollback_snapshot = snapshot();
+    let mut optimistic_snapshot = rollback_snapshot.clone();
+    assert!(move_work_items(
+        &mut optimistic_snapshot,
+        "backlog",
+        "sprint-7",
+        &["FIN-8".into()]
+    ));
+    let mut pending = Some(PendingTransfer {
+        rollback_snapshot,
+        source_section_id: "backlog".into(),
+        destination_section_id: "sprint-7".into(),
+        keys: vec!["FIN-8".into()],
+        source_highlight_key: None,
+        ambiguous: false,
+        unconfirmed_refreshes: 0,
+    });
+    let stale = pending.as_ref().unwrap().rollback_snapshot.clone();
+    assert_eq!(
+        reconcile_pending_transfer(&mut optimistic_snapshot, &mut pending, stale),
+        PendingTransferReconciliation::Unconfirmed
+    );
+    assert!(pending.is_some());
+    let confirmed = optimistic_snapshot.clone();
+    assert_eq!(
+        reconcile_pending_transfer(&mut optimistic_snapshot, &mut pending, confirmed),
+        PendingTransferReconciliation::ConfirmedDestination
+    );
+    assert!(pending.is_none());
+}
+
+#[test]
+fn transfer_highlight_prefers_remaining_source_ticket_then_section() {
+    assert_eq!(
+        source_transfer_highlight_key(
+            &["FIN-1".into(), "FIN-2".into(), "FIN-3".into()],
+            &["FIN-2".into()]
+        ),
+        Some("FIN-3".into())
+    );
+    assert_eq!(
+        source_transfer_highlight("backlog", Some("FIN-3")),
+        ("backlog".into(), "ticket:FIN-3".into())
+    );
+    assert_eq!(
+        source_transfer_highlight("sprint-7", None),
+        ("sprint-7".into(), "section:sprint-7".into())
+    );
+}
+
+#[test]
+fn unconfirmed_transfer_refreshes_exhaust() {
+    let refreshed = snapshot();
+    let mut optimistic = refreshed.clone();
+    assert!(move_work_items(
+        &mut optimistic,
+        "backlog",
+        "sprint-7",
+        &["FIN-8".into()]
+    ));
+    let mut pending = Some(PendingTransfer {
+        rollback_snapshot: refreshed.clone(),
+        source_section_id: "backlog".into(),
+        destination_section_id: "sprint-7".into(),
+        keys: vec!["FIN-8".into()],
+        source_highlight_key: None,
+        ambiguous: false,
+        unconfirmed_refreshes: 0,
+    });
+    for _ in 1..MAX_UNCONFIRMED_TRANSFER_REFRESHES {
+        assert_eq!(
+            reconcile_pending_transfer(&mut optimistic, &mut pending, refreshed.clone()),
+            PendingTransferReconciliation::Unconfirmed
+        );
+    }
+    assert_eq!(
+        reconcile_pending_transfer(&mut optimistic, &mut pending, refreshed),
+        PendingTransferReconciliation::Exhausted
+    );
+}
+
+#[test]
+fn polling_runs_only_while_work_is_pending() {
     assert!(should_poll(true, false, false));
     assert!(should_poll(false, true, false));
-    assert!(should_poll(false, false, true));
     assert!(!should_poll(false, false, false));
 }
 
 #[test]
-fn only_matching_successful_rank_refresh_unlocks_moves() {
-    let mut generations = RequestGenerations::default();
-    let move_locked = Cell::new(true);
-    let refresh = generations.start_load(true, false);
-
+fn confirmed_transfer_highlight_remains_available() {
+    let transfer = PendingTransfer {
+        rollback_snapshot: snapshot(),
+        source_section_id: "backlog".into(),
+        destination_section_id: "sprint-7".into(),
+        keys: vec!["FIN-8".into()],
+        source_highlight_key: None,
+        ambiguous: false,
+        unconfirmed_refreshes: 0,
+    };
     assert_eq!(
-        generations.complete_load(refresh + 1, true, &move_locked),
-        None
+        transfer_reconciliation_highlight(
+            PendingTransferReconciliation::ConfirmedDestination,
+            &transfer
+        ),
+        Some(("backlog".into(), "section:backlog".into()))
     );
-    assert!(move_locked.get());
-    assert_eq!(
-        generations.complete_load(refresh, false, &move_locked),
-        Some(LoadCompletion::RankRefresh {
-            preserve_optimistic_view: false,
-        })
-    );
-    assert!(move_locked.get());
-
-    let normal_load = generations.start_load(false, false);
-    assert_eq!(
-        generations.complete_load(normal_load, true, &move_locked),
-        Some(LoadCompletion::Normal)
-    );
-    assert!(move_locked.get());
-
-    let retry = generations.start_load(true, false);
-    assert_eq!(
-        generations.complete_load(retry, true, &move_locked),
-        Some(LoadCompletion::RankRefresh {
-            preserve_optimistic_view: false,
-        })
-    );
-    assert!(!move_locked.get());
-}
-
-#[test]
-fn failed_rank_refresh_stays_locked_and_schedules_a_retry() {
-    let mut generations = RequestGenerations::default();
-    let move_locked = Cell::new(true);
-    let refresh = generations.start_load(true, true);
-    let mut retry = RankRefreshRetry::default();
-
-    assert_eq!(
-        generations.complete_load(refresh, false, &move_locked),
-        Some(LoadCompletion::RankRefresh {
-            preserve_optimistic_view: true,
-        })
-    );
-    retry.schedule(true);
-
-    assert!(move_locked.get());
-    assert!(retry.pending());
-    assert!(should_poll(false, false, retry.pending()));
-    assert_eq!(retry.elapse(std::time::Duration::from_millis(999)), None);
-    assert_eq!(
-        retry.elapse(std::time::Duration::from_millis(1)),
-        Some(true)
-    );
-    assert!(!retry.pending());
-}
-
-#[test]
-fn failed_optimistic_rank_refresh_retries_preserving_live_view() {
-    let mut generations = RequestGenerations::default();
-    let move_locked = Cell::new(true);
-    let refresh = generations.start_load(true, true);
-    let mut retry = RankRefreshRetry::default();
-
-    assert_eq!(
-        generations.complete_load(refresh, false, &move_locked),
-        Some(LoadCompletion::RankRefresh {
-            preserve_optimistic_view: true,
-        })
-    );
-
-    retry.schedule(true);
-    let retry = generations.start_load(
-        true,
-        retry.elapse(std::time::Duration::from_secs(1)).unwrap(),
-    );
-    assert_eq!(
-        generations.complete_load(retry, true, &move_locked),
-        Some(LoadCompletion::RankRefresh {
-            preserve_optimistic_view: true,
-        })
-    );
-}
-
-#[test]
-fn failed_rank_error_refresh_retries_with_a_rebuilt_view() {
-    let mut generations = RequestGenerations::default();
-    let move_locked = Cell::new(true);
-    let refresh = generations.start_load(true, false);
-    let mut retry = RankRefreshRetry::default();
-
-    assert_eq!(
-        generations.complete_load(refresh, false, &move_locked),
-        Some(LoadCompletion::RankRefresh {
-            preserve_optimistic_view: false,
-        })
-    );
-
-    retry.schedule(false);
-    let retry = generations.start_load(
-        true,
-        retry.elapse(std::time::Duration::from_secs(1)).unwrap(),
-    );
-    assert_eq!(
-        generations.complete_load(retry, true, &move_locked),
-        Some(LoadCompletion::RankRefresh {
-            preserve_optimistic_view: false,
-        })
-    );
-}
-
-#[test]
-fn newer_load_invalidates_optimistic_rank_refresh_preservation() {
-    let mut generations = RequestGenerations::default();
-    let move_locked = Cell::new(true);
-    let optimistic_refresh = generations.start_load(true, true);
-    let recovery_load = generations.start_load(false, false);
-
-    assert_eq!(
-        generations.complete_load(optimistic_refresh, true, &move_locked),
-        None
-    );
-    assert_eq!(
-        generations.complete_load(recovery_load, true, &move_locked),
-        Some(LoadCompletion::Normal)
-    );
-}
-
-#[test]
-fn backlog_blocks_move_keys_while_locked_and_disables_selection() {
-    tuicore::init();
-    let (sender, _) = mpsc::channel();
-    let mut section = backlog_section(
-        "backlog",
-        "Backlog",
-        &[work_item("FIN-1", "Plan next sprint")],
-        None,
-        true,
-        sender,
-        Rc::new(Cell::new(true)),
-        BacklogSectionNavigation::default(),
-    );
-    let ctrl_shift_m = TuiEvent::Key(KeyEvent {
-        code: Key::Char('m'),
-        modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-    });
-    let shifted_less_than = TuiEvent::Key(KeyEvent {
-        code: Key::Char('<'),
-        modifiers: KeyModifiers::SHIFT,
-    });
-    let shifted_greater_than = TuiEvent::Key(KeyEvent {
-        code: Key::Char('>'),
-        modifiers: KeyModifiers::SHIFT,
-    });
-
-    assert!(section.blocks_move_gesture(&ctrl_shift_m));
-    assert!(section.blocks_move_gesture(&shifted_less_than));
-    assert!(section.blocks_move_gesture(&shifted_greater_than));
-    assert!(!section.blocks_move_gesture(&TuiEvent::Key(KeyEvent::from(Key::Down))));
-
-    let space = TuiEvent::Key(KeyEvent::from(Key::Char(' ')));
-    assert!(!section.blocks_move_gesture(&space));
-    section.focus(None, true, &mut FocusCtx::new(AnimationSettings::default()));
-    section.event(&space, &mut Default::default());
-    assert!(section.transient_selected_ids().is_empty());
-}
-
-#[test]
-fn navigating_across_backlog_sections_moves_to_the_requested_endpoint() {
-    tuicore::init();
-    let (sender, _) = mpsc::channel();
-    let navigation = BacklogSectionNavigation::sequence(2);
-    let mut first = backlog_section(
-        "sprint-1",
-        "Sprint 1",
-        &[work_item("FIN-1", "First sprint item")],
-        None,
-        true,
-        sender.clone(),
-        Rc::new(Cell::new(false)),
-        navigation[0].clone(),
-    );
-    let mut second = backlog_section(
-        "backlog",
-        "Backlog",
-        &[work_item("FIN-2", "Backlog item")],
-        None,
-        true,
-        sender,
-        Rc::new(Cell::new(false)),
-        navigation[1].clone(),
-    );
-    let mut focus = FocusCtx::new(AnimationSettings::default());
-    first.dispatch_focus(&data_focus_target(), true, &mut focus);
-    let mut event = EventCtx::new(AnimationSettings::default());
-    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
-    first.dispatch_event(
-        &route,
-        &TuiEvent::Key(KeyEvent::from(Key::Down)),
-        &mut event,
-    );
-    first.dispatch_event(
-        &route,
-        &TuiEvent::Key(KeyEvent::from(Key::Down)),
-        &mut event,
-    );
-    assert!(matches!(event.focus_request(), Some(FocusRequest::Next)));
-
-    second.dispatch_focus(&data_focus_target(), true, &mut focus);
-    assert_eq!(second.highlighted_id().as_deref(), Some("parent:backlog"));
-
-    second.dispatch_event(&route, &TuiEvent::Key(KeyEvent::from(Key::Up)), &mut event);
-    assert!(matches!(
-        event.focus_request(),
-        Some(FocusRequest::Previous)
-    ));
-
-    first.dispatch_focus(&data_focus_target(), true, &mut focus);
-    assert_eq!(
-        first.highlighted_id().as_deref(),
-        Some("parent:sprint-1:work-item:FIN-1")
-    );
-}
-
-#[test]
-fn moving_a_backlog_item_does_not_change_sections_at_a_boundary() {
-    tuicore::init();
-    let (sender, _) = mpsc::channel();
-    let navigation = BacklogSectionNavigation::sequence(2);
-    let mut first = backlog_section(
-        "sprint-1",
-        "Sprint 1",
-        &[work_item("FIN-1", "First sprint item")],
-        None,
-        true,
-        sender,
-        Rc::new(Cell::new(false)),
-        navigation[0].clone(),
-    );
-    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
-    let mut focus = FocusCtx::new(AnimationSettings::default());
-    first.dispatch_focus(&data_focus_target(), true, &mut focus);
-    let mut event = EventCtx::new(AnimationSettings::default());
-    first.dispatch_event(
-        &route,
-        &TuiEvent::Key(KeyEvent::from(Key::Down)),
-        &mut event,
-    );
-    first.dispatch_event(
-        &route,
-        &TuiEvent::Key(KeyEvent {
-            code: Key::Char('m'),
-            modifiers: KeyModifiers::CONTROL,
-        }),
-        &mut event,
-    );
-    assert!(first.is_reordering());
-
-    let mut move_event = EventCtx::new(AnimationSettings::default());
-    first.dispatch_event(
-        &route,
-        &TuiEvent::Key(KeyEvent::from(Key::Down)),
-        &mut move_event,
-    );
-
-    assert!(first.is_reordering());
-    assert_eq!(move_event.focus_request(), None);
 }

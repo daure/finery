@@ -11,10 +11,11 @@ use super::{
     SubmitBatchOutcome, ambiguous_create_failure, backlog_page_complete, board_backlog_query,
     commit_order, create_available_statuses_from_value, create_issue_fields, create_issue_type,
     create_issue_types_from_value, create_response_failure, created_issue_failure,
-    discover_story_points, issue_fields, options_from_values, rank_payload, same_jira_content,
-    search_jql, select_backlog_board, should_discover_story_points, sprint_issues,
-    story_points_field_for_load, story_points_field_id, story_points_warning, submit_failure,
-    submit_ordered_changes, text_search_jql, to_ticket, to_work_item, update_payload,
+    discover_story_points, issue_fields, move_payload, options_from_values, rank_payload,
+    same_jira_content, search_jql, select_backlog_board, should_discover_story_points,
+    sprint_issues, story_points_field_for_load, story_points_field_id, story_points_warning,
+    submit_failure, submit_ordered_changes, text_search_jql, to_ticket, to_work_item,
+    update_payload,
 };
 use crate::{
     app_settings::AppSettings,
@@ -42,6 +43,14 @@ fn ticket(key: &str, kind: TicketKind, parent_key: Option<&str>) -> Ticket {
         parent_kind: None,
         has_children: false,
     }
+}
+
+#[test]
+fn moving_issues_uses_the_agile_batch_payload() {
+    assert_eq!(
+        move_payload(&["FIN-1".into(), "FIN-2".into()]),
+        json!({ "issues": ["FIN-1", "FIN-2"] })
+    );
 }
 
 fn added(key: &str, kind: TicketKind, parent_key: Option<&str>) -> TicketChange {

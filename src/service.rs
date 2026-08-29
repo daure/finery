@@ -558,6 +558,28 @@ impl AppService {
         jira::rank(&settings, plan)
     }
 
+    pub(crate) fn jira_move_to_sprint(
+        &self,
+        sprint_id: u64,
+        issue_keys: &[String],
+    ) -> Result<(), String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::move_to_sprint(&settings, sprint_id, issue_keys)
+    }
+
+    pub(crate) fn jira_move_to_backlog(&self, issue_keys: &[String]) -> Result<(), String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::move_to_backlog(&settings, issue_keys)
+    }
+
     pub(crate) fn jira_projects(&self) -> Result<Vec<jira::JiraProject>, String> {
         let settings = self
             .settings

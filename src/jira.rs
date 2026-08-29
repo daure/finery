@@ -346,6 +346,46 @@ pub(crate) fn rank(settings: &AppSettings, plan: &RankPlan) -> Result<(), String
     ensure_rank_success(response)
 }
 
+pub(crate) fn move_to_sprint(
+    settings: &AppSettings,
+    sprint_id: u64,
+    issue_keys: &[String],
+) -> Result<(), String> {
+    move_issues(
+        settings,
+        format!("/rest/agile/1.0/sprint/{sprint_id}/issue"),
+        issue_keys,
+    )
+}
+
+pub(crate) fn move_to_backlog(settings: &AppSettings, issue_keys: &[String]) -> Result<(), String> {
+    move_issues(settings, "/rest/agile/1.0/backlog/issue".into(), issue_keys)
+}
+
+fn move_issues(settings: &AppSettings, path: String, issue_keys: &[String]) -> Result<(), String> {
+    if issue_keys.is_empty() {
+        return Ok(());
+    }
+    if issue_keys.len() > crate::store::work_items::MAX_RANK_ISSUES {
+        return Err(format!(
+            "Jira can move at most {} issues at once",
+            crate::store::work_items::MAX_RANK_ISSUES
+        ));
+    }
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let response = client
+        .post(format!("{base_url}{path}"))
+        .basic_auth(email, Some(token))
+        .json(&move_payload(issue_keys))
+        .send()
+        .map_err(|error| error.to_string())?;
+    ensure_success(response)
+}
+
+fn move_payload(issue_keys: &[String]) -> Value {
+    json!({ "issues": issue_keys })
+}
+
 fn rank_payload(plan: &RankPlan) -> Value {
     let mut payload = Map::new();
     payload.insert("issues".into(), json!(plan.issues));
