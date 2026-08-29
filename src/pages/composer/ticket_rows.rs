@@ -20,6 +20,7 @@ pub(super) fn ticket_data_view(state: &ComposerState) -> DataView<TicketRow, Str
     let mut view = DataView::new(ticket_rows(state), |row: &TicketRow| row.item.id.clone())
         .headers(false)
         .columns(ticket_columns())
+        .wrap_cells()
         .row_height(2)
         .activation_mode(ActivationMode::OnNavigate)
         .selection_mode(SelectionMode::Multi)
@@ -113,6 +114,9 @@ fn ticket_row(state: &ComposerState, change: &TicketChange) -> Option<TicketRow>
             kind: ticket_kind(ticket.kind),
             priority: ticket.priority.clone(),
             status: ticket.status.clone(),
+            assignee: ticket.assignee.clone(),
+            story_points: None,
+            show_story_points: false,
             change_badge: Some(change_badge(change.kind)),
             submitted: change.is_submitted(),
         },
@@ -131,18 +135,21 @@ fn display_key(change: &TicketChange, ticket: &crate::store::composer::Ticket) -
 }
 
 fn ticket_columns() -> Vec<Column<TicketRow, String>> {
-    vec![Column::multiline(
-        "ticket",
-        "",
-        Constraint::Percentage(100),
-        |row: &TicketRow, _: &CellContext<String>| {
-            let mut text = work_item_text(&row.item);
-            if let Some(delta) = &row.parent_delta {
-                text.lines[1] = Line::raw(delta.clone());
-            }
-            text
-        },
-    )]
+    vec![
+        Column::multiline(
+            "ticket",
+            "",
+            Constraint::Percentage(100),
+            |row: &TicketRow, _: &CellContext<String>| {
+                let mut text = work_item_text(&row.item);
+                if let Some(delta) = &row.parent_delta {
+                    text.lines[1] = Line::raw(delta.clone());
+                }
+                text
+            },
+        )
+        .constrained(),
+    ]
 }
 
 fn ticket_kind(kind: TicketKind) -> WorkItemKind {

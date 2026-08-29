@@ -1121,6 +1121,7 @@ fn backlog_view(
 fn empty_snapshot() -> BacklogSnapshot {
     BacklogSnapshot {
         board_name: "Backlog".into(),
+        story_points_configured: false,
         sprints: Vec::new(),
         work_items: Vec::new(),
         warnings: Vec::new(),

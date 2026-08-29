@@ -1,3 +1,0 @@
-mod page;
-
-pub(crate) use page::page;

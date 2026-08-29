@@ -319,6 +319,7 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
     })?;
     let mut snapshot = BacklogSnapshot {
         board_name: board.name,
+        story_points_configured: story_points_field_id.is_some(),
         sprints,
         work_items,
         warnings: Vec::new(),

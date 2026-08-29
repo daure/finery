@@ -648,6 +648,7 @@ fn backlog_work_items_parse_numeric_story_points() {
 fn backlog_warns_when_loaded_tickets_lack_story_points() {
     let snapshot = crate::store::work_items::BacklogSnapshot {
         board_name: "Finery".into(),
+        story_points_configured: true,
         sprints: Vec::new(),
         work_items: vec![to_work_item(
             JiraIssue {

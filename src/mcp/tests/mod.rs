@@ -134,6 +134,7 @@ fn workspace_limits_only_unplanned_tickets_and_omits_closed_change_sets() {
     let view = workspace_view(
         BacklogSnapshot {
             board_name: "Finery".into(),
+            story_points_configured: true,
             sprints: vec![Sprint {
                 id: 1,
                 name: "Sprint 1".into(),

@@ -11,6 +11,9 @@ pub(crate) struct WorkItemRow {
     pub kind: WorkItemKind,
     pub priority: String,
     pub status: String,
+    pub assignee: String,
+    pub story_points: Option<f64>,
+    pub show_story_points: bool,
     pub change_badge: Option<ChangeBadge>,
     pub submitted: bool,
 }
@@ -57,6 +60,25 @@ pub(crate) fn work_item_text(row: &WorkItemRow) -> Text<'static> {
         metadata.extend([
             Span::styled(" • ", Style::default().fg(text_color)),
             Span::styled(row.status.clone(), Style::default().fg(text_color)),
+        ]);
+    }
+    metadata.extend([
+        Span::styled(" • ", Style::default().fg(text_color)),
+        crate::components::avatar::bubble_span(&row.assignee),
+    ]);
+    if row.show_story_points {
+        metadata.extend([
+            Span::styled(" • ", Style::default().fg(text_color)),
+            Span::styled(
+                row.story_points
+                    .map(|points| points.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                Style::default().fg(if row.story_points.is_some() {
+                    text_color
+                } else {
+                    theme.muted_fg()
+                }),
+            ),
         ]);
     }
     if row.submitted {

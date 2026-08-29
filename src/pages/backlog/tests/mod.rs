@@ -35,6 +35,7 @@ fn work_item(key: &str, title: &str) -> WorkItem {
 fn snapshot() -> BacklogSnapshot {
     BacklogSnapshot {
         board_name: "Finery".into(),
+        story_points_configured: false,
         sprints: vec![Sprint {
             id: 7,
             name: "Sprint 7".into(),
@@ -89,7 +90,10 @@ fn backlog_shows_loading_indicator_before_the_initial_snapshot_arrives() {
 fn unified_backlog_tree_shows_collapsed_sprints_and_expanded_backlog() {
     tuicore::init();
     let (sender, _) = mpsc::channel();
-    let mut view = backlog_tree(&snapshot(), sender, Default::default());
+    let mut snapshot = snapshot();
+    snapshot.story_points_configured = true;
+    snapshot.work_items[0].assignee = "Unassigned".into();
+    let mut view = backlog_tree(&snapshot, sender, Default::default());
     let area = Rect::new(0, 0, 80, 16);
     view.layout(area, &mut LayoutCtx::new());
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
@@ -110,6 +114,150 @@ fn unified_backlog_tree_shows_collapsed_sprints_and_expanded_backlog() {
     assert!(text.contains("Finery · Backlog"));
     assert!(!text.contains("Ship sprint work"));
     assert!(text.contains("Plan next sprint"));
+    assert!(text.contains("FIN-8 • To Do • @-- • -"));
+}
+
+#[test]
+fn long_backlog_titles_wrap_to_the_available_viewport_width() {
+    tuicore::init();
+    let snapshot = BacklogSnapshot {
+        board_name: "Finery".into(),
+        sprints: Vec::new(),
+        work_items: vec![work_item(
+            "FIN-1",
+            "A backlog title that wraps at the viewport edge",
+        )],
+        warnings: Vec::new(),
+        story_points_configured: false,
+    };
+    let (sender, _) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot, sender, Default::default());
+    let area = Rect::new(0, 0, 40, 8);
+    view.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            view.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let lines = (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| terminal.backend().buffer().cell((x, y)).unwrap().symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(lines.iter().any(|line| line.contains("viewport edge")));
+}
+
+#[test]
+fn backlog_search_filters_tickets_by_key_and_title() {
+    tuicore::init();
+    let snapshot = BacklogSnapshot {
+        board_name: "Finery".into(),
+        story_points_configured: false,
+        sprints: Vec::new(),
+        work_items: vec![
+            work_item("FIN-1", "Plan next sprint"),
+            work_item("FIN-2", "Ship release"),
+        ],
+        warnings: Vec::new(),
+    };
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    tree.dispatch_focus(
+        &data_focus_target(),
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('/'))),
+        &mut ctx,
+    );
+    for key in "FIN-2".chars() {
+        tree.dispatch_event(
+            &route,
+            &TuiEvent::Key(KeyEvent::from(Key::Char(key))),
+            &mut ctx,
+        );
+    }
+
+    let area = Rect::new(0, 0, 80, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let mut text = String::new();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            text.push_str(terminal.backend().buffer().cell((x, y)).unwrap().symbol());
+        }
+    }
+    assert!(text.contains("FIN-2"));
+    assert!(!text.contains("FIN-1"));
+}
+
+#[test]
+fn backlog_search_requires_contiguous_text() {
+    tuicore::init();
+    let snapshot = BacklogSnapshot {
+        board_name: "Finery".into(),
+        story_points_configured: false,
+        sprints: Vec::new(),
+        work_items: vec![work_item("FIN-1", "A shopper can narrow products")],
+        warnings: Vec::new(),
+    };
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    tree.dispatch_focus(
+        &data_focus_target(),
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('/'))),
+        &mut ctx,
+    );
+    for key in "shoppersa".chars() {
+        tree.dispatch_event(
+            &route,
+            &TuiEvent::Key(KeyEvent::from(Key::Char(key))),
+            &mut ctx,
+        );
+    }
+
+    let area = Rect::new(0, 0, 80, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let mut text = String::new();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            text.push_str(terminal.backend().buffer().cell((x, y)).unwrap().symbol());
+        }
+    }
+    assert!(text.contains("No stories"));
 }
 
 #[test]
@@ -117,6 +265,7 @@ fn unified_tree_uses_same_section_transient_selection_for_the_quick_menu() {
     tuicore::init();
     let snapshot = BacklogSnapshot {
         board_name: "Finery".into(),
+        story_points_configured: false,
         sprints: Vec::new(),
         work_items: vec![work_item("FIN-1", "First"), work_item("FIN-2", "Second")],
         warnings: Vec::new(),
@@ -189,6 +338,7 @@ fn quick_menu_omits_its_current_section_from_transfer_destinations() {
 fn stale_rank_refresh_keeps_the_optimistic_order() {
     let rollback = BacklogSnapshot {
         board_name: "Finery".into(),
+        story_points_configured: false,
         sprints: Vec::new(),
         work_items: vec![
             work_item("FIN-1", "First"),

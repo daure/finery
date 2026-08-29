@@ -9,8 +9,8 @@ use ratatui::{
 use tuicore::{
     CellContext, Column, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget, Key,
     KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    ListControl, ListControlEvent, ListControlKeyBindings, RenderCtx, TickResult, TreeAdapter,
-    TuiEvent, TuiNode,
+    ListControl, ListControlEvent, ListControlKeyBindings, RenderCtx, SearchMode, TickResult,
+    TreeAdapter, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -70,6 +70,8 @@ pub(in crate::pages::backlog) fn backlog_tree(
     .allow_horizontal_moving(false)
     .max_rows(usize::MAX)
     .panel_visible(false)
+    .action_bar(true)
+    .search_mode(SearchMode::Contains)
     .keybindings(
         ListControlKeyBindings::default()
             .add([])
@@ -84,6 +86,7 @@ pub(in crate::pages::backlog) fn backlog_tree(
             BacklogRowContent::Section { .. } => 1,
             BacklogRowContent::WorkItem(_) => 2,
         });
+    control.data_view_mut().set_wrap_cells(true);
     BacklogTree {
         control,
         events,
@@ -389,7 +392,7 @@ fn backlog_rows(snapshot: &BacklogSnapshot) -> Vec<BacklogRow> {
             sprint
                 .work_items
                 .iter()
-                .map(|item| work_item_row(item, &section)),
+                .map(|item| work_item_row(item, &section, snapshot.story_points_configured)),
         );
     }
     rows.push(section_row(
@@ -400,7 +403,7 @@ fn backlog_rows(snapshot: &BacklogSnapshot) -> Vec<BacklogRow> {
         snapshot
             .work_items
             .iter()
-            .map(|item| work_item_row(item, "backlog")),
+            .map(|item| work_item_row(item, "backlog", snapshot.story_points_configured)),
     );
     rows
 }
@@ -415,7 +418,7 @@ fn section_row(section: &str, title: String) -> BacklogRow {
 fn section_row_id(section: &str) -> String {
     format!("section:{section}")
 }
-fn work_item_row(item: &WorkItem, section: &str) -> BacklogRow {
+fn work_item_row(item: &WorkItem, section: &str, show_story_points: bool) -> BacklogRow {
     BacklogRow {
         id: format!("ticket:{}", item.key),
         parent_id: Some(section_row_id(section)),
@@ -426,6 +429,9 @@ fn work_item_row(item: &WorkItem, section: &str) -> BacklogRow {
             kind: work_item_kind(&item.kind),
             priority: item.priority.clone(),
             status: item.status.clone(),
+            assignee: item.assignee.clone(),
+            story_points: item.story_points,
+            show_story_points,
             change_badge: None,
             submitted: false,
         }),
@@ -446,6 +452,11 @@ fn backlog_column() -> Column<BacklogRow, String> {
             BacklogRowContent::WorkItem(item) => work_item_text(item),
         },
     )
+    .constrained()
+    .search_key(|row| match &row.content {
+        BacklogRowContent::Section { title } => title.clone(),
+        BacklogRowContent::WorkItem(item) => format!("{} {}", item.key, item.title),
+    })
 }
 fn work_item_kind(kind: &str) -> WorkItemKind {
     match kind.to_ascii_lowercase().as_str() {

@@ -23,6 +23,7 @@ pub(crate) struct Sprint {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BacklogSnapshot {
     pub board_name: String,
+    pub story_points_configured: bool,
     pub sprints: Vec<Sprint>,
     pub work_items: Vec<WorkItem>,
     pub warnings: Vec<String>,
