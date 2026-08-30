@@ -7,9 +7,9 @@ use std::{
 
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
-    AnimationSettings, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget,
-    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, TickResult,
-    TuiEvent, TuiNode,
+    AnimationSettings, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget, Key,
+    KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
+    RenderCtx, TickResult, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -91,6 +91,21 @@ impl ComposerPage {
         if is_open {
             self.editor.on_open(ctx);
         }
+    }
+
+    fn open_selected_ticket(
+        &self,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> Option<EventOutcome> {
+        if !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Enter, KeyModifiers::CONTROL).matches(*key))
+        {
+            return None;
+        }
+        let key = self.state.borrow().selected_existing_ticket_key()?;
+        self.service.open_jira_issue(&key);
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
     }
 
     fn poll_external_catalog(&mut self, dt: Duration) -> TickResult {
@@ -183,6 +198,14 @@ impl ComposerPage {
                 title: title.into(),
                 project_key: "FIN".into(),
             });
+        self.editor.sync();
+    }
+
+    #[cfg(test)]
+    pub(super) fn open_change_set_for_test(&mut self, id: &str) {
+        let _ = self.state.borrow_mut().dispatch(
+            crate::store::composer::ComposerAction::OpenChangeSet(id.into()),
+        );
         self.editor.sync();
     }
 
@@ -310,7 +333,10 @@ impl TuiNode for ComposerPage {
         let was_open = self.in_change_set();
         let outcome = self.active_mut().event(event, ctx);
         self.handle_active_view_change(was_open, ctx);
-        outcome
+        (outcome == EventOutcome::Ignored)
+            .then(|| self.open_selected_ticket(event, ctx))
+            .flatten()
+            .unwrap_or(outcome)
     }
 
     fn dispatch_event(
@@ -322,7 +348,10 @@ impl TuiNode for ComposerPage {
         let was_open = self.in_change_set();
         let outcome = self.active_mut().dispatch_event(route, event, ctx);
         self.handle_active_view_change(was_open, ctx);
-        outcome
+        (outcome == EventOutcome::Ignored)
+            .then(|| self.open_selected_ticket(event, ctx))
+            .flatten()
+            .unwrap_or(outcome)
     }
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {

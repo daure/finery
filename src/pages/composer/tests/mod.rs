@@ -10,8 +10,8 @@ use std::{
 
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use tuicore::{
-    AnimationSettings, EventCtx, EventRoute, ExternalEditorResponse, FocusCtx, FocusId,
-    FocusRequest, HotkeyEvent, Key, KeyEvent, KeyModifiers, LayoutCtx, RenderCtx,
+    AnimationSettings, EventCtx, EventOutcome, EventRoute, ExternalEditorResponse, FocusCtx,
+    FocusId, FocusRequest, HotkeyEvent, Key, KeyEvent, KeyModifiers, LayoutCtx, RenderCtx,
     TabsBodyBorderStyle, TuiEvent, TuiNode,
 };
 
@@ -643,6 +643,27 @@ fn ctrl_enter_creates_a_ticket_from_the_title_input() {
 
     assert_eq!(page.selected_changes().title, "Fix login redirect");
     assert!(!render_text(&mut page).contains("Create ticket"));
+}
+
+#[test]
+fn ctrl_enter_opens_the_selected_existing_ticket() {
+    tuicore::init();
+    let mut page = composer_page();
+    page.open_change_set_for_test("CS-1");
+    page.update_selected_kind(TicketKind::Task);
+    assert_eq!(page.selected_changes().kind, TicketKind::Task);
+    let mut ctx = EventCtx::default();
+
+    let outcome = page.event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Enter,
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut ctx,
+    );
+
+    assert_eq!(outcome, EventOutcome::Handled);
+    assert_eq!(ctx.propagation(), tuicore::Propagation::Stopped);
 }
 
 #[test]

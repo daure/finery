@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
@@ -607,6 +608,31 @@ impl AppService {
         jira::fetch(&settings, key)
     }
 
+    pub(crate) fn open_jira_issue(&self, key: &str) {
+        let url = match self.settings.read() {
+            Ok(settings) => settings.jira_issue_url(key),
+            Err(_) => {
+                self.report_error(
+                    "Could not open Jira ticket: settings lock is unavailable".into(),
+                );
+                return;
+            }
+        };
+        let Some(url) = url else {
+            self.report_error("Could not open Jira ticket: Jira URL is not configured".into());
+            return;
+        };
+        if let Err(error) = spawn_browser(browser_command(&url)) {
+            #[cfg(target_os = "linux")]
+            if error.kind() == std::io::ErrorKind::NotFound
+                && spawn_browser(xdg_open_command(&url)).is_ok()
+            {
+                return;
+            }
+            self.report_error(format!("Could not open Jira ticket in browser: {error}"));
+        }
+    }
+
     pub(crate) fn fetch_jira_tickets(
         &self,
         keys: &[String],
@@ -801,6 +827,47 @@ impl AppService {
             state.write_cancelled(id);
         }
     }
+}
+
+fn browser_command(url: &str) -> Command {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = Command::new("gio");
+        command.args(["open", url]);
+        command
+    }
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "linux")))]
+    {
+        xdg_open_command(url)
+    }
+}
+
+#[cfg(unix)]
+fn xdg_open_command(url: &str) -> Command {
+    let mut command = Command::new("xdg-open");
+    command.arg(url);
+    command
+}
+
+fn spawn_browser(mut command: Command) -> Result<(), std::io::Error> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
 }
 
 fn start_persistence_worker(

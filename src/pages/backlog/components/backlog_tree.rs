@@ -7,10 +7,10 @@ use ratatui::{
     text::{Line, Span, Text},
 };
 use tuicore::{
-    CellContext, Column, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget, Key,
-    KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    ListControl, ListControlEvent, ListControlKeyBindings, Paragraph, RenderCtx, SearchMode,
-    TickResult, TreeAdapter, TuiEvent, TuiNode,
+    Animated, Button, CellContext, ChildKey, Column, EventCtx, EventOutcome, EventRoute, FocusCtx,
+    FocusId, FocusTarget, Key, KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult,
+    LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlKeyBindings, RenderCtx,
+    SearchMode, Spinner, TickResult, TreeAdapter, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -36,7 +36,10 @@ struct BacklogRow {
 
 #[derive(Clone)]
 enum BacklogRowContent {
-    Section { title: String },
+    Section {
+        title: Text<'static>,
+        search_text: String,
+    },
     WorkItem(BacklogWorkItem),
 }
 
@@ -52,7 +55,11 @@ struct BacklogWorkItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::pages::backlog) enum BacklogSectionEvent {
+    Refresh,
     MoveLocked,
+    OpenTicket {
+        key: String,
+    },
     OpenQuickMenu {
         section_id: String,
         keys: Vec<String>,
@@ -101,12 +108,13 @@ pub(in crate::pages::backlog) fn backlog_tree(
     .empty_message("No stories");
     let runway_markers_visible = Rc::new(Cell::new(true));
     let row_marker_visible = Rc::clone(&runway_markers_visible);
-    control
-        .data_view_mut()
-        .set_row_height_by(|row| match row.content {
-            BacklogRowContent::Section { .. } => 1,
-            BacklogRowContent::WorkItem(_) => 2,
-        });
+    control.data_view_mut().set_row_height_by(|row| {
+        if matches!(row.content, BacklogRowContent::Section { .. }) {
+            u16::from(row.id != section_row_id("backlog")) + 1
+        } else {
+            2
+        }
+    });
     control.data_view_mut().set_wrap_cells(true);
     control
         .data_view_mut()
@@ -130,10 +138,16 @@ pub(in crate::pages::backlog) fn backlog_tree(
             ),
             _ => None,
         });
+    let refresh_events = events.clone();
     BacklogTree {
         control,
-        summary: backlog_summary(snapshot),
-        summary_area: ratatui::layout::Rect::default(),
+        refresh: Button::new("Refresh").hotkey("shift+r").on_press(move || {
+            let _ = refresh_events.send(BacklogSectionEvent::Refresh);
+        }),
+        spinner: Spinner::new(),
+        loading: false,
+        refresh_area: ratatui::layout::Rect::default(),
+        spinner_area: ratatui::layout::Rect::default(),
         control_area: ratatui::layout::Rect::default(),
         events,
         move_locked,
@@ -143,8 +157,11 @@ pub(in crate::pages::backlog) fn backlog_tree(
 
 pub(in crate::pages::backlog) struct BacklogTree {
     control: ListControl<BacklogRow, String>,
-    summary: Paragraph,
-    summary_area: ratatui::layout::Rect,
+    refresh: Button<()>,
+    spinner: Spinner,
+    loading: bool,
+    refresh_area: ratatui::layout::Rect,
+    spinner_area: ratatui::layout::Rect,
     control_area: ratatui::layout::Rect,
     events: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
@@ -154,7 +171,6 @@ pub(in crate::pages::backlog) struct BacklogTree {
 impl BacklogTree {
     pub(in crate::pages::backlog) fn set_snapshot(&mut self, snapshot: &BacklogSnapshot) {
         self.control.set_rows(backlog_rows(snapshot));
-        self.summary = backlog_summary(snapshot);
         let parents = self
             .control
             .transient_selected_ids()
@@ -165,6 +181,19 @@ impl BacklogTree {
         if parents.len() > 1 {
             self.control.clear_transient_selection();
         }
+    }
+
+    pub(in crate::pages::backlog) fn set_loading(&mut self, loading: bool) {
+        self.loading = loading;
+        self.refresh.set_disabled(loading);
+    }
+
+    pub(in crate::pages::backlog) fn reset_to_backlog_parent(
+        &mut self,
+        snapshot: &BacklogSnapshot,
+    ) {
+        *self = backlog_tree(snapshot, self.events.clone(), self.move_locked.clone());
+        self.highlight(&section_row_id("backlog"));
     }
 
     pub(in crate::pages::backlog) fn highlight(&mut self, row_id: &str) {
@@ -277,6 +306,29 @@ impl BacklogTree {
         true
     }
 
+    fn open_highlighted_ticket(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        if !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Enter, KeyModifiers::CONTROL).matches(*key))
+        {
+            return false;
+        }
+        let Some(row) = self
+            .control
+            .data_view()
+            .highlighted_id()
+            .and_then(|id| self.control.items().iter().find(|row| row.id == id))
+        else {
+            return false;
+        };
+        let BacklogRowContent::WorkItem(item) = &row.content else {
+            return false;
+        };
+        let _ = self.events.send(BacklogSectionEvent::OpenTicket {
+            key: item.item.key.clone(),
+        });
+        ctx.stop_propagation();
+        true
+    }
+
     fn drain_events(&mut self, source_parents: HashMap<String, String>) {
         for event in self.control.take_events() {
             let (ids, parent) = match event {
@@ -355,6 +407,9 @@ impl BacklogTree {
         ctx: &mut EventCtx<()>,
         dispatch: impl FnOnce(&mut ListControl<BacklogRow, String>, &mut EventCtx<()>) -> EventOutcome,
     ) -> EventOutcome {
+        if self.open_highlighted_ticket(event, ctx) {
+            return EventOutcome::Handled;
+        }
         if self.open_quick_menu(event, ctx) {
             return EventOutcome::Handled;
         }
@@ -391,15 +446,44 @@ impl TuiNode for BacklogTree {
         self.control.measure(proposal)
     }
     fn layout(&mut self, area: ratatui::layout::Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        let summary_height = u16::from(!area.is_empty());
-        self.summary_area = ratatui::layout::Rect::new(area.x, area.y, area.width, summary_height);
+        let header_height = u16::from(!area.is_empty());
+        let refresh_width = self
+            .refresh
+            .measure(LayoutProposal::at_most(area.width, header_height))
+            .preferred
+            .width
+            .min(area.width);
+        self.refresh_area = ratatui::layout::Rect::new(
+            area.x
+                .saturating_add(area.width.saturating_sub(refresh_width)),
+            area.y,
+            refresh_width,
+            header_height,
+        );
+        self.spinner_area = if self.loading {
+            ratatui::layout::Rect::new(
+                self.refresh_area.x.saturating_sub(2),
+                area.y,
+                1,
+                header_height,
+            )
+        } else {
+            ratatui::layout::Rect::default()
+        };
         self.control_area = ratatui::layout::Rect::new(
             area.x,
-            area.y.saturating_add(summary_height),
+            area.y.saturating_add(header_height),
             area.width,
-            area.height.saturating_sub(summary_height),
+            area.height.saturating_sub(header_height),
         );
-        self.control.layout(self.control_area, ctx)
+        let result = self.control.layout(self.control_area, ctx);
+        ctx.push_slot(ChildKey::new("refresh"), self.refresh_area, |ctx| {
+            self.refresh.layout(self.refresh_area, ctx)
+        });
+        if self.loading {
+            <Spinner as TuiNode<()>>::layout(&mut self.spinner, self.spinner_area, ctx);
+        }
+        result
     }
     fn render<'a>(
         &'a self,
@@ -407,10 +491,18 @@ impl TuiNode for BacklogTree {
         _area: ratatui::layout::Rect,
         ctx: &mut RenderCtx<'a>,
     ) {
-        self.summary.render(frame, self.summary_area);
+        self.refresh.render(frame, self.refresh_area);
+        if self.loading {
+            self.spinner.render(frame, self.spinner_area);
+        }
         self.control.render(frame, self.control_area, ctx);
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        if matches!(event, TuiEvent::Mouse(_))
+            && self.refresh.event(event, ctx) == EventOutcome::Handled
+        {
+            return EventOutcome::Handled;
+        }
         self.handle_event(event, ctx, |control, ctx| control.event(event, ctx))
     }
     fn dispatch_event(
@@ -419,17 +511,37 @@ impl TuiNode for BacklogTree {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
+        if let Some(refresh_path) = route.path.without_first_if(&ChildKey::new("refresh")) {
+            return self
+                .refresh
+                .dispatch_event(&EventRoute::new(refresh_path), event, ctx);
+        }
         self.handle_event(event, ctx, |control, ctx| {
             control.dispatch_event(route, event, ctx)
         })
     }
     fn tick(&mut self, dt: Duration, settings: tuicore::AnimationSettings) -> TickResult {
-        self.control.tick(dt, settings)
+        self.control
+            .tick(dt, settings)
+            .merge(<Button<()> as TuiNode<()>>::tick(
+                &mut self.refresh,
+                dt,
+                settings,
+            ))
+            .merge(if self.loading {
+                Animated::tick(&mut self.spinner, dt, settings)
+            } else {
+                TickResult::IDLE
+            })
     }
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
         self.control.focus(target, focused, ctx);
     }
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        if let Some(refresh_target) = target.for_child(&ChildKey::new("refresh")) {
+            self.refresh.dispatch_focus(&refresh_target, focused, ctx);
+            return;
+        }
         self.control.dispatch_focus(target, focused, ctx);
     }
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
@@ -450,7 +562,7 @@ fn backlog_rows(snapshot: &BacklogSnapshot) -> Vec<BacklogRow> {
     let mut rows = Vec::new();
     for sprint in &snapshot.sprints {
         let section = format!("sprint-{}", sprint.id);
-        rows.push(section_row(&section, sprint_title(sprint)));
+        rows.push(sprint_section_row(&section, sprint));
         rows.extend(sprint.work_items.iter().enumerate().map(|(index, item)| {
             work_item_row(
                 item,
@@ -467,7 +579,7 @@ fn backlog_rows(snapshot: &BacklogSnapshot) -> Vec<BacklogRow> {
             )
         }));
     }
-    rows.push(section_row("backlog", backlog_title(snapshot)));
+    rows.push(backlog_section_row(snapshot));
     rows.extend(snapshot.work_items.iter().enumerate().map(|(index, item)| {
         work_item_row(
             item,
@@ -485,12 +597,86 @@ fn backlog_rows(snapshot: &BacklogSnapshot) -> Vec<BacklogRow> {
     rows
 }
 
-fn section_row(section: &str, title: String) -> BacklogRow {
+fn section_row(section: &str, title: Text<'static>, search_text: String) -> BacklogRow {
     BacklogRow {
         id: section_row_id(section),
         parent_id: None,
-        content: BacklogRowContent::Section { title },
+        content: BacklogRowContent::Section { title, search_text },
     }
+}
+
+fn sprint_section_row(section: &str, sprint: &Sprint) -> BacklogRow {
+    let theme = tuicore::theme();
+    let icon = sprint_icon(&sprint.state);
+    let mut title = vec![
+        Span::styled(icon, Style::default().fg(theme.accent_fg())),
+        Span::raw(" "),
+        Span::styled(
+            sprint.name.clone(),
+            Style::default()
+                .fg(theme.text_fg())
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if let Some(date_range) = sprint_date_range(sprint) {
+        title.extend([
+            Span::styled(" • ", Style::default().fg(theme.muted_fg())),
+            Span::styled(date_range, Style::default().fg(theme.text_fg())),
+        ]);
+    }
+    let search_text = sprint_title(sprint);
+    let Some(capacity) = sprint.capacity.as_ref() else {
+        return section_row(section, Text::from(Line::from(title)), search_text);
+    };
+    let (coverage, coverage_style) = sprint_estimation_coverage(sprint);
+    section_row(
+        section,
+        Text::from(vec![
+            Line::from(title),
+            Line::from(vec![
+                Span::styled(
+                    sprint_capacity_icon(capacity.state),
+                    Style::default().fg(theme.accent_fg()),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{} pts", capacity_load_label(capacity)),
+                    Style::default().fg(theme.text_fg()),
+                ),
+                Span::styled(" • ", Style::default().fg(theme.muted_fg())),
+                Span::styled(coverage, coverage_style),
+                Span::styled(" • ", Style::default().fg(theme.muted_fg())),
+                Span::styled(
+                    format!("{} items", sprint.work_items.len()),
+                    Style::default().fg(theme.muted_fg()),
+                ),
+            ]),
+        ]),
+        search_text,
+    )
+}
+
+fn backlog_section_row(snapshot: &BacklogSnapshot) -> BacklogRow {
+    let theme = tuicore::theme();
+    section_row(
+        "backlog",
+        Text::from(Line::from(vec![
+            Span::styled("", Style::default().fg(theme.accent_fg())),
+            Span::raw(" "),
+            Span::styled(
+                "Backlog",
+                Style::default()
+                    .fg(theme.text_fg())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" • ", Style::default().fg(theme.muted_fg())),
+            Span::styled(
+                format!("{} items", snapshot.work_items.len()),
+                Style::default().fg(theme.muted_fg()),
+            ),
+        ])),
+        backlog_title(snapshot),
+    )
 }
 fn section_row_id(section: &str) -> String {
     format!("section:{section}")
@@ -507,7 +693,8 @@ fn work_item_row(
         .as_ref()
         .filter(|runway| runway.assumed)
         .map(|runway| (runway.effective_points, runway.assumed_from_average))
-        .or(assumed_ticket_size);
+        .or(assumed_ticket_size)
+        .filter(|_| !item.kind.eq_ignore_ascii_case("bug"));
     BacklogRow {
         id: format!("ticket:{}", item.key),
         parent_id: Some(section_row_id(section)),
@@ -545,12 +732,7 @@ fn backlog_column() -> Column<BacklogRow, String> {
         "",
         Constraint::Percentage(100),
         |row: &BacklogRow, _: &CellContext<String>| match &row.content {
-            BacklogRowContent::Section { title, .. } => Text::from(Line::styled(
-                title.clone(),
-                Style::default()
-                    .fg(tuicore::theme().accent_fg())
-                    .add_modifier(Modifier::BOLD),
-            )),
+            BacklogRowContent::Section { title, .. } => title.clone(),
             BacklogRowContent::WorkItem(item) => backlog_work_item_text(item),
         },
     )
@@ -565,7 +747,7 @@ fn backlog_column() -> Column<BacklogRow, String> {
             .saturating_add(work_item_title_prefix_width(&item.item)),
     })
     .search_key(|row| match &row.content {
-        BacklogRowContent::Section { title } => title.clone(),
+        BacklogRowContent::Section { search_text, .. } => search_text.clone(),
         BacklogRowContent::WorkItem(item) => format!("{} {}", item.item.key, item.item.title),
     })
 }
@@ -636,28 +818,57 @@ fn sprint_title(sprint: &Sprint) -> String {
         return format!("{icon} {}{date_range}", sprint.name);
     };
     format!(
-        "{icon} {} • {} pts{date_range} • {}",
-        sprint_capacity_icon(capacity.state),
-        points_label(capacity.effective_points),
+        "{icon} {}{date_range}\n{} {} pts • {} • {} items",
         sprint.name,
+        sprint_capacity_icon(capacity.state),
+        capacity_load_label(capacity),
+        sprint_estimation_coverage(sprint).0,
+        sprint.work_items.len(),
     )
 }
 
-fn backlog_title(_: &BacklogSnapshot) -> String {
-    " Backlog".into()
+fn sprint_estimation_coverage(sprint: &Sprint) -> (String, Style) {
+    let theme = tuicore::theme();
+    let eligible_items = sprint
+        .work_items
+        .iter()
+        .filter(|item| estimation_eligible(item))
+        .count();
+    let estimated_items = sprint
+        .work_items
+        .iter()
+        .filter(|item| estimation_eligible(item) && item.story_points.is_some())
+        .count();
+    if estimated_items == eligible_items {
+        (
+            format!("✓ {eligible_items}/{eligible_items}"),
+            Style::default().fg(theme.success_fg()),
+        )
+    } else {
+        (
+            format!("󰄰 {estimated_items}/{eligible_items}"),
+            Style::default().fg(theme.warning_fg()),
+        )
+    }
 }
 
-fn backlog_summary(snapshot: &BacklogSnapshot) -> Paragraph {
-    let text = snapshot.runway.as_ref().map_or_else(
-        || "Velocity unavailable".into(),
-        |runway| {
-            format!(
-                "Velocity {}",
-                velocity_label(runway.capacity, runway.source)
-            )
-        },
-    );
-    Paragraph::new(text).style(Style::default().fg(tuicore::theme().accent_fg()))
+fn estimation_eligible(item: &WorkItem) -> bool {
+    matches!(item.kind.to_ascii_lowercase().as_str(), "task" | "story")
+}
+
+fn capacity_load_label(capacity: &crate::store::work_items::SprintCapacity) -> String {
+    let prefix = matches!(capacity.source, RunwayCapacitySource::JiraVelocity)
+        .then_some("~")
+        .unwrap_or("");
+    format!(
+        "{prefix}{}/{}",
+        points_label(capacity.effective_points),
+        points_label(capacity.capacity)
+    )
+}
+
+fn backlog_title(snapshot: &BacklogSnapshot) -> String {
+    format!(" Backlog • {} items", snapshot.work_items.len())
 }
 
 fn sprint_icon(state: &str) -> &'static str {
@@ -678,7 +889,7 @@ fn sprint_capacity_icon(state: SprintCapacityState) -> &'static str {
 
 fn sprint_date_range(sprint: &Sprint) -> Option<String> {
     Some(format!(
-        "{} - {}",
+        "{} – {}",
         sprint_date_label(sprint.start_date.as_deref()?)?,
         sprint_date_label(sprint.end_date.as_deref()?)?,
     ))
@@ -706,13 +917,6 @@ fn sprint_date_label(date: &str) -> Option<String> {
     };
     (year > 0 && (1..=31).contains(&day) && parts.next().is_none())
         .then(|| format!("{day} {month}"))
-}
-
-fn velocity_label(capacity: f64, source: RunwayCapacitySource) -> String {
-    let prefix = matches!(source, RunwayCapacitySource::JiraVelocity)
-        .then_some("~")
-        .unwrap_or("");
-    format!("{prefix}{}", points_label(capacity))
 }
 
 fn points_label(points: f64) -> String {

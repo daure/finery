@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    ffi::OsStr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -25,6 +26,21 @@ use crate::{
         SubmissionAttemptPhase, SubmissionSnapshot, Ticket, TicketChange, TicketKind,
     },
 };
+
+#[cfg(target_os = "linux")]
+#[test]
+fn browser_launcher_uses_the_desktop_default_browser() {
+    let command = super::browser_command("https://finery.atlassian.net/browse/FIN-42");
+
+    assert_eq!(command.get_program(), OsStr::new("gio"));
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        [
+            OsStr::new("open"),
+            OsStr::new("https://finery.atlassian.net/browse/FIN-42")
+        ]
+    );
+}
 
 fn ticket(key: &str) -> Ticket {
     Ticket {

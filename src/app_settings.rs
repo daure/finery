@@ -578,6 +578,11 @@ impl AppSettings {
         ))
     }
 
+    pub(crate) fn jira_issue_url(&self, key: &str) -> Option<String> {
+        let base_url = self.jira_base_url.trim().trim_end_matches('/');
+        (!base_url.is_empty() && !key.trim().is_empty()).then(|| format!("{base_url}/browse/{key}"))
+    }
+
     pub(crate) fn block_delay(&self) -> Duration {
         self.speed_reader.markdown_block_pause
     }

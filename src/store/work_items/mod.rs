@@ -69,6 +69,7 @@ pub(crate) struct RunwayTicket {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SprintCapacity {
     pub capacity: f64,
+    pub source: RunwayCapacitySource,
     pub effective_points: f64,
     pub assumed_points: f64,
     pub assumed_ticket_size: f64,
@@ -106,19 +107,30 @@ pub(crate) fn apply_capacity(
     source: RunwayCapacitySource,
     tolerance_percent: u8,
 ) {
-    let Some((assumed_ticket_size, assumed_from_average)) =
-        assumed_ticket_size.filter(|(value, _)| value.is_finite() && *value >= 0.0)
-    else {
+    let assumed_ticket_size =
+        assumed_ticket_size.filter(|(value, _)| value.is_finite() && *value >= 0.0);
+    let requires_assumption = snapshot
+        .work_items
+        .iter()
+        .chain(
+            snapshot
+                .sprints
+                .iter()
+                .flat_map(|sprint| &sprint.work_items),
+        )
+        .any(needs_assumption);
+    if requires_assumption && assumed_ticket_size.is_none() {
         snapshot.runway = None;
         for sprint in &mut snapshot.sprints {
             sprint.capacity = None;
         }
         return;
-    };
+    }
     if !capacity.is_finite() || capacity <= 0.0 {
         snapshot.runway = None;
         return;
     }
+    let (assumed_ticket_size, assumed_from_average) = assumed_ticket_size.unwrap_or((0.0, false));
 
     let mut used_capacity = 0.0;
     let mut virtual_sprint = 1;
@@ -179,6 +191,7 @@ pub(crate) fn apply_capacity(
         };
         sprint.capacity = Some(SprintCapacity {
             capacity,
+            source,
             effective_points,
             assumed_points,
             assumed_ticket_size,
@@ -192,7 +205,21 @@ fn effective_points(item: &WorkItem, assumed_ticket_size: f64) -> (f64, bool) {
     item.story_points
         .filter(|points| points.is_finite() && *points >= 0.0)
         .map(|points| (points, false))
-        .unwrap_or((assumed_ticket_size, true))
+        .unwrap_or_else(|| {
+            if item.kind.eq_ignore_ascii_case("bug") {
+                (0.0, false)
+            } else {
+                (assumed_ticket_size, true)
+            }
+        })
+}
+
+fn needs_assumption(item: &WorkItem) -> bool {
+    !item.kind.eq_ignore_ascii_case("bug")
+        && item
+            .story_points
+            .filter(|points| points.is_finite() && *points >= 0.0)
+            .is_none()
 }
 
 #[cfg(test)]

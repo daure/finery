@@ -158,3 +158,72 @@ fn sprint_health_uses_the_configured_tolerance_range() {
         SprintCapacityState::UnderCommitted
     );
 }
+
+#[test]
+fn capacity_uses_pointed_bugs_but_never_assumes_unestimated_bugs() {
+    let mut snapshot = snapshot();
+    snapshot.sprints[0].work_items = vec![
+        work_item("FIN-10", Some(5.0)),
+        WorkItem {
+            kind: "BUG".into(),
+            story_points: None,
+            ..work_item("FIN-11", None)
+        },
+        WorkItem {
+            kind: "bug".into(),
+            story_points: Some(2.0),
+            ..work_item("FIN-12", None)
+        },
+    ];
+    snapshot.work_items = vec![WorkItem {
+        kind: "Bug".into(),
+        story_points: None,
+        ..work_item("FIN-1", None)
+    }];
+
+    apply_capacity(
+        &mut snapshot,
+        20.0,
+        Some((3.0, true)),
+        RunwayCapacitySource::JiraVelocity,
+        20,
+    );
+
+    let capacity = snapshot.sprints[0].capacity.as_ref().unwrap();
+    assert_eq!(capacity.source, RunwayCapacitySource::JiraVelocity);
+    assert_eq!(capacity.effective_points, 7.0);
+    assert_eq!(capacity.assumed_points, 0.0);
+    let runway_ticket = snapshot.runway.as_ref().unwrap().tickets.first().unwrap();
+    assert_eq!(runway_ticket.effective_points, 0.0);
+    assert!(!runway_ticket.assumed);
+    assert!(!runway_ticket.assumed_from_average);
+}
+
+#[test]
+fn capacity_without_an_assumption_keeps_all_bug_loads() {
+    let mut snapshot = snapshot();
+    snapshot.sprints[0].work_items = vec![WorkItem {
+        kind: "Bug".into(),
+        story_points: None,
+        ..work_item("FIN-10", None)
+    }];
+    snapshot.work_items = vec![WorkItem {
+        kind: "BUG".into(),
+        story_points: None,
+        ..work_item("FIN-1", None)
+    }];
+
+    apply_capacity(&mut snapshot, 20.0, None, RunwayCapacitySource::Fixed, 20);
+
+    assert_eq!(
+        snapshot.sprints[0]
+            .capacity
+            .as_ref()
+            .unwrap()
+            .effective_points,
+        0.0
+    );
+    let runway = snapshot.runway.as_ref().unwrap();
+    assert_eq!(runway.tickets[0].effective_points, 0.0);
+    assert!(!runway.tickets[0].assumed);
+}

@@ -59,6 +59,31 @@ fn included_ticket_uses_live_source_until_first_edit_creates_changes() {
 }
 
 #[test]
+fn selected_existing_ticket_key_excludes_local_tickets() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    assert_eq!(
+        state.selected_existing_ticket_key().as_deref(),
+        Some("FIN-142")
+    );
+
+    state.dispatch(ComposerAction::SelectTicket(Some("FIN-157".into())));
+    assert_eq!(
+        state.selected_existing_ticket_key().as_deref(),
+        Some("FIN-157")
+    );
+
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    state.dispatch(ComposerAction::CreateTicketAt {
+        title: "Local story".into(),
+        project_key: "FIN".into(),
+        kind: super::TicketKind::Story,
+        placement: super::PlacementTarget::Root,
+    });
+    assert_eq!(state.selected_existing_ticket_key(), None);
+}
+
+#[test]
 fn replacing_catalog_preserves_valid_selection_and_falls_back_safely() {
     let mut state = ComposerState::demo();
     state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));

@@ -680,7 +680,7 @@ fn sprint_issues(
     loop {
         let query = vec![
             ("startAt", start_at.to_string()),
-            ("maxResults", "100".to_string()),
+            ("maxResults", "1000".to_string()),
             ("fields", backlog_fields(story_points_field_id).join(",")),
         ];
         let response = client
@@ -753,7 +753,7 @@ fn board_backlog_query(
 ) -> Vec<(&'static str, String)> {
     vec![
         ("startAt", start_at.to_string()),
-        ("maxResults", "100".into()),
+        ("maxResults", "1000".into()),
         ("fields", backlog_fields(story_points_field_id).join(",")),
         ("jql", BACKLOG_JQL.into()),
     ]

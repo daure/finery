@@ -97,6 +97,88 @@ fn backlog_shows_loading_indicator_before_the_initial_snapshot_arrives() {
 }
 
 #[test]
+fn backlog_hides_the_existing_data_view_while_reloading() {
+    tuicore::init();
+    let mut page = BacklogPage::with_snapshot_loading_for_test(snapshot());
+    let area = Rect::new(0, 0, 80, 16);
+    page.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            page.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let text = rendered_lines(&terminal, area).concat();
+
+    assert!(text.contains("Loading Jira backlog…"));
+    assert!(!text.contains("FIN-8"));
+}
+
+#[test]
+fn backlog_refresh_shows_a_loader_while_reloading() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot(), sender, Default::default());
+    view.set_loading(true);
+    let area = Rect::new(0, 0, 80, 16);
+    view.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            view.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let mut lines = rendered_lines(&terminal, area);
+    let header = lines.remove(0);
+
+    assert!(header.contains("⠋"));
+    assert!(header.contains("Refresh"));
+    assert!(cell_position(&header, "Refresh") > cell_position(&header, "⠋"));
+}
+
+#[test]
+fn backlog_refresh_is_focusable_with_shift_r() {
+    tuicore::init();
+    let (sender, receiver) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot(), sender, Default::default());
+    let area = Rect::new(0, 0, 80, 16);
+    let mut layout = LayoutCtx::new();
+    view.layout(area, &mut layout);
+    let refresh = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id.as_str() == "button")
+        .unwrap();
+
+    assert_eq!(layout.focus_targets()[0].id.as_str(), "data-view");
+    assert!(refresh.tab_stop);
+    assert_eq!(refresh.hotkey_sequences, ["shift+r"]);
+    assert_eq!(
+        refresh.path,
+        TreePath::from_keys([ChildKey::new("refresh")])
+    );
+
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    view.dispatch_event(
+        &EventRoute::new(TreePath::from_keys([ChildKey::new("refresh")])),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('r'),
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut ctx,
+    );
+
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(super::components::BacklogSectionEvent::Refresh)
+    ));
+}
+
+#[test]
 fn unified_backlog_tree_shows_collapsed_sprints_and_expanded_backlog() {
     tuicore::init();
     let (sender, _) = mpsc::channel();
@@ -129,14 +211,58 @@ fn unified_backlog_tree_shows_collapsed_sprints_and_expanded_backlog() {
             text.push_str(terminal.backend().buffer().cell((x, y)).unwrap().symbol());
         }
     }
-    assert!(text.contains(" Sprint 7 • 18 Jun - 2 Jul"));
-    assert!(text.contains(" Sprint 8 • 3 Jul - 17 Jul"));
-    assert!(text.contains("Backlog"));
+    assert!(text.contains(" Sprint 7 • 18 Jun – 2 Jul"));
+    assert!(text.contains(" Sprint 8 • 3 Jul – 17 Jul"));
+    assert!(text.contains(" Backlog • 1 items"));
     assert!(!text.contains("Finery"));
     assert!(!text.contains("Ship sprint work"));
     assert!(text.contains("Plan next sprint"));
     assert!(text.contains("FIN-8 Plan next sprint"));
     assert!(text.contains("- • @-- • To Do"));
+}
+
+#[test]
+fn resetting_the_backlog_tree_collapses_sprints_and_expands_backlog() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let snapshot = snapshot();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    tree.dispatch_focus(
+        &data_focus_target(),
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+    tree.highlight("section:sprint-7");
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Right)),
+        &mut EventCtx::new(AnimationSettings::default()),
+    );
+    let area = Rect::new(0, 0, 80, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    assert!(rendered_lines(&terminal, area).concat().contains("FIN-7"));
+
+    tree.reset_to_backlog_parent(&snapshot);
+    tree.layout(area, &mut LayoutCtx::new());
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(!text.contains("FIN-7"));
+    assert!(text.contains("FIN-8"));
 }
 
 #[test]
@@ -230,7 +356,7 @@ fn backlog_story_rows_show_identity_then_subtask_release_and_epic_metadata() {
 }
 
 #[test]
-fn backlog_shows_runway_summary_and_non_structural_capacity_markers() {
+fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
     tuicore::init();
     let mut snapshot = snapshot();
     snapshot.work_items = vec![
@@ -244,6 +370,7 @@ fn backlog_shows_runway_summary_and_non_structural_capacity_markers() {
         },
         work_item("FIN-10", "Estimate this ticket"),
     ];
+    snapshot.sprints[0].work_items[0].story_points = Some(18.0);
     apply_capacity(
         &mut snapshot,
         20.0,
@@ -270,11 +397,15 @@ fn backlog_shows_runway_summary_and_non_structural_capacity_markers() {
         }
     }
 
-    assert!(text.contains("Velocity 20"));
+    assert!(text.contains("Refresh"));
+    assert!(!text.contains("Velocity"));
     assert!(text.contains("┃"));
     assert!(text.contains("3 • @AD • To Do"));
-    assert!(!text.contains("assumed"));
     let lines = rendered_lines(&terminal, area);
+    let capacity_line = lines.iter().find(|line| line.contains("✓ 1/1")).unwrap();
+    assert!(capacity_line.contains(" 18/20 pts • ✓ 1/1 • 1 items"));
+    assert_eq!(cell_position(capacity_line, ""), Some(2));
+    assert!(!text.contains("assumed"));
     let ticket_position = |key| {
         lines
             .iter()
@@ -314,6 +445,7 @@ fn backlog_shows_runway_summary_and_non_structural_capacity_markers() {
         tuicore::theme().surface_bg()
     );
 
+    snapshot.sprints[0].work_items[0].story_points = Some(5.4);
     apply_capacity(
         &mut snapshot,
         20.0,
@@ -335,9 +467,153 @@ fn backlog_shows_runway_summary_and_non_structural_capacity_markers() {
             text.push_str(terminal.backend().buffer().cell((x, y)).unwrap().symbol());
         }
     }
-    assert!(text.contains("Velocity ~20"));
-    assert!(text.contains("  • 5.4 pts • 18 Jun - 2 Jul • Sprint 7"));
-    assert!(text.contains("~5.4 • @AD • To Do"));
+    assert!(!text.contains("Velocity"));
+    assert!(text.contains(" Sprint 7 • 18 Jun – 2 Jul"));
+    assert!(text.contains(" ~5.4/20 pts • ✓ 1/1 • 1 items"));
+    assert!(text.contains("5.4 • @AD • To Do"));
+
+    snapshot.sprints[0].work_items[0].story_points = None;
+    apply_capacity(
+        &mut snapshot,
+        20.0,
+        Some((5.4, true)),
+        RunwayCapacitySource::JiraVelocity,
+        20,
+    );
+    view.set_snapshot(&snapshot);
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            view.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(text.contains(" ~5.4/20 pts • 󰄰 0/1 • 1 items"));
+
+    apply_capacity(
+        &mut snapshot,
+        20.0,
+        Some((5.4, true)),
+        RunwayCapacitySource::FixedFallback,
+        20,
+    );
+    view.set_snapshot(&snapshot);
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            view.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(text.contains(" 5.4/20 pts • 󰄰 0/1 • 1 items"));
+    assert!(!text.contains("~5.4/20 pts"));
+}
+
+#[test]
+fn sprint_estimation_coverage_excludes_bugs_and_counts_all_sprint_items() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    snapshot.story_points_configured = true;
+    snapshot.sprints[0].work_items = vec![
+        WorkItem {
+            story_points: Some(5.0),
+            ..work_item("FIN-7", "Estimated story")
+        },
+        WorkItem {
+            kind: "BUG".into(),
+            ..work_item("FIN-9", "Unestimated sprint bug")
+        },
+        WorkItem {
+            kind: "bug".into(),
+            story_points: Some(2.0),
+            ..work_item("FIN-10", "Estimated sprint bug")
+        },
+        WorkItem {
+            kind: "Custom issue type".into(),
+            ..work_item("FIN-11", "Unestimated custom item")
+        },
+    ];
+    snapshot.work_items = vec![WorkItem {
+        kind: "Bug".into(),
+        ..work_item("FIN-8", "Unestimated backlog bug")
+    }];
+    apply_capacity(
+        &mut snapshot,
+        20.0,
+        Some((3.0, true)),
+        RunwayCapacitySource::JiraVelocity,
+        20,
+    );
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let area = Rect::new(0, 0, 100, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(text.contains(" ~10/20 pts • ✓ 1/1 • 4 items"));
+
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    tree.dispatch_focus(
+        &data_focus_target(),
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char(' '))),
+        &mut EventCtx::new(AnimationSettings::default()),
+    );
+    tree.layout(area, &mut LayoutCtx::new());
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(text.contains("Unestimated sprint bug"));
+    assert!(text.contains("Unestimated backlog bug"));
+}
+
+#[test]
+fn sprint_load_marks_zero_valued_average_assumptions() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    apply_capacity(
+        &mut snapshot,
+        20.0,
+        Some((0.0, true)),
+        RunwayCapacitySource::JiraVelocity,
+        20,
+    );
+    let (sender, _) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot, sender, Default::default());
+    let area = Rect::new(0, 0, 100, 16);
+    view.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            view.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    assert!(
+        rendered_lines(&terminal, area)
+            .concat()
+            .contains(" ~0/20 pts • 󰄰 0/1 • 1 items")
+    );
 }
 
 #[test]
@@ -524,6 +800,19 @@ fn backlog_search_filters_tickets_and_hides_runway_bands() {
         }),
         "search results must not retain virtual sprint background bands"
     );
+
+    tree.reset_to_backlog_parent(&snapshot);
+    tree.layout(area, &mut LayoutCtx::new());
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(text.contains("FIN-1"));
+    assert!(text.contains("FIN-2"));
 }
 
 #[test]
@@ -615,6 +904,36 @@ fn unified_tree_uses_same_section_transient_selection_for_the_quick_menu() {
     assert!(
         matches!(receiver.try_recv(), Ok(super::components::BacklogSectionEvent::OpenQuickMenu { section_id, keys, source_order }) if section_id == "backlog" && keys == ["FIN-1", "FIN-2"] && source_order == ["FIN-1", "FIN-2"])
     );
+}
+
+#[test]
+fn ctrl_enter_opens_the_highlighted_ticket() {
+    tuicore::init();
+    let (sender, receiver) = mpsc::channel();
+    let mut snapshot = snapshot();
+    snapshot.work_items[0].kind = "Bug".into();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    tree.dispatch_focus(
+        &data_focus_target(),
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    tree.highlight("ticket:FIN-8");
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Enter,
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut ctx,
+    );
+
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(super::components::BacklogSectionEvent::OpenTicket { key }) if key == "FIN-8"
+    ));
 }
 
 #[test]

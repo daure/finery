@@ -8,9 +8,9 @@ use std::{
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
     AnimationSettings, CrossAlign, DialogBackdrop, DialogLayer, EventCtx, EventOutcome, EventRoute,
-    Flex, FlexItem, FocusCtx, FocusId, FocusTarget, LayoutCtx, LayoutProposal, LayoutResult,
-    LayoutSizeHint, LifecycleCtx, MainAlign, Paragraph, RenderCtx, ScrollContainer, Spinner,
-    TickResult, TuiEvent, TuiNode,
+    Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, LayoutCtx, LayoutProposal,
+    LayoutResult, LayoutSizeHint, LifecycleCtx, MainAlign, Paragraph, RenderCtx, ScrollContainer,
+    Spinner, TickResult, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -206,6 +206,9 @@ pub(crate) struct BacklogPage {
     snapshot: Option<BacklogSnapshot>,
     pending_transfer: Option<PendingTransfer>,
     pending_rank: Option<PendingRank>,
+    focus_backlog_after_load: bool,
+    pending_focus: Option<FocusRequest>,
+    reload_notification_pending: bool,
     settings_revision: u64,
 }
 
@@ -235,6 +238,9 @@ impl BacklogPage {
             snapshot: None,
             pending_transfer: None,
             pending_rank: None,
+            focus_backlog_after_load: false,
+            pending_focus: None,
+            reload_notification_pending: false,
             settings_revision,
         }
     }
@@ -250,6 +256,13 @@ impl BacklogPage {
     #[cfg(test)]
     pub(super) fn with_initial_loading_for_test() -> Self {
         let mut page = Self::new(AppService::for_tests());
+        page.loading = true;
+        page
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_snapshot_loading_for_test(snapshot: BacklogSnapshot) -> Self {
+        let mut page = Self::with_snapshot_for_test(snapshot);
         page.loading = true;
         page
     }
@@ -282,6 +295,7 @@ impl BacklogPage {
             .generations
             .start_load(rank_refresh, preserve_optimistic_view);
         self.loading = true;
+        self.view.base_mut().set_loading(true);
         let service = self.service.clone();
         let sender = self.sender.clone();
         if let Err(error) = std::thread::Builder::new()
@@ -296,14 +310,17 @@ impl BacklogPage {
             let completion = self.generations.complete_load(generation);
             if let Some(completion) = completion {
                 self.loading = false;
+                self.view.base_mut().set_loading(false);
                 let error = format!("Could not load Jira backlog: {error}");
                 self.handle_load_failure(completion, error.clone(), error);
+                self.reload_notification_pending = false;
+                self.finish_requested_backlog_focus();
             }
         }
     }
 
     fn shows_initial_loading(&self) -> bool {
-        self.loading && self.snapshot.is_none()
+        self.loading
     }
 
     fn drain_results(&mut self) -> bool {
@@ -335,6 +352,8 @@ impl BacklogPage {
             return false;
         };
         self.loading = false;
+        self.view.base_mut().set_loading(false);
+        let reload_notification_pending = std::mem::take(&mut self.reload_notification_pending);
         match result {
             Ok(snapshot) => {
                 let preserves_optimistic_view = matches!(
@@ -428,6 +447,16 @@ impl BacklogPage {
                         self.view.base_mut().highlight(&row_id);
                     }
                 }
+                if self.focus_backlog_after_load {
+                    self.view.base_mut().reset_to_backlog_parent(snapshot);
+                }
+                if reload_notification_pending {
+                    self.service
+                        .report_notification(tuicore::Notification::success(
+                            "Backlog reloaded",
+                            "Reloaded the backlog and sprints from Jira",
+                        ));
+                }
             }
             Err(error) => {
                 self.handle_load_failure(
@@ -437,7 +466,21 @@ impl BacklogPage {
                 );
             }
         }
+        self.finish_requested_backlog_focus();
         true
+    }
+
+    fn reload(&mut self) {
+        self.focus_backlog_after_load = true;
+        self.reload_notification_pending = true;
+        self.load(false, false);
+    }
+
+    fn finish_requested_backlog_focus(&mut self) {
+        if self.focus_backlog_after_load {
+            self.focus_backlog_after_load = false;
+            self.pending_focus = Some(FocusRequest::Target(FocusId::new("data-view")));
+        }
     }
 
     fn handle_load_failure(
@@ -490,7 +533,13 @@ impl BacklogPage {
         let mut changed = false;
         while let Ok(event) = self.section_receiver.try_recv() {
             match event {
+                BacklogSectionEvent::Refresh => {
+                    if !self.loading && !self.ranking {
+                        self.reload();
+                    }
+                }
                 BacklogSectionEvent::MoveLocked => self.report_move_locked(),
+                BacklogSectionEvent::OpenTicket { key } => self.service.open_jira_issue(&key),
                 BacklogSectionEvent::OpenQuickMenu {
                     section_id,
                     keys,
@@ -640,6 +689,7 @@ impl BacklogPage {
         self.move_locked.set(true);
         let generation = self.generations.start_rank();
         self.loading = false;
+        self.view.base_mut().set_loading(true);
         self.rank_refresh_retry.cancel();
         self.ranking = true;
         let service = self.service.clone();
@@ -670,6 +720,7 @@ impl BacklogPage {
         {
             if self.generations.complete_rank(generation) {
                 self.ranking = false;
+                self.view.base_mut().set_loading(false);
                 self.move_locked.set(false);
                 self.restore_transfer_snapshot();
                 self.service
@@ -810,6 +861,7 @@ impl BacklogPage {
     fn start_rank(&mut self, plan: RankPlan) {
         let generation = self.generations.start_rank();
         self.loading = false;
+        self.view.base_mut().set_loading(true);
         self.rank_refresh_retry.cancel();
         self.ranking = true;
         self.active_rank_plan = Some(plan.clone());
@@ -826,6 +878,7 @@ impl BacklogPage {
         {
             if self.generations.complete_rank(generation) {
                 self.ranking = false;
+                self.view.base_mut().set_loading(false);
                 self.active_rank_plan = None;
                 self.restore_rank_snapshot();
                 self.move_locked.set(false);
@@ -1278,6 +1331,7 @@ impl TuiNode for BacklogPage {
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.loading_view.mount(ctx);
         self.view.mount(ctx);
+        self.focus_backlog_after_load = true;
         self.load(false, false);
         ctx.request_tick();
     }
@@ -1290,5 +1344,9 @@ impl TuiNode for BacklogPage {
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.loading_view.destroy(ctx);
         self.view.destroy(ctx);
+    }
+
+    fn take_pending_focus_request(&mut self) -> Option<FocusRequest> {
+        self.pending_focus.take()
     }
 }

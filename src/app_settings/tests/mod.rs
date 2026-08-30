@@ -51,6 +51,19 @@ fn story_points_field_id_round_trips_through_settings_values() {
 }
 
 #[test]
+fn jira_issue_url_uses_the_configured_site_and_trims_trailing_slashes() {
+    let settings = AppSettings {
+        jira_base_url: "https://finery.atlassian.net///".into(),
+        ..AppSettings::default()
+    };
+
+    assert_eq!(
+        settings.jira_issue_url("FIN-42").as_deref(),
+        Some("https://finery.atlassian.net/browse/FIN-42")
+    );
+}
+
+#[test]
 fn backlog_runway_settings_round_trip_and_reject_invalid_values() {
     let settings = AppSettings::resolve(&HashMap::from([
         (BACKLOG_USE_JIRA_VELOCITY_SETTING.into(), "true".into()),

@@ -152,6 +152,10 @@ impl TuiNode for App {
             })
     }
 
+    fn take_pending_focus_request(&mut self) -> Option<tuicore::FocusRequest> {
+        self.view.take_pending_focus_request()
+    }
+
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.view.init(ctx);
     }
