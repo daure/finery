@@ -1,4 +1,4 @@
-use std::{cell::Cell, collections::HashMap, rc::Rc, sync::mpsc::Sender, time::Duration};
+use std::{cell::{Cell, RefCell}, collections::HashMap, rc::Rc, sync::mpsc::Sender, time::Duration};
 
 use ratatui::{
     Frame,
@@ -9,8 +9,8 @@ use ratatui::{
 use tuicore::{
     Animated, Button, CellContext, ChildKey, Column, EventCtx, EventOutcome, EventRoute, FocusCtx,
     FocusId, FocusTarget, Key, KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult,
-    LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlKeyBindings, RenderCtx,
-    SearchMode, Spinner, TickResult, TreeAdapter, TuiEvent, TuiNode,
+    LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlKeyBindings, MenuButton,
+    MenuItem, RenderCtx, SearchMode, Spinner, TickResult, TreeAdapter, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -20,6 +20,7 @@ use crate::{
             WorkItemKind, WorkItemRow, story_points_label, work_item_title_prefix_width,
             work_item_title_with_key_line,
         },
+        ticket_number_jump::{TicketNumberJump, exact_ticket_number_matches},
     },
     store::work_items::{
         BacklogSnapshot, RunwayCapacitySource, RunwayTicket, Sprint, SprintCapacityState,
@@ -56,6 +57,11 @@ struct BacklogWorkItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::pages::backlog) enum BacklogSectionEvent {
     Refresh,
+    OpenReports,
+    OpenTimeline,
+    OpenBoard,
+    OpenReleases,
+    WebMenuClosed,
     MoveLocked,
     OpenTicket {
         key: String,
@@ -76,18 +82,27 @@ pub(in crate::pages::backlog) enum BacklogSectionEvent {
     },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum WebMenuItem {
+    Board,
+    Timeline,
+    Releases,
+    Reports,
+}
+
 pub(in crate::pages::backlog) fn backlog_tree(
     snapshot: &BacklogSnapshot,
     events: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
 ) -> BacklogTree {
+    let number_jump = Rc::new(RefCell::new(TicketNumberJump::default()));
     let mut control = ListControl::new(
         backlog_rows(snapshot),
         |row: &BacklogRow| row.id.clone(),
         |_, _| unreachable!("backlog does not add rows"),
     )
     .headers(false)
-    .columns(vec![backlog_column()])
+    .columns(vec![backlog_column(Rc::clone(&number_jump))])
     .tree(TreeAdapter::mutable_parent_id(
         |row: &BacklogRow| row.parent_id.clone(),
         |row, parent_id| row.parent_id = parent_id,
@@ -144,33 +159,72 @@ pub(in crate::pages::backlog) fn backlog_tree(
         refresh: Button::new("Refresh").hotkey("shift+r").on_press(move || {
             let _ = refresh_events.send(BacklogSectionEvent::Refresh);
         }),
+        web: MenuButton::new(
+            "Web",
+            [
+                MenuItem::new(WebMenuItem::Board, "Board"),
+                MenuItem::new(WebMenuItem::Timeline, "Timeline"),
+                MenuItem::new(WebMenuItem::Releases, "Releases"),
+                MenuItem::new(WebMenuItem::Reports, "Reports"),
+            ],
+        )
+        .hotkey("shift+w"),
         spinner: Spinner::new(),
         loading: false,
         refresh_area: ratatui::layout::Rect::default(),
+        web_area: ratatui::layout::Rect::default(),
         spinner_area: ratatui::layout::Rect::default(),
         control_area: ratatui::layout::Rect::default(),
         events,
         move_locked,
         runway_markers_visible,
+        number_jump,
     }
 }
 
 pub(in crate::pages::backlog) struct BacklogTree {
     control: ListControl<BacklogRow, String>,
     refresh: Button<()>,
+    web: MenuButton<WebMenuItem>,
     spinner: Spinner,
     loading: bool,
     refresh_area: ratatui::layout::Rect,
+    web_area: ratatui::layout::Rect,
     spinner_area: ratatui::layout::Rect,
     control_area: ratatui::layout::Rect,
     events: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
     runway_markers_visible: Rc<Cell<bool>>,
+    number_jump: Rc<RefCell<TicketNumberJump>>,
 }
 
 impl BacklogTree {
     pub(in crate::pages::backlog) fn set_snapshot(&mut self, snapshot: &BacklogSnapshot) {
+        let highlighted = self.control.data_view().highlighted_id();
+        let expanded = self.control.data_view().tree_expansion_snapshot();
+        let highlighted_parent = highlighted.as_ref().and_then(|id| {
+            self.control
+                .items()
+                .iter()
+                .find(|row| &row.id == id)
+                .and_then(|row| row.parent_id.clone())
+        });
         self.control.set_rows(backlog_rows(snapshot));
+        let expanded = expanded
+            .into_iter()
+            .filter(|id| self.is_section(id))
+            .collect();
+        self.control
+            .data_view_mut()
+            .restore_tree_expansion(expanded);
+        if highlighted.as_ref().is_some_and(|id| {
+            !self.control.items().iter().any(|row| &row.id == id)
+        }) {
+            let fallback = highlighted_parent
+                .filter(|id| self.control.items().iter().any(|row| &row.id == id))
+                .unwrap_or_else(|| section_row_id("backlog"));
+            self.highlight(&fallback);
+        }
         let parents = self
             .control
             .transient_selected_ids()
@@ -188,18 +242,15 @@ impl BacklogTree {
         self.refresh.set_disabled(loading);
     }
 
-    pub(in crate::pages::backlog) fn reset_to_backlog_parent(
-        &mut self,
-        snapshot: &BacklogSnapshot,
-    ) {
-        *self = backlog_tree(snapshot, self.events.clone(), self.move_locked.clone());
-        self.highlight(&section_row_id("backlog"));
-    }
-
     pub(in crate::pages::backlog) fn highlight(&mut self, row_id: &str) {
         self.control
             .data_view_mut()
             .highlight_id(&row_id.to_owned());
+    }
+
+    #[cfg(test)]
+    pub(in crate::pages::backlog) fn highlighted_id_for_test(&self) -> Option<String> {
+        self.control.data_view().highlighted_id()
     }
 
     fn is_section(&self, id: &str) -> bool {
@@ -329,6 +380,70 @@ impl BacklogTree {
         true
     }
 
+    fn handle_ticket_number_jump(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        let TuiEvent::Key(key) = event else {
+            return false;
+        };
+        if self.control.data_view().is_searching() {
+            return false;
+        }
+        if self.number_jump.borrow().cancels(*key) {
+            self.number_jump.borrow_mut().clear();
+            ctx.request_redraw();
+            ctx.stop_propagation();
+            return true;
+        }
+        if self.number_jump.borrow().accepts(*key) {
+            let number = self.number_jump.borrow().query().unwrap_or_default().to_owned();
+            let row_id = self.exact_ticket_row_id(&number);
+            self.number_jump.borrow_mut().clear();
+            if let Some(row_id) = row_id {
+                self.jump_to_ticket(&row_id);
+            }
+            ctx.request_redraw();
+            ctx.stop_propagation();
+            return true;
+        }
+        if !self.number_jump.borrow_mut().push(*key) {
+            return false;
+        }
+        let number = self.number_jump.borrow().query().unwrap_or_default().to_owned();
+        self.control.data_view_mut().expand_all();
+        let matching_count = self
+            .control
+            .items()
+            .iter()
+            .filter(|row| matches!(&row.content, BacklogRowContent::WorkItem(item) if crate::components::ticket_number_jump::ticket_number_matches(&item.item.key, &number)))
+            .count();
+        if matching_count == 1 {
+            if let Some(row_id) = self.exact_ticket_row_id(&number) {
+                self.number_jump.borrow_mut().clear();
+                self.jump_to_ticket(&row_id);
+            }
+        }
+        ctx.request_redraw();
+        ctx.request_tick();
+        ctx.stop_propagation();
+        true
+    }
+
+    fn exact_ticket_row_id(&self, number: &str) -> Option<String> {
+        self.control.items().iter().find_map(|row| match &row.content {
+            BacklogRowContent::WorkItem(item)
+                if exact_ticket_number_matches(&item.item.key, number) =>
+            {
+                Some(row.id.clone())
+            }
+            _ => None,
+        })
+    }
+
+    fn jump_to_ticket(&mut self, row_id: &str) {
+        let view = self.control.data_view_mut();
+        view.highlight_id(&row_id.to_owned());
+        view.reveal_highlighted_centered();
+    }
+
     fn drain_events(&mut self, source_parents: HashMap<String, String>) {
         for event in self.control.take_events() {
             let (ids, parent) = match event {
@@ -407,6 +522,9 @@ impl BacklogTree {
         ctx: &mut EventCtx<()>,
         dispatch: impl FnOnce(&mut ListControl<BacklogRow, String>, &mut EventCtx<()>) -> EventOutcome,
     ) -> EventOutcome {
+        if self.handle_ticket_number_jump(event, ctx) {
+            return EventOutcome::Handled;
+        }
         if self.open_highlighted_ticket(event, ctx) {
             return EventOutcome::Handled;
         }
@@ -439,6 +557,22 @@ impl BacklogTree {
         self.drain_events(source_parents);
         outcome
     }
+
+    fn drain_web_menu(&mut self, was_open: bool) {
+        let activated = self.web.take_activated();
+        for item in activated.iter().copied() {
+            let event = match item {
+                WebMenuItem::Board => BacklogSectionEvent::OpenBoard,
+                WebMenuItem::Timeline => BacklogSectionEvent::OpenTimeline,
+                WebMenuItem::Releases => BacklogSectionEvent::OpenReleases,
+                WebMenuItem::Reports => BacklogSectionEvent::OpenReports,
+            };
+            let _ = self.events.send(event);
+        }
+        if was_open && activated.is_empty() && !self.web.is_open() {
+            let _ = self.events.send(BacklogSectionEvent::WebMenuClosed);
+        }
+    }
 }
 
 impl TuiNode for BacklogTree {
@@ -447,12 +581,20 @@ impl TuiNode for BacklogTree {
     }
     fn layout(&mut self, area: ratatui::layout::Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         let header_height = u16::from(!area.is_empty());
-        let refresh_width = self
-            .refresh
-            .measure(LayoutProposal::at_most(area.width, header_height))
-            .preferred
+        let button_width = |button: &Button<()>| {
+            button
+                .measure(LayoutProposal::at_most(area.width, header_height))
+                .preferred
+                .width
+        };
+        let refresh_width = button_width(&self.refresh).min(area.width);
+        let web_width = self.web.measure(LayoutProposal::at_most(area.width, header_height)).preferred.width.min(
+            area
             .width
-            .min(area.width);
+            .saturating_sub(refresh_width)
+            .saturating_sub(u16::from(refresh_width > 0)),
+        );
+        self.web_area = ratatui::layout::Rect::new(area.x, area.y, web_width, header_height);
         self.refresh_area = ratatui::layout::Rect::new(
             area.x
                 .saturating_add(area.width.saturating_sub(refresh_width)),
@@ -480,6 +622,9 @@ impl TuiNode for BacklogTree {
         ctx.push_slot(ChildKey::new("refresh"), self.refresh_area, |ctx| {
             self.refresh.layout(self.refresh_area, ctx)
         });
+        ctx.push_slot(ChildKey::new("web"), self.web_area, |ctx| {
+            self.web.layout(self.web_area, ctx)
+        });
         if self.loading {
             <Spinner as TuiNode<()>>::layout(&mut self.spinner, self.spinner_area, ctx);
         }
@@ -492,18 +637,24 @@ impl TuiNode for BacklogTree {
         ctx: &mut RenderCtx<'a>,
     ) {
         self.refresh.render(frame, self.refresh_area);
+        self.web.render(frame, self.web_area, ctx);
         if self.loading {
             self.spinner.render(frame, self.spinner_area);
         }
         self.control.render(frame, self.control_area, ctx);
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        let web_was_open = self.web.is_open();
         if matches!(event, TuiEvent::Mouse(_))
-            && self.refresh.event(event, ctx) == EventOutcome::Handled
+            && (self.refresh.event(event, ctx) == EventOutcome::Handled
+                || self.web.event(event, ctx) == EventOutcome::Handled)
         {
+            self.drain_web_menu(web_was_open);
             return EventOutcome::Handled;
         }
-        self.handle_event(event, ctx, |control, ctx| control.event(event, ctx))
+        let outcome = self.handle_event(event, ctx, |control, ctx| control.event(event, ctx));
+        self.drain_web_menu(web_was_open);
+        outcome
     }
     fn dispatch_event(
         &mut self,
@@ -516,11 +667,25 @@ impl TuiNode for BacklogTree {
                 .refresh
                 .dispatch_event(&EventRoute::new(refresh_path), event, ctx);
         }
+        if let Some(web_path) = route.path.without_first_if(&ChildKey::new("web")) {
+            let web_was_open = self.web.is_open();
+            let outcome = self.web.dispatch_event(&EventRoute::new(web_path), event, ctx);
+            self.drain_web_menu(web_was_open);
+            return outcome;
+        }
         self.handle_event(event, ctx, |control, ctx| {
             control.dispatch_event(route, event, ctx)
         })
     }
     fn tick(&mut self, dt: Duration, settings: tuicore::AnimationSettings) -> TickResult {
+        let number_jump = {
+            let mut jump = self.number_jump.borrow_mut();
+            if jump.advance(dt) {
+                TickResult::CHANGED
+            } else {
+                jump.remaining().map_or(TickResult::IDLE, TickResult::scheduled_after)
+            }
+        };
         self.control
             .tick(dt, settings)
             .merge(<Button<()> as TuiNode<()>>::tick(
@@ -528,11 +693,13 @@ impl TuiNode for BacklogTree {
                 dt,
                 settings,
             ))
+            .merge(self.web.tick(dt, settings))
             .merge(if self.loading {
                 Animated::tick(&mut self.spinner, dt, settings)
             } else {
                 TickResult::IDLE
             })
+            .merge(number_jump)
     }
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
         self.control.focus(target, focused, ctx);
@@ -540,6 +707,10 @@ impl TuiNode for BacklogTree {
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
         if let Some(refresh_target) = target.for_child(&ChildKey::new("refresh")) {
             self.refresh.dispatch_focus(&refresh_target, focused, ctx);
+            return;
+        }
+        if let Some(web_target) = target.for_child(&ChildKey::new("web")) {
+            self.web.dispatch_focus(&web_target, focused, ctx);
             return;
         }
         self.control.dispatch_focus(target, focused, ctx);
@@ -726,14 +897,16 @@ fn work_item_row(
         }),
     }
 }
-fn backlog_column() -> Column<BacklogRow, String> {
+fn backlog_column(number_jump: Rc<RefCell<TicketNumberJump>>) -> Column<BacklogRow, String> {
     Column::multiline(
         "backlog",
         "",
         Constraint::Percentage(100),
-        |row: &BacklogRow, _: &CellContext<String>| match &row.content {
+        move |row: &BacklogRow, _: &CellContext<String>| match &row.content {
             BacklogRowContent::Section { title, .. } => title.clone(),
-            BacklogRowContent::WorkItem(item) => backlog_work_item_text(item),
+            BacklogRowContent::WorkItem(item) => {
+                backlog_work_item_text(item, number_jump.borrow().query())
+            }
         },
     )
     .constrained()
@@ -748,11 +921,16 @@ fn backlog_column() -> Column<BacklogRow, String> {
     })
     .search_key(|row| match &row.content {
         BacklogRowContent::Section { search_text, .. } => search_text.clone(),
-        BacklogRowContent::WorkItem(item) => format!("{} {}", item.item.key, item.item.title),
+        BacklogRowContent::WorkItem(item) => format!(
+            "{} {} {}",
+            item.item.key,
+            item.item.title,
+            item.epic_name.as_deref().unwrap_or_default(),
+        ),
     })
 }
 
-fn backlog_work_item_text(row: &BacklogWorkItem) -> Text<'static> {
+fn backlog_work_item_text(row: &BacklogWorkItem, number_query: Option<&str>) -> Text<'static> {
     let theme = tuicore::theme();
     let text_style = Style::default().fg(theme.text_fg());
     let muted_style = Style::default().fg(theme.muted_fg());
@@ -797,7 +975,7 @@ fn backlog_work_item_text(row: &BacklogWorkItem) -> Text<'static> {
         );
     }
     Text::from(vec![
-        work_item_title_with_key_line(&row.item),
+        work_item_title_with_key_line(&row.item, number_query),
         Line::from(metadata),
     ])
 }

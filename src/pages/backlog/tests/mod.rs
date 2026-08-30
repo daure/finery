@@ -2,7 +2,7 @@ use std::sync::mpsc;
 
 use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Modifier};
 use tuicore::{
-    AnimationSettings, ChildKey, EventCtx, EventRoute, FocusCtx, FocusId, FocusTarget, Key,
+    AnimationSettings, ChildKey, EventCtx, EventRoute, FocusCtx, FocusId, FocusRequest, FocusTarget, Key,
     KeyEvent, KeyModifiers, LayoutCtx, RenderCtx, TreePath, TuiEvent, TuiNode,
 };
 
@@ -10,11 +10,13 @@ use super::{
     components::backlog_tree,
     page::{
         BacklogPage, MAX_UNCONFIRMED_TRANSFER_REFRESHES, PendingRank, PendingRankReconciliation,
-        PendingTransfer, PendingTransferReconciliation, move_work_items, reconcile_pending_rank,
+        PendingTransfer, PendingTransferReconciliation, move_work_items_to_edge,
+        recalculate_capacity, reconcile_pending_rank,
         reconcile_pending_transfer, should_poll, source_transfer_highlight,
         source_transfer_highlight_key, transfer_destinations, transfer_reconciliation_highlight,
     },
 };
+use crate::app_settings::BacklogRunwaySettings;
 use crate::store::work_items::{
     BacklogSnapshot, RunwayCapacitySource, Sprint, SubtaskProgress, WorkItem, apply_capacity,
     rank_plan,
@@ -141,6 +143,26 @@ fn backlog_refresh_shows_a_loader_while_reloading() {
 }
 
 #[test]
+fn backlog_header_places_web_menu_before_the_right_aligned_refresh_button() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot(), sender, Default::default());
+    let area = Rect::new(0, 0, 100, 16);
+    view.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            view.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let header = rendered_lines(&terminal, area).remove(0);
+
+    assert!(cell_position(&header, "Web") < cell_position(&header, "Refresh"));
+}
+
+#[test]
 fn backlog_refresh_is_focusable_with_shift_r() {
     tuicore::init();
     let (sender, receiver) = mpsc::channel();
@@ -176,6 +198,102 @@ fn backlog_refresh_is_focusable_with_shift_r() {
         receiver.try_recv(),
         Ok(super::components::BacklogSectionEvent::Refresh)
     ));
+}
+
+#[test]
+fn backlog_web_menu_opens_with_shift_w_and_emits_board_event() {
+    tuicore::init();
+    let (sender, receiver) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot(), sender, Default::default());
+    let area = Rect::new(0, 0, 100, 16);
+    let mut layout = LayoutCtx::new();
+    view.layout(area, &mut layout);
+
+    let web = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.path == TreePath::from_keys([ChildKey::new("web"), ChildKey::new("trigger")]))
+        .unwrap();
+    assert_eq!(web.hotkey_sequences, ["shift+w"]);
+
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    view.dispatch_event(
+        &EventRoute::new(TreePath::from_keys([ChildKey::new("web")])),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut ctx,
+    );
+    view.layout(area, &mut LayoutCtx::new());
+    view.dispatch_event(
+        &EventRoute::new(TreePath::from_keys([ChildKey::new("web"), ChildKey::new("menu")])),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut ctx,
+    );
+
+    assert_eq!(receiver.try_recv(), Ok(super::components::BacklogSectionEvent::OpenBoard));
+}
+
+#[test]
+fn selecting_a_web_menu_item_returns_focus_to_the_backlog_data_view() {
+    tuicore::init();
+    let mut page = BacklogPage::with_snapshot_for_test(snapshot());
+    let area = Rect::new(0, 0, 100, 16);
+    page.layout(area, &mut LayoutCtx::new());
+    page.dispatch_event(
+        &EventRoute::new(TreePath::from_keys([ChildKey::first(), ChildKey::new("web")])),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::new(AnimationSettings::default()),
+    );
+    page.layout(area, &mut LayoutCtx::new());
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    page.dispatch_event(
+        &EventRoute::new(TreePath::from_keys([
+            ChildKey::first(),
+            ChildKey::new("web"),
+            ChildKey::new("menu"),
+        ])),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut ctx,
+    );
+
+    assert_eq!(
+        ctx.focus_request(),
+        Some(&FocusRequest::TargetAt {
+            path: TreePath::from_keys([ChildKey::first(), ChildKey::new("data")]),
+            id: FocusId::new("data-view"),
+        })
+    );
+}
+
+#[test]
+fn closing_the_web_menu_returns_focus_to_the_backlog_data_view() {
+    tuicore::init();
+    let mut page = BacklogPage::with_snapshot_for_test(snapshot());
+    let area = Rect::new(0, 0, 100, 16);
+    page.layout(area, &mut LayoutCtx::new());
+    page.dispatch_event(
+        &EventRoute::new(TreePath::from_keys([ChildKey::first(), ChildKey::new("web")])),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::new(AnimationSettings::default()),
+    );
+    page.layout(area, &mut LayoutCtx::new());
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    page.dispatch_event(
+        &EventRoute::new(TreePath::from_keys([
+            ChildKey::first(),
+            ChildKey::new("web"),
+            ChildKey::new("menu"),
+        ])),
+        &TuiEvent::Key(KeyEvent::from(Key::Tab)),
+        &mut ctx,
+    );
+
+    assert_eq!(
+        ctx.focus_request(),
+        Some(&FocusRequest::TargetAt {
+            path: TreePath::from_keys([ChildKey::first(), ChildKey::new("data")]),
+            id: FocusId::new("data-view"),
+        })
+    );
 }
 
 #[test]
@@ -222,47 +340,71 @@ fn unified_backlog_tree_shows_collapsed_sprints_and_expanded_backlog() {
 }
 
 #[test]
-fn resetting_the_backlog_tree_collapses_sprints_and_expands_backlog() {
+fn refreshed_backlog_falls_back_to_the_missing_ticket_parent() {
     tuicore::init();
     let (sender, _) = mpsc::channel();
-    let snapshot = snapshot();
-    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let mut view = backlog_tree(&snapshot(), sender, Default::default());
+    view.highlight("ticket:FIN-8");
+    let mut refreshed = snapshot();
+    refreshed.work_items.clear();
+
+    view.set_snapshot(&refreshed);
+
+    assert_eq!(
+        view.highlighted_id_for_test().as_deref(),
+        Some("section:backlog")
+    );
+}
+
+#[test]
+fn refreshed_backlog_keeps_the_highlighted_ticket_and_expanded_sprint() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot(), sender, Default::default());
     let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
-    tree.dispatch_focus(
+    view.dispatch_focus(
         &data_focus_target(),
         true,
         &mut FocusCtx::new(AnimationSettings::default()),
     );
-    tree.highlight("section:sprint-7");
-    tree.dispatch_event(
+    view.highlight("section:sprint-7");
+    view.dispatch_event(
         &route,
         &TuiEvent::Key(KeyEvent::from(Key::Right)),
         &mut EventCtx::new(AnimationSettings::default()),
     );
+    view.highlight("ticket:FIN-7");
+    view.set_snapshot(&snapshot());
+
     let area = Rect::new(0, 0, 80, 16);
-    tree.layout(area, &mut LayoutCtx::new());
+    view.layout(area, &mut LayoutCtx::new());
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
     terminal
         .draw(|frame| {
             let mut render = RenderCtx::new();
-            tree.render(frame, area, &mut render);
+            view.render(frame, area, &mut render);
             render.flush(frame);
         })
         .unwrap();
-    assert!(rendered_lines(&terminal, area).concat().contains("FIN-7"));
 
-    tree.reset_to_backlog_parent(&snapshot);
-    tree.layout(area, &mut LayoutCtx::new());
-    terminal
-        .draw(|frame| {
-            let mut render = RenderCtx::new();
-            tree.render(frame, area, &mut render);
-            render.flush(frame);
-        })
-        .unwrap();
-    let text = rendered_lines(&terminal, area).concat();
-    assert!(!text.contains("FIN-7"));
-    assert!(text.contains("FIN-8"));
+    assert!(rendered_lines(&terminal, area).concat().contains("FIN-7"));
+    assert_eq!(view.highlighted_id_for_test().as_deref(), Some("ticket:FIN-7"));
+}
+
+#[test]
+fn page_refresh_keeps_the_highlighted_ticket() {
+    let mut page = BacklogPage::with_snapshot_for_test(snapshot());
+    page.view_for_test().base_mut().highlight("ticket:FIN-8");
+
+    page.refresh_snapshot_for_test(snapshot());
+
+    assert_eq!(
+        page.view_for_test()
+            .base_mut()
+            .highlighted_id_for_test()
+            .as_deref(),
+        Some("ticket:FIN-8")
+    );
 }
 
 #[test]
@@ -710,6 +852,82 @@ fn long_backlog_titles_wrap_to_the_available_viewport_width() {
     );
 }
 
+#[test]
+fn ticket_number_prefixes_wait_for_enter_and_underline_each_matching_number() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    snapshot.sprints[0].work_items = vec![work_item("KAN-34", "Sprint ticket")];
+    snapshot.work_items = vec![work_item("KAN-342", "Backlog ticket")];
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    tree.dispatch_focus(
+        &data_focus_target(),
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    for digit in ['3', '4'] {
+        tree.dispatch_event(
+            &route,
+            &TuiEvent::Key(KeyEvent::from(Key::Char(digit))),
+            &mut ctx,
+        );
+    }
+
+    let area = Rect::new(0, 0, 80, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let lines = rendered_lines(&terminal, area);
+    let (y, line) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.contains("KAN-34 Sprint ticket"))
+        .unwrap();
+    let key_x = cell_position(line, "KAN-34").unwrap() as u16;
+    assert!(!terminal
+        .backend()
+        .buffer()
+        .cell((key_x, y as u16))
+        .unwrap()
+        .modifier
+        .contains(Modifier::UNDERLINED));
+    assert!((key_x + 4..key_x + 6).all(|x| terminal
+        .backend()
+        .buffer()
+        .cell((x, y as u16))
+        .unwrap()
+        .modifier
+        .contains(Modifier::UNDERLINED)));
+
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut ctx,
+    );
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    assert!(!terminal
+        .backend()
+        .buffer()
+        .cell((key_x + 4, y as u16))
+        .unwrap()
+        .modifier
+        .contains(Modifier::UNDERLINED));
+}
+
 fn cell_position(line: &str, content: &str) -> Option<usize> {
     line.find(content)
         .map(|position| line[..position].chars().count())
@@ -801,18 +1019,6 @@ fn backlog_search_filters_tickets_and_hides_runway_bands() {
         "search results must not retain virtual sprint background bands"
     );
 
-    tree.reset_to_backlog_parent(&snapshot);
-    tree.layout(area, &mut LayoutCtx::new());
-    terminal
-        .draw(|frame| {
-            let mut render = RenderCtx::new();
-            tree.render(frame, area, &mut render);
-            render.flush(frame);
-        })
-        .unwrap();
-    let text = rendered_lines(&terminal, area).concat();
-    assert!(text.contains("FIN-1"));
-    assert!(text.contains("FIN-2"));
 }
 
 #[test]
@@ -865,6 +1071,57 @@ fn backlog_search_requires_contiguous_text() {
         }
     }
     assert!(text.contains("No stories"));
+}
+
+#[test]
+fn backlog_search_matches_epic_names() {
+    tuicore::init();
+    let mut item = work_item("FIN-1", "Improve deployment reporting");
+    item.epic_name = Some("Operations".into());
+    let snapshot = BacklogSnapshot {
+        board_name: "Finery".into(),
+        story_points_configured: false,
+        sprints: Vec::new(),
+        work_items: vec![item],
+        warnings: Vec::new(),
+        runway: None,
+    };
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    tree.dispatch_focus(
+        &data_focus_target(),
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('/'))),
+        &mut ctx,
+    );
+    for key in "operations".chars() {
+        tree.dispatch_event(
+            &route,
+            &TuiEvent::Key(KeyEvent::from(Key::Char(key))),
+            &mut ctx,
+        );
+    }
+
+    let area = Rect::new(0, 0, 80, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    assert!(rendered_lines(&terminal, area)
+        .concat()
+        .contains("Improve deployment reporting"));
 }
 
 #[test]
@@ -1012,11 +1269,12 @@ fn stale_rank_refresh_keeps_the_optimistic_order() {
 #[test]
 fn optimistic_transfer_moves_selected_items_between_sections() {
     let mut snapshot = snapshot();
-    assert!(move_work_items(
+    assert!(move_work_items_to_edge(
         &mut snapshot,
         "backlog",
         "sprint-7",
-        &["FIN-8".into()]
+        &["FIN-8".into()],
+        false,
     ));
     assert!(snapshot.work_items.is_empty());
     assert_eq!(
@@ -1030,19 +1288,77 @@ fn optimistic_transfer_moves_selected_items_between_sections() {
 }
 
 #[test]
+fn optimistic_transfer_recalculates_destination_sprint_capacity() {
+    let mut snapshot = snapshot();
+    snapshot.sprints[0].work_items[0].story_points = Some(3.0);
+    snapshot.work_items[0].story_points = Some(6.0);
+    let mut nine_point_ticket = work_item("FIN-9", "Nine-point ticket");
+    nine_point_ticket.story_points = Some(9.0);
+    snapshot.work_items.push(nine_point_ticket);
+    apply_capacity(
+        &mut snapshot,
+        9.1,
+        Some((3.0, false)),
+        RunwayCapacitySource::Fixed,
+        10,
+    );
+
+    assert!(move_work_items_to_edge(
+        &mut snapshot,
+        "backlog",
+        "sprint-7",
+        &["FIN-8".into(), "FIN-9".into()],
+        false,
+    ));
+    recalculate_capacity(&mut snapshot, &BacklogRunwaySettings::default());
+
+    assert_eq!(
+        snapshot.sprints[0].capacity.as_ref().unwrap().effective_points,
+        18.0
+    );
+}
+
+#[test]
+fn optimistic_transfer_places_items_at_the_selected_destination_edge() {
+    let mut snapshot = snapshot();
+    snapshot.sprints[0]
+        .work_items
+        .push(work_item("FIN-9", "Existing sprint work"));
+
+    assert!(move_work_items_to_edge(
+        &mut snapshot,
+        "backlog",
+        "sprint-7",
+        &["FIN-8".into()],
+        true,
+    ));
+
+    assert_eq!(
+        snapshot.sprints[0]
+            .work_items
+            .iter()
+            .map(|item| item.key.as_str())
+            .collect::<Vec<_>>(),
+        ["FIN-8", "FIN-7", "FIN-9"]
+    );
+}
+
+#[test]
 fn transfer_refresh_keeps_optimistic_snapshot_until_destination_confirms() {
     let rollback_snapshot = snapshot();
     let mut optimistic_snapshot = rollback_snapshot.clone();
-    assert!(move_work_items(
+    assert!(move_work_items_to_edge(
         &mut optimistic_snapshot,
         "backlog",
         "sprint-7",
-        &["FIN-8".into()]
+        &["FIN-8".into()],
+        false,
     ));
     let mut pending = Some(PendingTransfer {
         rollback_snapshot,
         source_section_id: "backlog".into(),
         destination_section_id: "sprint-7".into(),
+        destination_order: vec!["FIN-7".into(), "FIN-8".into()],
         keys: vec!["FIN-8".into()],
         source_highlight_key: None,
         ambiguous: false,
@@ -1085,16 +1401,18 @@ fn transfer_highlight_prefers_remaining_source_ticket_then_section() {
 fn unconfirmed_transfer_refreshes_exhaust() {
     let refreshed = snapshot();
     let mut optimistic = refreshed.clone();
-    assert!(move_work_items(
+    assert!(move_work_items_to_edge(
         &mut optimistic,
         "backlog",
         "sprint-7",
-        &["FIN-8".into()]
+        &["FIN-8".into()],
+        false,
     ));
     let mut pending = Some(PendingTransfer {
         rollback_snapshot: refreshed.clone(),
         source_section_id: "backlog".into(),
         destination_section_id: "sprint-7".into(),
+        destination_order: vec!["FIN-7".into(), "FIN-8".into()],
         keys: vec!["FIN-8".into()],
         source_highlight_key: None,
         ambiguous: false,
@@ -1125,6 +1443,7 @@ fn confirmed_transfer_highlight_remains_available() {
         rollback_snapshot: snapshot(),
         source_section_id: "backlog".into(),
         destination_section_id: "sprint-7".into(),
+        destination_order: vec!["FIN-7".into(), "FIN-8".into()],
         keys: vec!["FIN-8".into()],
         source_highlight_key: None,
         ambiguous: false,

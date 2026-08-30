@@ -539,7 +539,7 @@ fn submit_requires_confirmation() {
 fn submit_confirmation_lists_local_parent_dependencies() {
     tuicore::init();
     let mut page = composer_page();
-    open_change_set(&mut page, 0);
+    page.open_change_set_for_test("CS-1");
     page.create_ticket("Parent task");
     page.create_child_ticket("Child sub-task");
 
@@ -861,6 +861,42 @@ fn ticket_navigation_activates_and_marks_selected_row_when_unfocused() {
         }),
         "selected ticket should remain marked after ticket list loses focus"
     );
+}
+
+#[test]
+fn typing_a_ticket_number_selects_an_exact_composer_ticket_while_search_is_active() {
+    tuicore::init();
+    let mut page = composer_page();
+    page.open_change_set_for_test("CS-1");
+    let tickets = focus(&mut page, "data-view");
+    let route = EventRoute::new(tickets.path);
+    let mut ctx = EventCtx::default();
+    page.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('/'))),
+        &mut ctx,
+    );
+    for character in "FIN".chars() {
+        page.dispatch_event(
+            &route,
+            &TuiEvent::Key(KeyEvent::from(Key::Char(character))),
+            &mut ctx,
+        );
+    }
+    page.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut ctx,
+    );
+    for digit in ['1', '4', '2'] {
+        page.dispatch_event(
+            &route,
+            &TuiEvent::Key(KeyEvent::from(Key::Char(digit))),
+            &mut ctx,
+        );
+    }
+
+    assert_eq!(page.selected_changes().key, "FIN-142");
 }
 
 #[test]

@@ -20,6 +20,7 @@ use tuicore::{
 
 use crate::{
     app_settings::{AppSettings, ComposerKeyBinding, ComposerKeyBindings},
+    components::ticket_number_jump::{TicketNumberJump, exact_ticket_number_matches},
     service::AppService,
     speed_reader_settings::SpeedReaderSettings,
     store::composer::{ChangeKind, ComposerAction, ComposerState, PlacementTarget, TicketKind},
@@ -31,7 +32,9 @@ use super::{
     fields::{DescriptionAction, PendingDescriptionActions},
     source::SourceController,
     submission::SubmissionController,
-    ticket_rows::{TicketRow, set_active_ticket_style, ticket_data_view, ticket_rows},
+        ticket_rows::{
+            TicketRow, set_active_ticket_style, ticket_data_view_with_number_jump, ticket_rows,
+        },
     ticket_toolbar::{ToolbarEvent, ToolbarEvents, ToolbarFeedback, toolbar},
     title_guidance::{TitleFeedback, format_title},
 };
@@ -333,6 +336,7 @@ pub(super) struct TicketEditor {
     loading_view: ScrollContainer<Flex<()>>,
     opening_loading: bool,
     pending_focus_tickets: bool,
+    number_jump: Rc<RefCell<TicketNumberJump>>,
 }
 
 impl TicketEditor {
@@ -348,10 +352,14 @@ impl TicketEditor {
             .expect("settings lock poisoned")
             .composer_keys
             .clone();
+        let number_jump = Rc::new(RefCell::new(TicketNumberJump::default()));
         let ticket_list = Panel::new()
             .top_left("Change sets")
             .one_row(true)
-            .host(ticket_data_view(&state.borrow()));
+            .host(ticket_data_view_with_number_jump(
+                &state.borrow(),
+                Rc::clone(&number_jump),
+            ));
 
         let detail = DetailPane::new(
             Rc::clone(&state),
@@ -519,6 +527,7 @@ impl TicketEditor {
             loading_view: loading_view(),
             opening_loading: false,
             pending_focus_tickets: false,
+            number_jump,
         }
     }
 
@@ -1297,6 +1306,77 @@ impl TicketEditor {
         Some(EventOutcome::Handled)
     }
 
+    fn handle_ticket_number_jump(
+        &mut self,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> Option<EventOutcome> {
+        if self.table().is_searching()
+            || (!self.ticket_list_is_focused() && self.table().transform_state().search.is_empty())
+        {
+            return None;
+        }
+        let TuiEvent::Key(key) = event else {
+            return None;
+        };
+        if self.number_jump.borrow().cancels(*key) {
+            self.number_jump.borrow_mut().clear();
+            ctx.request_redraw();
+            ctx.stop_propagation();
+            return Some(EventOutcome::Handled);
+        }
+        if self.number_jump.borrow().accepts(*key) {
+            let number = self.number_jump.borrow().query().unwrap_or_default().to_owned();
+            let row_id = self.exact_ticket_row_id(&number);
+            self.number_jump.borrow_mut().clear();
+            if let Some(row_id) = row_id {
+                self.jump_to_ticket(row_id, ctx);
+            }
+            ctx.request_redraw();
+            ctx.stop_propagation();
+            return Some(EventOutcome::Handled);
+        }
+        if !self.number_jump.borrow_mut().push(*key) {
+            return None;
+        }
+        let number = self.number_jump.borrow().query().unwrap_or_default().to_owned();
+        let matching_count = self
+            .table()
+            .rows()
+            .iter()
+            .filter(|row| {
+                crate::components::ticket_number_jump::ticket_number_matches(&row.item.key, &number)
+            })
+            .count();
+        self.table_mut().expand_all();
+        if matching_count == 1 {
+            if let Some(row_id) = self.exact_ticket_row_id(&number) {
+                self.number_jump.borrow_mut().clear();
+                self.jump_to_ticket(row_id, ctx);
+            }
+        }
+        ctx.request_redraw();
+        ctx.request_tick();
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
+    }
+
+    fn exact_ticket_row_id(&self, number: &str) -> Option<String> {
+        self.table().rows().iter().find_map(|row| {
+            exact_ticket_number_matches(&row.item.key, number).then(|| row.item.id.clone())
+        })
+    }
+
+    fn jump_to_ticket(&mut self, row_id: String, ctx: &mut EventCtx<()>) {
+        let table = self.table_mut();
+        table.highlight_id(&row_id);
+        table.reveal_highlighted_centered();
+        self.pending
+            .borrow_mut()
+            .push(ComposerAction::SelectTicket(Some(row_id)));
+        self.drain_outputs(ctx);
+    }
+
     fn open_ticket_action_dialog(&mut self, ctx: &mut EventCtx<()>) -> bool {
         let Some(change) = self.state.borrow().selected_change().cloned() else {
             return false;
@@ -1614,6 +1694,9 @@ impl TuiNode for TicketEditor {
         let add_menu_open = self.view.base().base().is_active();
         let ticket_dialog_open = self.view.base().is_active();
         let description_reader_open = self.description_reader_is_open();
+        if let Some(outcome) = self.handle_ticket_number_jump(event, ctx) {
+            return outcome;
+        }
         let outcome = self.view.event(event, ctx);
         self.drain_outputs(ctx);
         self.handle_exit(
@@ -1667,6 +1750,9 @@ impl TuiNode for TicketEditor {
         let add_menu_open = self.view.base().base().is_active();
         let ticket_dialog_open = self.view.base().is_active();
         let description_reader_open = self.description_reader_is_open();
+        if let Some(outcome) = self.handle_ticket_number_jump(event, ctx) {
+            return outcome;
+        }
         let outcome = self.view.dispatch_event(route, event, ctx);
         self.drain_outputs(ctx);
         self.handle_exit(
@@ -1734,6 +1820,14 @@ impl TuiNode for TicketEditor {
                     },
                 );
         }
+        let number_jump = {
+            let mut jump = self.number_jump.borrow_mut();
+            if jump.advance(dt) {
+                TickResult::CHANGED
+            } else {
+                jump.remaining().map_or(TickResult::IDLE, TickResult::scheduled_after)
+            }
+        };
         self.view
             .tick(dt, settings)
             .merge(if changed || source_changed {
@@ -1748,6 +1842,7 @@ impl TuiNode for TicketEditor {
                     TickResult::IDLE
                 },
             )
+            .merge(number_jump)
     }
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
         if self.opening_loading {

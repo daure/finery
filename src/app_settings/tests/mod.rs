@@ -64,6 +64,31 @@ fn jira_issue_url_uses_the_configured_site_and_trims_trailing_slashes() {
 }
 
 #[test]
+fn jira_board_url_uses_the_configured_project_and_board() {
+    let settings = AppSettings {
+        jira_base_url: "https://finery.atlassian.net///".into(),
+        jira_default_project: "FIN".into(),
+        jira_default_board: "42".into(),
+        ..AppSettings::default()
+    };
+
+    assert_eq!(
+        settings.jira_board_url(Some("timeline")).as_deref(),
+        Some("https://finery.atlassian.net/jira/software/projects/FIN/boards/42/timeline")
+    );
+    assert_eq!(
+        settings.jira_board_url(None).as_deref(),
+        Some("https://finery.atlassian.net/jira/software/projects/FIN/boards/42")
+    );
+    assert_eq!(
+        settings.jira_releases_url().as_deref(),
+        Some(
+            "https://finery.atlassian.net/projects/FIN?selectedItem=com.atlassian.jira.jira-projects-plugin%3Arelease-page"
+        )
+    );
+}
+
+#[test]
 fn backlog_runway_settings_round_trip_and_reject_invalid_values() {
     let settings = AppSettings::resolve(&HashMap::from([
         (BACKLOG_USE_JIRA_VELOCITY_SETTING.into(), "true".into()),

@@ -21,6 +21,8 @@ pub(in crate::pages::backlog) enum BacklogQuickAction {
     MoveToTop,
     MoveToBottom,
     MoveToSection(BacklogDestination),
+    MoveToDestinationTop(BacklogDestination),
+    MoveToDestinationBottom(BacklogDestination),
 }
 
 impl BacklogQuickAction {
@@ -33,6 +35,10 @@ impl BacklogQuickAction {
             Self::MoveToTop => "Move to top".into(),
             Self::MoveToBottom => "Move to bottom".into(),
             Self::MoveToSection(destination) => format!("Move to {}", destination.label),
+            Self::MoveToDestinationTop(destination) => format!("Top of {}", destination.label),
+            Self::MoveToDestinationBottom(destination) => {
+                format!("Bottom of {}", destination.label)
+            }
         }
     }
 }
@@ -59,6 +65,7 @@ pub(in crate::pages::backlog) enum BacklogQuickMenuEvent {
         source_section_id: String,
         destination: BacklogDestination,
         keys: Vec<String>,
+        to_top: bool,
     },
     MoveLocked,
     Closed,
@@ -160,7 +167,12 @@ impl BacklogQuickMenu {
         )
     }
 
-    fn finish_event(&mut self, was_open: bool, outcome: EventOutcome) -> EventOutcome {
+    fn finish_event(
+        &mut self,
+        was_open: bool,
+        outcome: EventOutcome,
+        ctx: &mut EventCtx<()>,
+    ) -> EventOutcome {
         if self.move_locked.get() {
             self.selected.borrow_mut().clear();
             self.events.push(BacklogQuickMenuEvent::MoveLocked);
@@ -182,10 +194,29 @@ impl BacklogQuickMenu {
                     source_order: self.source_order.clone(),
                 },
                 BacklogQuickAction::MoveToSection(destination) => {
+                    self.dropdown.clear_selection();
+                    self.dropdown.set_rows([
+                        BacklogQuickAction::MoveToDestinationTop(destination.clone()),
+                        BacklogQuickAction::MoveToDestinationBottom(destination),
+                    ]);
+                    self.dropdown.set_search_query("");
+                    self.dropdown.open_with_context(ctx);
+                    continue;
+                }
+                BacklogQuickAction::MoveToDestinationTop(destination) => {
                     BacklogQuickMenuEvent::MoveToSection {
                         source_section_id: section_id,
                         destination,
                         keys: self.keys.clone(),
+                        to_top: true,
+                    }
+                }
+                BacklogQuickAction::MoveToDestinationBottom(destination) => {
+                    BacklogQuickMenuEvent::MoveToSection {
+                        source_section_id: section_id,
+                        destination,
+                        keys: self.keys.clone(),
+                        to_top: false,
                     }
                 }
             };
@@ -227,7 +258,7 @@ impl TuiNode for BacklogQuickMenu {
         }
         let was_open = self.dropdown.is_open();
         let outcome = self.dropdown.event(event, ctx);
-        self.finish_event(was_open, outcome)
+        self.finish_event(was_open, outcome, ctx)
     }
 
     fn dispatch_event(
@@ -238,7 +269,7 @@ impl TuiNode for BacklogQuickMenu {
     ) -> EventOutcome {
         let was_open = self.dropdown.is_open();
         let outcome = self.dropdown.dispatch_event(route, event, ctx);
-        self.finish_event(was_open, outcome)
+        self.finish_event(was_open, outcome, ctx)
     }
 
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {

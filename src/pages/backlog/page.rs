@@ -7,15 +7,18 @@ use std::{
 
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
-    AnimationSettings, CrossAlign, DialogBackdrop, DialogLayer, EventCtx, EventOutcome, EventRoute,
-    Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, LayoutCtx, LayoutProposal,
-    LayoutResult, LayoutSizeHint, LifecycleCtx, MainAlign, Paragraph, RenderCtx, ScrollContainer,
-    Spinner, TickResult, TuiEvent, TuiNode,
+    AnimationSettings, ChildKey, CrossAlign, DialogBackdrop, DialogLayer, EventCtx, EventOutcome,
+    EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, LayoutCtx,
+    LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, MainAlign, Paragraph, RenderCtx,
+    ScrollContainer, Spinner, TickResult, TreePath, TuiEvent, TuiNode,
 };
 
 use crate::{
+    app_settings::BacklogRunwaySettings,
     service::AppService,
-    store::work_items::{BacklogSnapshot, RankPlan, rank_plan},
+    store::work_items::{
+        BacklogSnapshot, RankPlan, apply_capacity, loaded_story_point_average, rank_plan,
+    },
 };
 
 use super::components::{
@@ -153,6 +156,7 @@ pub(super) struct PendingTransfer {
     pub(super) rollback_snapshot: BacklogSnapshot,
     pub(super) source_section_id: String,
     pub(super) destination_section_id: String,
+    pub(super) destination_order: Vec<String>,
     pub(super) keys: Vec<String>,
     pub(super) source_highlight_key: Option<String>,
     pub(super) ambiguous: bool,
@@ -208,6 +212,7 @@ pub(crate) struct BacklogPage {
     pending_rank: Option<PendingRank>,
     focus_backlog_after_load: bool,
     pending_focus: Option<FocusRequest>,
+    data_focus_path: TreePath,
     reload_notification_pending: bool,
     settings_revision: u64,
 }
@@ -240,6 +245,7 @@ impl BacklogPage {
             pending_rank: None,
             focus_backlog_after_load: false,
             pending_focus: None,
+            data_focus_path: TreePath::from_keys([ChildKey::first(), ChildKey::new("data")]),
             reload_notification_pending: false,
             settings_revision,
         }
@@ -285,6 +291,13 @@ impl BacklogPage {
     #[cfg(test)]
     pub(super) fn is_ranking_for_test(&self) -> bool {
         self.ranking
+    }
+
+    #[cfg(test)]
+    pub(super) fn refresh_snapshot_for_test(&mut self, snapshot: BacklogSnapshot) {
+        self.focus_backlog_after_load = true;
+        let generation = self.generations.start_load(false, false);
+        assert!(self.apply_load_result(generation, Ok(snapshot)));
     }
 
     fn load(&mut self, rank_refresh: bool, preserve_optimistic_view: bool) {
@@ -447,9 +460,6 @@ impl BacklogPage {
                         self.view.base_mut().highlight(&row_id);
                     }
                 }
-                if self.focus_backlog_after_load {
-                    self.view.base_mut().reset_to_backlog_parent(snapshot);
-                }
                 if reload_notification_pending {
                     self.service
                         .report_notification(tuicore::Notification::success(
@@ -479,8 +489,19 @@ impl BacklogPage {
     fn finish_requested_backlog_focus(&mut self) {
         if self.focus_backlog_after_load {
             self.focus_backlog_after_load = false;
-            self.pending_focus = Some(FocusRequest::Target(FocusId::new("data-view")));
+            self.queue_backlog_data_focus();
         }
+    }
+
+    fn queue_backlog_data_focus(&mut self) {
+        self.pending_focus = Some(FocusRequest::Target(FocusId::new("data-view")));
+    }
+
+    fn focus_backlog_data(&mut self, ctx: &mut EventCtx<()>) {
+        ctx.focus(FocusRequest::TargetAt {
+            path: self.data_focus_path.clone(),
+            id: FocusId::new("data-view"),
+        });
     }
 
     fn handle_load_failure(
@@ -538,6 +559,23 @@ impl BacklogPage {
                         self.reload();
                     }
                 }
+                BacklogSectionEvent::OpenReports => {
+                    self.service.open_jira_board_page(Some("reports"));
+                    self.focus_backlog_data(ctx);
+                }
+                BacklogSectionEvent::OpenTimeline => {
+                    self.service.open_jira_board_page(Some("timeline"));
+                    self.focus_backlog_data(ctx);
+                }
+                BacklogSectionEvent::OpenBoard => {
+                    self.service.open_jira_board_page(None);
+                    self.focus_backlog_data(ctx);
+                }
+                BacklogSectionEvent::OpenReleases => {
+                    self.service.open_jira_releases();
+                    self.focus_backlog_data(ctx);
+                }
+                BacklogSectionEvent::WebMenuClosed => self.focus_backlog_data(ctx),
                 BacklogSectionEvent::MoveLocked => self.report_move_locked(),
                 BacklogSectionEvent::OpenTicket { key } => self.service.open_jira_issue(&key),
                 BacklogSectionEvent::OpenQuickMenu {
@@ -618,11 +656,12 @@ impl BacklogPage {
                     source_section_id,
                     destination,
                     keys,
+                    to_top,
                 } => {
                     if self.move_locked.get() {
                         self.report_move_locked();
                     } else {
-                        self.transfer_to_section(source_section_id, destination, keys);
+                        self.transfer_to_section(source_section_id, destination, keys, to_top);
                     }
                     self.view.set_active_with_context(false, ctx);
                 }
@@ -668,6 +707,7 @@ impl BacklogPage {
         source_section_id: String,
         destination: BacklogDestination,
         keys: Vec<String>,
+        to_top: bool,
     ) {
         if self.move_locked.get() {
             self.report_move_locked();
@@ -683,7 +723,27 @@ impl BacklogPage {
             ));
             return;
         }
-        if !self.show_optimistic_transfer(&source_section_id, &destination.section_id, &keys) {
+        let mut destination_order = source_order(self.snapshot.as_ref(), &destination.section_id);
+        if to_top {
+            destination_order.splice(0..0, keys.iter().cloned());
+        } else {
+            destination_order.extend(keys.iter().cloned());
+        }
+        let placement_plan = match rank_plan(keys.clone(), &destination_order) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.service
+                    .report_error(format!("Could not rank {}: {error}", destination.label));
+                return;
+            }
+        };
+        if !self.show_optimistic_transfer(
+            &source_section_id,
+            &destination.section_id,
+            &keys,
+            to_top,
+            destination_order,
+        ) {
             return;
         }
         self.move_locked.set(true);
@@ -710,7 +770,13 @@ impl BacklogPage {
                                 .map_err(|_| "Invalid sprint destination".to_string())
                         });
                     sprint_id.and_then(|sprint_id| service.jira_move_to_sprint(sprint_id, &keys))
-                };
+                }
+                .and_then(|()| {
+                    placement_plan
+                        .as_ref()
+                        .map(|plan| service.jira_rank(plan))
+                        .unwrap_or(Ok(()))
+                });
                 let _ = sender.send(BacklogResult::Transferred {
                     generation,
                     destination: destination_label,
@@ -739,22 +805,21 @@ impl BacklogPage {
             return false;
         }
         self.ranking = false;
+        self.view.base_mut().set_loading(false);
+        self.move_locked.set(false);
         match result {
             Ok(()) => {
+                self.pending_transfer = None;
                 self.service
                     .report_notification(tuicore::Notification::success(
                         "Jira tickets moved",
                         format!("Moved tickets to {destination}"),
                     ));
-                self.load(true, true);
             }
             Err(error) => {
-                if let Some(transfer) = self.pending_transfer.as_mut() {
-                    transfer.ambiguous = true;
-                }
+                self.restore_transfer_snapshot();
                 self.service
                     .report_error(format!("Could not move Jira tickets: {error}"));
-                self.load(true, true);
             }
         }
         true
@@ -765,6 +830,8 @@ impl BacklogPage {
         source_section_id: &str,
         destination_section_id: &str,
         keys: &[String],
+        to_top: bool,
+        destination_order: Vec<String>,
     ) -> bool {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return false;
@@ -774,18 +841,23 @@ impl BacklogPage {
         let (_, highlighted_row_id) =
             source_transfer_highlight(source_section_id, source_highlight_key.as_deref());
         let mut optimistic = snapshot.clone();
-        if !move_work_items(
+        if !move_work_items_to_edge(
             &mut optimistic,
             source_section_id,
             destination_section_id,
             keys,
+            to_top,
         ) {
             return false;
+        }
+        if let Ok(settings) = self.service.settings().read() {
+            recalculate_capacity(&mut optimistic, &settings.backlog_runway);
         }
         self.pending_transfer = Some(PendingTransfer {
             rollback_snapshot: snapshot.clone(),
             source_section_id: source_section_id.into(),
             destination_section_id: destination_section_id.into(),
+            destination_order,
             keys: keys.to_vec(),
             source_highlight_key,
             ambiguous: false,
@@ -939,6 +1011,31 @@ impl BacklogPage {
     }
 }
 
+pub(super) fn recalculate_capacity(
+    snapshot: &mut BacklogSnapshot,
+    settings: &BacklogRunwaySettings,
+) {
+    let Some((capacity, source)) = snapshot
+        .runway
+        .as_ref()
+        .map(|runway| (runway.capacity, runway.source))
+    else {
+        return;
+    };
+    let assumed_ticket_size = if settings.use_average_ticket_size {
+        loaded_story_point_average(snapshot).map(|size| (size, true))
+    } else {
+        Some((settings.fixed_ticket_size, false))
+    };
+    apply_capacity(
+        snapshot,
+        capacity,
+        assumed_ticket_size,
+        source,
+        settings.sprint_tolerance_percent,
+    );
+}
+
 fn source_order(snapshot: Option<&BacklogSnapshot>, section_id: &str) -> Vec<String> {
     let Some(snapshot) = snapshot else {
         return Vec::new();
@@ -965,10 +1062,12 @@ pub(super) fn reconcile_pending_transfer(
     let Some(transfer) = pending_transfer.as_mut() else {
         return PendingTransferReconciliation::Unconfirmed;
     };
-    let destination_confirmed = transfer.keys.iter().all(|key| {
-        section_contains(&refreshed_snapshot, &transfer.destination_section_id, key)
-            && !section_contains(&refreshed_snapshot, &transfer.source_section_id, key)
-    });
+    let destination_confirmed =
+        transfer.keys.iter().all(|key| {
+            section_contains(&refreshed_snapshot, &transfer.destination_section_id, key)
+                && !section_contains(&refreshed_snapshot, &transfer.source_section_id, key)
+        }) && source_order(Some(&refreshed_snapshot), &transfer.destination_section_id)
+            == transfer.destination_order;
     if destination_confirmed {
         *optimistic_snapshot = refreshed_snapshot;
         pending_transfer.take();
@@ -1119,11 +1218,12 @@ fn sort_work_items(work_items: &mut [crate::store::work_items::WorkItem], order:
     });
 }
 
-pub(super) fn move_work_items(
+pub(super) fn move_work_items_to_edge(
     snapshot: &mut BacklogSnapshot,
     source_section_id: &str,
     destination_section_id: &str,
     keys: &[String],
+    to_top: bool,
 ) -> bool {
     if source_section_id == destination_section_id || keys.is_empty() {
         return false;
@@ -1143,7 +1243,11 @@ pub(super) fn move_work_items(
     let Some(destination) = work_items_mut(snapshot, destination_section_id) else {
         return false;
     };
-    destination.extend(moved);
+    if to_top {
+        destination.splice(0..0, moved);
+    } else {
+        destination.extend(moved);
+    }
     true
 }
 
@@ -1231,6 +1335,10 @@ impl TuiNode for BacklogPage {
                 self.loading_view.layout(area, ctx)
             })
         } else {
+            self.data_focus_path = ctx
+                .current_path()
+                .child(ChildKey::first())
+                .child(ChildKey::new("data"));
             self.view.layout(area, ctx)
         }
     }

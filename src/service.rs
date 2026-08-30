@@ -633,6 +633,64 @@ impl AppService {
         }
     }
 
+    pub(crate) fn open_jira_board_page(&self, page: Option<&str>) {
+        let url = match self.settings.read() {
+            Ok(settings) => settings.jira_board_url(page),
+            Err(_) => {
+                self.report_error(
+                    "Could not open Jira board page: settings lock is unavailable".into(),
+                );
+                return;
+            }
+        };
+        let Some(url) = url else {
+            self.report_error(
+                "Could not open Jira board page: Jira URL, default project, and board ID must be configured"
+                    .into(),
+            );
+            return;
+        };
+        if let Err(error) = spawn_browser(browser_command(&url)) {
+            #[cfg(target_os = "linux")]
+            if error.kind() == std::io::ErrorKind::NotFound
+                && spawn_browser(xdg_open_command(&url)).is_ok()
+            {
+                return;
+            }
+            self.report_error(format!(
+                "Could not open Jira board page in browser: {error}"
+            ));
+        }
+    }
+
+    pub(crate) fn open_jira_releases(&self) {
+        let url = match self.settings.read() {
+            Ok(settings) => settings.jira_releases_url(),
+            Err(_) => {
+                self.report_error(
+                    "Could not open Jira releases: settings lock is unavailable".into(),
+                );
+                return;
+            }
+        };
+        let Some(url) = url else {
+            self.report_error(
+                "Could not open Jira releases: Jira URL and default project must be configured"
+                    .into(),
+            );
+            return;
+        };
+        if let Err(error) = spawn_browser(browser_command(&url)) {
+            #[cfg(target_os = "linux")]
+            if error.kind() == std::io::ErrorKind::NotFound
+                && spawn_browser(xdg_open_command(&url)).is_ok()
+            {
+                return;
+            }
+            self.report_error(format!("Could not open Jira releases in browser: {error}"));
+        }
+    }
+
     pub(crate) fn fetch_jira_tickets(
         &self,
         keys: &[String],

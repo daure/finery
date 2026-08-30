@@ -583,6 +583,28 @@ impl AppSettings {
         (!base_url.is_empty() && !key.trim().is_empty()).then(|| format!("{base_url}/browse/{key}"))
     }
 
+    pub(crate) fn jira_board_url(&self, page: Option<&str>) -> Option<String> {
+        let base_url = self.jira_base_url.trim().trim_end_matches('/');
+        let project = self.jira_default_project.trim();
+        let board = self.jira_default_board.trim();
+        (!base_url.is_empty() && !project.is_empty() && !board.is_empty()).then(|| {
+            let url = format!("{base_url}/jira/software/projects/{project}/boards/{board}");
+            page.filter(|page| !page.is_empty())
+                .map(|page| format!("{url}/{page}"))
+                .unwrap_or(url)
+        })
+    }
+
+    pub(crate) fn jira_releases_url(&self) -> Option<String> {
+        let base_url = self.jira_base_url.trim().trim_end_matches('/');
+        let project = self.jira_default_project.trim();
+        (!base_url.is_empty() && !project.is_empty()).then(|| {
+            format!(
+                "{base_url}/projects/{project}?selectedItem=com.atlassian.jira.jira-projects-plugin%3Arelease-page"
+            )
+        })
+    }
+
     pub(crate) fn block_delay(&self) -> Duration {
         self.speed_reader.markdown_block_pause
     }

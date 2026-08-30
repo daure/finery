@@ -38,7 +38,7 @@ pub(crate) enum ChangeBadge {
     Synced,
 }
 
-pub(crate) fn work_item_text(row: &WorkItemRow) -> Text<'static> {
+pub(crate) fn work_item_text(row: &WorkItemRow, number_query: Option<&str>) -> Text<'static> {
     let theme = tuicore::theme();
     let (kind_icon, mut kind_color) = ticket_icon(row.kind);
     let (priority_icon, mut priority_color) = priority_icon(&row.priority);
@@ -54,10 +54,7 @@ pub(crate) fn work_item_text(row: &WorkItemRow) -> Text<'static> {
     } else {
         theme.text_fg()
     };
-    let mut metadata = vec![Span::styled(
-        row.key.clone(),
-        Style::default().fg(text_color),
-    )];
+    let mut metadata = ticket_key_spans(&row.key, number_query, Style::default().fg(text_color));
     metadata.extend([
         Span::styled(" • ", Style::default().fg(text_color)),
         crate::components::avatar::bubble_span(&row.assignee),
@@ -113,7 +110,10 @@ pub(crate) fn work_item_text(row: &WorkItemRow) -> Text<'static> {
     Text::from(vec![Line::from(first_line), Line::from(second_line)])
 }
 
-pub(crate) fn work_item_title_with_key_line(row: &WorkItemRow) -> Line<'static> {
+pub(crate) fn work_item_title_with_key_line(
+    row: &WorkItemRow,
+    number_query: Option<&str>,
+) -> Line<'static> {
     let theme = tuicore::theme();
     let (kind_icon, mut kind_color) = ticket_icon(row.kind);
     let (priority_icon, mut priority_color) = priority_icon(&row.priority);
@@ -124,23 +124,42 @@ pub(crate) fn work_item_title_with_key_line(row: &WorkItemRow) -> Line<'static> 
     } else {
         theme.text_fg()
     };
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(format!("{kind_icon} "), Style::default().fg(kind_color)),
         Span::styled(
             format!("{priority_icon} "),
             Style::default().fg(priority_color),
         ),
+    ];
+    let key_style = Style::default()
+        .fg(theme.muted_fg())
+        .add_modifier(Modifier::BOLD);
+    spans.extend(ticket_key_spans(&row.key, number_query, key_style));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        row.title.clone(),
+        Style::default().fg(text_color).add_modifier(Modifier::BOLD),
+    ));
+    Line::from(spans)
+}
+
+fn ticket_key_spans(key: &str, number_query: Option<&str>, style: Style) -> Vec<Span<'static>> {
+    let Some(number) = number_query.filter(|number| {
+        crate::components::ticket_number_jump::ticket_number_matches(key, number)
+    }) else {
+        return vec![Span::styled(key.to_owned(), style)];
+    };
+    let (_, suffix) = key.rsplit_once('-').expect("matching ticket key has a number suffix");
+    let prefix_len = key.len().saturating_sub(suffix.len());
+    let underline_end = prefix_len.saturating_add(number.len());
+    vec![
+        Span::styled(key[..prefix_len].to_owned(), style),
         Span::styled(
-            format!("{} ", row.key),
-            Style::default()
-                .fg(theme.muted_fg())
-                .add_modifier(Modifier::BOLD),
+            key[prefix_len..underline_end].to_owned(),
+            style.add_modifier(Modifier::UNDERLINED),
         ),
-        Span::styled(
-            row.title.clone(),
-            Style::default().fg(text_color).add_modifier(Modifier::BOLD),
-        ),
-    ])
+        Span::styled(key[underline_end..].to_owned(), style),
+    ]
 }
 
 pub(crate) fn work_item_title_prefix_width(row: &WorkItemRow) -> usize {

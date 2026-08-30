@@ -1,3 +1,5 @@
+use std::{cell::RefCell, rc::Rc};
+
 use ratatui::{layout::Constraint, style::Style, text::Line};
 use tuicore::{
     ActivationMode, CellContext, Column, DataView, SelectionGlyphs, SelectionMode,
@@ -5,7 +7,10 @@ use tuicore::{
 };
 
 use crate::{
-    components::work_item_rows::{ChangeBadge, WorkItemKind, WorkItemRow, work_item_text},
+    components::{
+        ticket_number_jump::TicketNumberJump,
+        work_item_rows::{ChangeBadge, WorkItemKind, WorkItemRow, work_item_text},
+    },
     store::composer::{ChangeKind, ComposerState, TicketChange, TicketKind},
 };
 
@@ -16,10 +21,18 @@ pub(super) struct TicketRow {
     parent_delta: Option<String>,
 }
 
+#[cfg(test)]
 pub(super) fn ticket_data_view(state: &ComposerState) -> DataView<TicketRow, String> {
+    ticket_data_view_with_number_jump(state, Rc::new(RefCell::new(TicketNumberJump::default())))
+}
+
+pub(super) fn ticket_data_view_with_number_jump(
+    state: &ComposerState,
+    number_jump: Rc<RefCell<TicketNumberJump>>,
+) -> DataView<TicketRow, String> {
     let mut view = DataView::new(ticket_rows(state), |row: &TicketRow| row.item.id.clone())
         .headers(false)
-        .columns(ticket_columns())
+        .columns(ticket_columns(number_jump))
         .wrap_cells()
         .row_height(2)
         .activation_mode(ActivationMode::OnNavigate)
@@ -136,14 +149,14 @@ fn display_key(change: &TicketChange, ticket: &crate::store::composer::Ticket) -
     }
 }
 
-fn ticket_columns() -> Vec<Column<TicketRow, String>> {
+fn ticket_columns(number_jump: Rc<RefCell<TicketNumberJump>>) -> Vec<Column<TicketRow, String>> {
     vec![
         Column::multiline(
             "ticket",
             "",
             Constraint::Percentage(100),
-            |row: &TicketRow, _: &CellContext<String>| {
-                let mut text = work_item_text(&row.item);
+            move |row: &TicketRow, _: &CellContext<String>| {
+                let mut text = work_item_text(&row.item, number_jump.borrow().query());
                 if let Some(delta) = &row.parent_delta {
                     text.lines[1] = Line::raw(delta.clone());
                 }
