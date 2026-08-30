@@ -29,12 +29,14 @@ enum SettingChange {
     JiraDefaultBoard(String),
     JiraStoryPointsFieldId(String),
     BacklogUseJiraVelocity(bool),
+    BacklogJiraVelocitySprints(String),
     BacklogFixedSprintCapacity(String),
     BacklogUseAverageTicketSize(bool),
     BacklogFixedTicketSize(String),
     BacklogSprintTolerancePercent(String),
     Wpm(String),
     MarkdownBlockPause(String),
+    RecentTicketsLimit(String),
 }
 
 pub(crate) struct SettingsDialog {
@@ -55,12 +57,14 @@ impl SettingsDialog {
         let board_changes = Rc::clone(&changes);
         let story_points_changes = Rc::clone(&changes);
         let velocity_changes = Rc::clone(&changes);
+        let velocity_sprints_changes = Rc::clone(&changes);
         let sprint_capacity_changes = Rc::clone(&changes);
         let average_ticket_size_changes = Rc::clone(&changes);
         let ticket_size_changes = Rc::clone(&changes);
         let tolerance_changes = Rc::clone(&changes);
         let wpm_changes = Rc::clone(&changes);
         let delay_changes = Rc::clone(&changes);
+        let recent_tickets_limit_changes = Rc::clone(&changes);
         let root = Flex::column()
             .child(
                 "jira-base-url",
@@ -152,6 +156,20 @@ impl SettingsDialog {
                 FlexItem::fixed(1),
             )
             .child(
+                "backlog-jira-velocity-sprints",
+                TextInput::new()
+                    .value(values.backlog_runway.jira_velocity_sprints.to_string())
+                    .numbers_only(true)
+                    .panel("Jira velocity sprints to average")
+                    .placeholder("4")
+                    .on_edit_end(move |value| {
+                        velocity_sprints_changes
+                            .borrow_mut()
+                            .push(SettingChange::BacklogJiraVelocitySprints(value));
+                    }),
+                FlexItem::fixed(3),
+            )
+            .child(
                 "backlog-fixed-sprint-capacity",
                 TextInput::new()
                     .value(values.backlog_runway.fixed_sprint_capacity.to_string())
@@ -225,6 +243,20 @@ impl SettingsDialog {
                             .push(SettingChange::MarkdownBlockPause(value));
                     }),
                 FlexItem::fixed(3),
+            )
+            .child(
+                "recent-tickets-limit",
+                TextInput::new()
+                    .value(values.recent_tickets_limit.to_string())
+                    .numbers_only(true)
+                    .panel("Recent tickets to remember")
+                    .placeholder("15")
+                    .on_edit_end(move |value| {
+                        recent_tickets_limit_changes
+                            .borrow_mut()
+                            .push(SettingChange::RecentTicketsLimit(value));
+                    }),
+                FlexItem::fixed(3),
             );
         Self {
             root,
@@ -277,6 +309,18 @@ impl SettingsDialog {
                 }
                 SettingChange::BacklogUseJiraVelocity(value) => {
                     settings.backlog_runway.use_jira_velocity = value;
+                    changed = true;
+                }
+                SettingChange::BacklogJiraVelocitySprints(value) => {
+                    let Some(value) = value.trim().parse::<usize>().ok().filter(|value| *value > 0)
+                    else {
+                        ctx.notify(tuicore::Notification::warning(
+                            "Invalid velocity sprint count",
+                            "Enter a whole number greater than zero.",
+                        ));
+                        continue;
+                    };
+                    settings.backlog_runway.jira_velocity_sprints = value;
                     changed = true;
                 }
                 SettingChange::BacklogFixedSprintCapacity(value) => {
@@ -345,6 +389,22 @@ impl SettingsDialog {
                         continue;
                     };
                     settings.speed_reader.markdown_block_pause = markdown_block_pause;
+                    changed = true;
+                }
+                SettingChange::RecentTicketsLimit(value) => {
+                    let Some(value) = value
+                        .trim()
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|value| (1..=100).contains(value))
+                    else {
+                        ctx.notify(tuicore::Notification::warning(
+                            "Invalid recent ticket limit",
+                            "Enter a whole number from 1 to 100.",
+                        ));
+                        continue;
+                    };
+                    settings.recent_tickets_limit = value;
                     changed = true;
                 }
             }

@@ -40,6 +40,21 @@ pub(crate) struct BacklogSnapshot {
     pub work_items: Vec<WorkItem>,
     pub warnings: Vec<String>,
     pub runway: Option<BacklogRunway>,
+    pub velocity: Option<VelocityReport>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct VelocityReport {
+    pub sprints: Vec<VelocitySprint>,
+    pub dynamic_capacity: Option<f64>,
+    pub configured_sprints: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct VelocitySprint {
+    pub id: u64,
+    pub name: String,
+    pub completed: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]

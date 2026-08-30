@@ -43,6 +43,7 @@ fn snapshot() -> BacklogSnapshot {
         ],
         warnings: Vec::new(),
         runway: None,
+        velocity: None,
     }
 }
 

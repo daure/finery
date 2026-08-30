@@ -3,20 +3,25 @@ use std::{cell::Cell, rc::Rc, time::Duration};
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
     AnimationSettings, Dialog, DialogAction, DialogBackdrop, DialogHost, DialogLayer, EventCtx,
-    EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusTarget, KeySpec, LayoutCtx,
-    LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, Tab, Tabs, TabsVariant,
-    TickResult, ToastRack, TuiEvent, TuiNode,
+    EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusTarget, Key, KeyModifiers,
+    KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, Tab,
+    Tabs, TabsVariant, TickResult, ToastRack, TuiEvent, TuiNode,
 };
 
 use crate::{
-    components::{self, settings_dialog::SettingsDialog},
+    components::{
+        self,
+        recent_tickets::{RecentTicketsMenu, RecentTicketsMenuEvent},
+        settings_dialog::SettingsDialog,
+    },
     pages,
     service::AppService,
     store::composer::ChangeSet,
 };
 
 type SettingsHost = DialogHost<SettingsDialog, ()>;
-type AppView = DialogLayer<Flex<()>, SettingsHost>;
+type SettingsLayer = DialogLayer<Flex<()>, SettingsHost>;
+type AppView = DialogLayer<SettingsLayer, RecentTicketsMenu>;
 
 pub(crate) struct App {
     view: AppView,
@@ -55,11 +60,17 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
         .close_on_unfocus_from_descendants(true)
         .on_close(move |_| close_event.set(true))
         .host(SettingsDialog::new(settings, service.clone()));
-    let view = DialogLayer::new(base, dialog)
+    let settings_view = DialogLayer::new(base, dialog)
         .active(false)
         .fit_content()
         .base_overlays_visible(true)
         .backdrop(DialogBackdrop::dim().amount(0.5));
+    let view = DialogLayer::new(settings_view, RecentTicketsMenu::new(service.clone()))
+        .active(false)
+        .fit_content()
+        .fit_content_max(56, u16::MAX)
+        .base_overlays_visible(true)
+        .backdrop(DialogBackdrop::dim().amount(0.55));
     App {
         view,
         open_settings,
@@ -72,15 +83,36 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
 impl App {
     fn apply_dialog_signals(&mut self, ctx: &mut EventCtx<()>) {
         if self.open_settings.replace(false) {
-            self.view.set_active_with_context(true, ctx);
+            self.view.base_mut().set_active_with_context(true, ctx);
         }
         if self.close_dialog.replace(false) {
-            self.view.set_active_with_context(false, ctx);
+            self.view.base_mut().set_active_with_context(false, ctx);
+        }
+        for event in self.view.layer_mut().take_events() {
+            match event {
+                RecentTicketsMenuEvent::OpenTicket(key) => {
+                    self.service.open_jira_issue(&key);
+                    self.view.set_active_with_context(false, ctx);
+                }
+                RecentTicketsMenuEvent::Closed => self.view.set_active_with_context(false, ctx),
+            }
         }
         if self.drain_service_notifications() {
             ctx.request_redraw();
             ctx.request_tick();
         }
+    }
+
+    fn open_recent_tickets(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        if self.view.is_active()
+            || !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Char('e'), KeyModifiers::CONTROL).matches(*key))
+        {
+            return false;
+        }
+        self.view.layer_mut().open(ctx);
+        self.view.set_active_with_context(true, ctx);
+        ctx.stop_propagation();
+        true
     }
 
     fn drain_service_notifications(&mut self) -> bool {
@@ -116,6 +148,9 @@ impl TuiNode for App {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        if self.open_recent_tickets(event, ctx) {
+            return EventOutcome::Handled;
+        }
         let outcome = self.view.event(event, ctx);
         self.apply_dialog_signals(ctx);
         outcome
@@ -127,6 +162,9 @@ impl TuiNode for App {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
+        if self.open_recent_tickets(event, ctx) {
+            return EventOutcome::Handled;
+        }
         let outcome = self.view.dispatch_event(route, event, ctx);
         self.apply_dialog_signals(ctx);
         outcome

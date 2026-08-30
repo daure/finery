@@ -56,6 +56,7 @@ fn snapshot() -> BacklogSnapshot {
         work_items: vec![work_item("FIN-8", "Plan next sprint")],
         warnings: Vec::new(),
         runway: None,
+        velocity: None,
     }
 }
 
@@ -159,7 +160,8 @@ fn backlog_header_places_web_menu_before_the_right_aligned_refresh_button() {
         .unwrap();
     let header = rendered_lines(&terminal, area).remove(0);
 
-    assert!(cell_position(&header, "Web") < cell_position(&header, "Refresh"));
+    assert!(cell_position(&header, "Web") < cell_position(&header, "Velocity"));
+    assert!(cell_position(&header, "Velocity") < cell_position(&header, "Refresh"));
 }
 
 #[test]
@@ -197,6 +199,38 @@ fn backlog_refresh_is_focusable_with_shift_r() {
     assert!(matches!(
         receiver.try_recv(),
         Ok(super::components::BacklogSectionEvent::Refresh)
+    ));
+}
+
+#[test]
+fn backlog_velocity_is_focusable_with_shift_v() {
+    tuicore::init();
+    let (sender, receiver) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot(), sender, Default::default());
+    let area = Rect::new(0, 0, 80, 16);
+    let mut layout = LayoutCtx::new();
+    view.layout(area, &mut layout);
+    let velocity = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.path == TreePath::from_keys([ChildKey::new("velocity")]))
+        .unwrap();
+
+    assert_eq!(velocity.hotkey_sequences, ["shift+v"]);
+
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    view.dispatch_event(
+        &EventRoute::new(TreePath::from_keys([ChildKey::new("velocity")])),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('v'),
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut ctx,
+    );
+
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(super::components::BacklogSectionEvent::OpenVelocity)
     ));
 }
 
@@ -239,7 +273,11 @@ fn selecting_a_web_menu_item_returns_focus_to_the_backlog_data_view() {
     let area = Rect::new(0, 0, 100, 16);
     page.layout(area, &mut LayoutCtx::new());
     page.dispatch_event(
-        &EventRoute::new(TreePath::from_keys([ChildKey::first(), ChildKey::new("web")])),
+        &EventRoute::new(TreePath::from_keys([
+            ChildKey::first(),
+            ChildKey::first(),
+            ChildKey::new("web"),
+        ])),
         &TuiEvent::Key(KeyEvent::from(Key::Enter)),
         &mut EventCtx::new(AnimationSettings::default()),
     );
@@ -247,6 +285,7 @@ fn selecting_a_web_menu_item_returns_focus_to_the_backlog_data_view() {
     let mut ctx = EventCtx::new(AnimationSettings::default());
     page.dispatch_event(
         &EventRoute::new(TreePath::from_keys([
+            ChildKey::first(),
             ChildKey::first(),
             ChildKey::new("web"),
             ChildKey::new("menu"),
@@ -258,7 +297,7 @@ fn selecting_a_web_menu_item_returns_focus_to_the_backlog_data_view() {
     assert_eq!(
         ctx.focus_request(),
         Some(&FocusRequest::TargetAt {
-            path: TreePath::from_keys([ChildKey::first(), ChildKey::new("data")]),
+            path: TreePath::from_keys([ChildKey::first(), ChildKey::first(), ChildKey::new("data")]),
             id: FocusId::new("data-view"),
         })
     );
@@ -271,7 +310,11 @@ fn closing_the_web_menu_returns_focus_to_the_backlog_data_view() {
     let area = Rect::new(0, 0, 100, 16);
     page.layout(area, &mut LayoutCtx::new());
     page.dispatch_event(
-        &EventRoute::new(TreePath::from_keys([ChildKey::first(), ChildKey::new("web")])),
+        &EventRoute::new(TreePath::from_keys([
+            ChildKey::first(),
+            ChildKey::first(),
+            ChildKey::new("web"),
+        ])),
         &TuiEvent::Key(KeyEvent::from(Key::Enter)),
         &mut EventCtx::new(AnimationSettings::default()),
     );
@@ -279,6 +322,7 @@ fn closing_the_web_menu_returns_focus_to_the_backlog_data_view() {
     let mut ctx = EventCtx::new(AnimationSettings::default());
     page.dispatch_event(
         &EventRoute::new(TreePath::from_keys([
+            ChildKey::first(),
             ChildKey::first(),
             ChildKey::new("web"),
             ChildKey::new("menu"),
@@ -290,7 +334,7 @@ fn closing_the_web_menu_returns_focus_to_the_backlog_data_view() {
     assert_eq!(
         ctx.focus_request(),
         Some(&FocusRequest::TargetAt {
-            path: TreePath::from_keys([ChildKey::first(), ChildKey::new("data")]),
+            path: TreePath::from_keys([ChildKey::first(), ChildKey::first(), ChildKey::new("data")]),
             id: FocusId::new("data-view"),
         })
     );
@@ -394,12 +438,13 @@ fn refreshed_backlog_keeps_the_highlighted_ticket_and_expanded_sprint() {
 #[test]
 fn page_refresh_keeps_the_highlighted_ticket() {
     let mut page = BacklogPage::with_snapshot_for_test(snapshot());
-    page.view_for_test().base_mut().highlight("ticket:FIN-8");
+    page.view_for_test().base_mut().base_mut().highlight("ticket:FIN-8");
 
     page.refresh_snapshot_for_test(snapshot());
 
     assert_eq!(
         page.view_for_test()
+            .base_mut()
             .base_mut()
             .highlighted_id_for_test()
             .as_deref(),
@@ -540,7 +585,7 @@ fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
     }
 
     assert!(text.contains("Refresh"));
-    assert!(!text.contains("Velocity"));
+    assert!(text.contains("Velocity"));
     assert!(text.contains("┃"));
     assert!(text.contains("3 • @AD • To Do"));
     let lines = rendered_lines(&terminal, area);
@@ -609,7 +654,7 @@ fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
             text.push_str(terminal.backend().buffer().cell((x, y)).unwrap().symbol());
         }
     }
-    assert!(!text.contains("Velocity"));
+    assert!(text.contains("Velocity"));
     assert!(text.contains(" Sprint 7 • 18 Jun – 2 Jul"));
     assert!(text.contains(" ~5.4/20 pts • ✓ 1/1 • 1 items"));
     assert!(text.contains("5.4 • @AD • To Do"));
@@ -818,6 +863,7 @@ fn long_backlog_titles_wrap_to_the_available_viewport_width() {
         warnings: Vec::new(),
         story_points_configured: false,
         runway: None,
+        velocity: None,
     };
     let (sender, _) = mpsc::channel();
     let mut view = backlog_tree(&snapshot, sender, Default::default());
@@ -956,6 +1002,7 @@ fn backlog_search_filters_tickets_and_hides_runway_bands() {
         ],
         warnings: Vec::new(),
         runway: None,
+        velocity: None,
     };
     apply_capacity(
         &mut snapshot,
@@ -1031,6 +1078,7 @@ fn backlog_search_requires_contiguous_text() {
         work_items: vec![work_item("FIN-1", "A shopper can narrow products")],
         warnings: Vec::new(),
         runway: None,
+        velocity: None,
     };
     let (sender, _) = mpsc::channel();
     let mut tree = backlog_tree(&snapshot, sender, Default::default());
@@ -1085,6 +1133,7 @@ fn backlog_search_matches_epic_names() {
         work_items: vec![item],
         warnings: Vec::new(),
         runway: None,
+        velocity: None,
     };
     let (sender, _) = mpsc::channel();
     let mut tree = backlog_tree(&snapshot, sender, Default::default());
@@ -1134,6 +1183,7 @@ fn unified_tree_uses_same_section_transient_selection_for_the_quick_menu() {
         work_items: vec![work_item("FIN-1", "First"), work_item("FIN-2", "Second")],
         warnings: Vec::new(),
         runway: None,
+        velocity: None,
     };
     let (sender, receiver) = mpsc::channel();
     let mut tree = backlog_tree(&snapshot, sender, Default::default());
@@ -1242,6 +1292,7 @@ fn stale_rank_refresh_keeps_the_optimistic_order() {
         ],
         warnings: Vec::new(),
         runway: None,
+        velocity: None,
     };
     let mut optimistic = rollback.clone();
     optimistic.work_items.swap(0, 1);

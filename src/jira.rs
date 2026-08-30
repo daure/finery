@@ -11,7 +11,8 @@ use crate::{
         jira_adf::markdown_to_adf,
     },
     store::work_items::{
-        BacklogSnapshot, RankPlan, RunwayCapacitySource, Sprint, WorkItem, apply_capacity,
+        BacklogSnapshot, RankPlan, RunwayCapacitySource, Sprint, VelocityReport, VelocitySprint,
+        WorkItem, apply_capacity,
         loaded_story_point_average,
     },
 };
@@ -250,6 +251,33 @@ pub(crate) fn fetch_tickets(
     }
 }
 
+pub(crate) fn fetch_recent_work_items(
+    settings: &AppSettings,
+    keys: &[String],
+) -> Result<HashMap<String, WorkItem>, String> {
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let story_points_field_id = story_points_field_for_load(settings, None);
+    let response = client
+        .post(format!("{base_url}/rest/api/3/issue/bulkfetch"))
+        .basic_auth(email, Some(token))
+        .header("Accept", "application/json")
+        .json(&json!({
+            "issueIdsOrKeys": keys,
+            "fields": backlog_fields(story_points_field_id),
+        }))
+        .send()
+        .map_err(|error| error.to_string())?;
+    Ok(response_json::<SearchResponse>(response)?
+        .issues
+        .into_iter()
+        .map(|issue| to_work_item(issue, story_points_field_id))
+        .map(|item| (item.key.clone(), item))
+        .collect())
+}
+
 pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
     let (client, base_url, email, token) = configured_client(settings)?;
     let board = backlog_board(&client, &base_url, &email, &token, settings)?;
@@ -265,10 +293,14 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         };
     let story_points_field_id =
         story_points_field_for_load(settings, discovered_story_points.as_ref());
-    let velocity = settings
-        .backlog_runway
-        .use_jira_velocity
-        .then(|| board_velocity(&client, &base_url, &email, &token, board.id));
+    let velocity = board_velocity(
+        &client,
+        &base_url,
+        &email,
+        &token,
+        board.id,
+        settings.backlog_runway.jira_velocity_sprints,
+    );
     let sprints = board_sprints(&client, &base_url, &email, &token, board.id)?;
     let (sprints, work_items) = std::thread::scope(|scope| -> Result<_, String> {
         let backlog_client = client.clone();
@@ -339,6 +371,7 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         work_items,
         warnings: Vec::new(),
         runway: None,
+        velocity: velocity.as_ref().ok().cloned(),
     };
     if let Some(warning) = discovery_warning {
         snapshot.warnings.push(warning);
@@ -346,9 +379,14 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
     if let Some(warning) = story_points_warning(&snapshot) {
         snapshot.warnings.push(warning);
     }
-    let (capacity, source) = match velocity {
-        Some(Ok(capacity)) => (capacity, RunwayCapacitySource::JiraVelocity),
-        Some(Err(error)) => {
+    let (capacity, source) = match (settings.backlog_runway.use_jira_velocity, velocity) {
+        (true, Ok(report)) => (
+            report
+                .dynamic_capacity
+                .ok_or_else(|| "Jira velocity chart did not contain completed estimates".to_string())?,
+            RunwayCapacitySource::JiraVelocity,
+        ),
+        (true, Err(error)) => {
             snapshot.warnings.push(format!(
                 "Could not load Jira velocity; using the fixed sprint capacity instead: {error}"
             ));
@@ -357,7 +395,7 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
                 RunwayCapacitySource::FixedFallback,
             )
         }
-        None => (
+        (false, _) => (
             settings.backlog_runway.fixed_sprint_capacity,
             RunwayCapacitySource::Fixed,
         ),
@@ -548,7 +586,8 @@ fn board_velocity(
     email: &str,
     token: &str,
     board_id: u64,
-) -> Result<f64, String> {
+    sprint_count: usize,
+) -> Result<VelocityReport, String> {
     let response = client
         .get(format!(
             "{base_url}/rest/greenhopper/1.0/rapid/charts/velocity.json"
@@ -557,30 +596,84 @@ fn board_velocity(
         .query(&[("rapidViewId", board_id.to_string())])
         .send()
         .map_err(|error| error.to_string())?;
-    response_json::<Value>(response).and_then(velocity_average)
+    response_json::<Value>(response).and_then(|chart| velocity_report(chart, sprint_count))
 }
 
-fn velocity_average(chart: Value) -> Result<f64, String> {
+fn velocity_report(chart: Value, sprint_count: usize) -> Result<VelocityReport, String> {
     let entries = chart
         .get("velocityStatEntries")
         .and_then(|entries| match entries {
-            Value::Array(entries) => Some(entries.iter().collect::<Vec<_>>()),
-            Value::Object(entries) => Some(entries.values().collect::<Vec<_>>()),
+            Value::Array(entries) => Some(
+                entries
+                    .iter()
+                    .filter_map(|entry| Some((entry.get("id")?.as_u64()?, entry)))
+                    .collect::<HashMap<_, _>>(),
+            ),
+            Value::Object(entries) => Some(
+                entries
+                    .iter()
+                    .filter_map(|(id, entry)| Some((id.parse::<u64>().ok()?, entry)))
+                    .collect::<HashMap<_, _>>(),
+            ),
             _ => None,
         })
         .ok_or_else(|| "Jira velocity chart did not contain sprint entries".to_string())?;
-    let completed = entries
-        .into_iter()
-        .filter_map(|entry| {
-            entry
-                .pointer("/completed/value")
-                .or_else(|| entry.get("completed"))
-                .and_then(Value::as_f64)
+    let sprints = chart
+        .get("sprints")
+        .and_then(Value::as_array)
+        .map(|sprints| {
+            sprints
+                .iter()
+                .filter_map(|sprint| {
+                    let id = sprint.get("id")?.as_u64()?;
+                    let entry = entries.get(&id)?;
+                    let completed = entry
+                        .pointer("/completed/value")
+                        .or_else(|| entry.get("completed"))
+                        .and_then(Value::as_f64)
+                        .filter(|value| value.is_finite() && *value >= 0.0)?;
+                    Some(VelocitySprint {
+                        id,
+                        name: sprint.get("name")?.as_str()?.into(),
+                        completed,
+                    })
+                })
+                .collect::<Vec<_>>()
         })
-        .filter(|value| value.is_finite() && *value >= 0.0)
-        .collect::<Vec<_>>();
-    (!completed.is_empty())
-        .then(|| completed.iter().sum::<f64>() / completed.len() as f64)
+        .unwrap_or_else(|| {
+            entries
+                .iter()
+                .filter_map(|(id, entry)| {
+                    let completed = entry
+                        .pointer("/completed/value")
+                        .or_else(|| entry.get("completed"))
+                        .and_then(Value::as_f64)
+                        .filter(|value| value.is_finite() && *value >= 0.0)?;
+                    Some(VelocitySprint {
+                        id: *id,
+                        name: "Unknown sprint".into(),
+                        completed,
+                    })
+                })
+                .collect()
+        });
+    let dynamic_sprints = sprints.iter().take(sprint_count).collect::<Vec<_>>();
+    let dynamic_capacity = (!dynamic_sprints.is_empty()).then(|| {
+        dynamic_sprints.iter().map(|sprint| sprint.completed).sum::<f64>()
+            / dynamic_sprints.len() as f64
+    });
+    Ok(VelocityReport {
+        sprints,
+        dynamic_capacity,
+        configured_sprints: sprint_count,
+    })
+}
+
+#[cfg(test)]
+fn velocity_average(chart: Value) -> Result<f64, String> {
+    let report = velocity_report(chart, usize::MAX)?;
+    report
+        .dynamic_capacity
         .ok_or_else(|| "Jira velocity chart did not contain completed estimates".to_string())
 }
 

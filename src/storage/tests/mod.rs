@@ -112,3 +112,20 @@ fn deleting_change_set_cascades_ticket_changes() {
         assert!(storage.load_change_sets().await.unwrap().is_empty());
     });
 }
+
+#[test]
+fn recent_ticket_stack_keeps_unique_keys_in_open_order() {
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let storage = Storage::connect_for_tests().await.unwrap();
+
+        storage.record_recent_ticket("OPS-1", 1, 2).await.unwrap();
+        storage.record_recent_ticket("OPS-2", 2, 2).await.unwrap();
+        storage.record_recent_ticket("OPS-1", 3, 2).await.unwrap();
+        storage.record_recent_ticket("OPS-3", 4, 2).await.unwrap();
+
+        assert_eq!(
+            storage.load_recent_ticket_keys(15).await.unwrap(),
+            vec!["OPS-3", "OPS-1"]
+        );
+    });
+}

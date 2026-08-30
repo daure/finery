@@ -8,7 +8,7 @@ use super::{
     COMPOSER_CREATE_SUBMIT_KEY_SETTING, COMPOSER_DESCRIPTION_FOCUS_KEY_SETTING,
     COMPOSER_DESCRIPTION_READER_KEY_SETTING, COMPOSER_ISSUE_TYPE_KEY_SETTING,
     COMPOSER_VIEW_KEY_SETTING, JIRA_STORY_POINTS_BOARD_ID_SETTING,
-    JIRA_STORY_POINTS_FIELD_ID_SETTING, SPEED_READER_WPM_SETTING,
+    JIRA_STORY_POINTS_FIELD_ID_SETTING, RECENT_TICKETS_LIMIT_SETTING, SPEED_READER_WPM_SETTING,
 };
 
 #[test]
@@ -103,6 +103,7 @@ fn backlog_runway_settings_round_trip_and_reject_invalid_values() {
     .unwrap();
 
     assert!(settings.backlog_runway.use_jira_velocity);
+    assert_eq!(settings.backlog_runway.jira_velocity_sprints, 4);
     assert_eq!(settings.backlog_runway.fixed_sprint_capacity, 18.5);
     assert!(settings.backlog_runway.use_average_ticket_size);
     assert_eq!(settings.backlog_runway.fixed_ticket_size, 2.5);
@@ -120,6 +121,29 @@ fn backlog_runway_settings_round_trip_and_reject_invalid_values() {
     .unwrap();
     assert_eq!(defaults.backlog_runway.fixed_sprint_capacity, 20.0);
     assert_eq!(defaults.backlog_runway.sprint_tolerance_percent, 20);
+}
+
+#[test]
+fn recent_ticket_limit_defaults_to_fifteen_and_rejects_invalid_values() {
+    assert_eq!(AppSettings::default().recent_tickets_limit, 15);
+    let settings = AppSettings::resolve(&HashMap::from([(
+        RECENT_TICKETS_LIMIT_SETTING.into(),
+        "25".into(),
+    )]))
+    .unwrap();
+    assert_eq!(settings.recent_tickets_limit, 25);
+    assert!(
+        settings
+            .values()
+            .contains(&(RECENT_TICKETS_LIMIT_SETTING, "25".into()))
+    );
+
+    let invalid = AppSettings::resolve(&HashMap::from([(
+        RECENT_TICKETS_LIMIT_SETTING.into(),
+        "0".into(),
+    )]))
+    .unwrap();
+    assert_eq!(invalid.recent_tickets_limit, 15);
 }
 
 #[test]

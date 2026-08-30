@@ -57,6 +57,7 @@ struct BacklogWorkItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::pages::backlog) enum BacklogSectionEvent {
     Refresh,
+    OpenVelocity,
     OpenReports,
     OpenTimeline,
     OpenBoard,
@@ -133,6 +134,9 @@ pub(in crate::pages::backlog) fn backlog_tree(
     control.data_view_mut().set_wrap_cells(true);
     control
         .data_view_mut()
+        .set_show_inactive_highlight(true);
+    control
+        .data_view_mut()
         .set_row_style_by(|row| match &row.content {
             BacklogRowContent::WorkItem(item) if item.alternate_background => {
                 Some(Style::default().bg(tuicore::theme().surface_bg()))
@@ -154,10 +158,14 @@ pub(in crate::pages::backlog) fn backlog_tree(
             _ => None,
         });
     let refresh_events = events.clone();
+    let velocity_events = events.clone();
     BacklogTree {
         control,
         refresh: Button::new("Refresh").hotkey("shift+r").on_press(move || {
             let _ = refresh_events.send(BacklogSectionEvent::Refresh);
+        }),
+        velocity: Button::new("Velocity").hotkey("shift+v").on_press(move || {
+            let _ = velocity_events.send(BacklogSectionEvent::OpenVelocity);
         }),
         web: MenuButton::new(
             "Web",
@@ -172,6 +180,7 @@ pub(in crate::pages::backlog) fn backlog_tree(
         spinner: Spinner::new(),
         loading: false,
         refresh_area: ratatui::layout::Rect::default(),
+        velocity_area: ratatui::layout::Rect::default(),
         web_area: ratatui::layout::Rect::default(),
         spinner_area: ratatui::layout::Rect::default(),
         control_area: ratatui::layout::Rect::default(),
@@ -185,10 +194,12 @@ pub(in crate::pages::backlog) fn backlog_tree(
 pub(in crate::pages::backlog) struct BacklogTree {
     control: ListControl<BacklogRow, String>,
     refresh: Button<()>,
+    velocity: Button<()>,
     web: MenuButton<WebMenuItem>,
     spinner: Spinner,
     loading: bool,
     refresh_area: ratatui::layout::Rect,
+    velocity_area: ratatui::layout::Rect,
     web_area: ratatui::layout::Rect,
     spinner_area: ratatui::layout::Rect,
     control_area: ratatui::layout::Rect,
@@ -240,6 +251,7 @@ impl BacklogTree {
     pub(in crate::pages::backlog) fn set_loading(&mut self, loading: bool) {
         self.loading = loading;
         self.refresh.set_disabled(loading);
+        self.velocity.set_disabled(loading);
     }
 
     pub(in crate::pages::backlog) fn highlight(&mut self, row_id: &str) {
@@ -588,11 +600,18 @@ impl TuiNode for BacklogTree {
                 .width
         };
         let refresh_width = button_width(&self.refresh).min(area.width);
+        let velocity_width = button_width(&self.velocity).min(
+            area.width
+                .saturating_sub(refresh_width)
+                .saturating_sub(u16::from(refresh_width > 0)),
+        );
         let web_width = self.web.measure(LayoutProposal::at_most(area.width, header_height)).preferred.width.min(
             area
             .width
-            .saturating_sub(refresh_width)
-            .saturating_sub(u16::from(refresh_width > 0)),
+                .saturating_sub(refresh_width)
+                .saturating_sub(velocity_width)
+                .saturating_sub(u16::from(refresh_width > 0))
+                .saturating_sub(u16::from(velocity_width > 0)),
         );
         self.web_area = ratatui::layout::Rect::new(area.x, area.y, web_width, header_height);
         self.refresh_area = ratatui::layout::Rect::new(
@@ -600,6 +619,15 @@ impl TuiNode for BacklogTree {
                 .saturating_add(area.width.saturating_sub(refresh_width)),
             area.y,
             refresh_width,
+            header_height,
+        );
+        self.velocity_area = ratatui::layout::Rect::new(
+            self.refresh_area
+                .x
+                .saturating_sub(velocity_width)
+                .saturating_sub(u16::from(velocity_width > 0)),
+            area.y,
+            velocity_width,
             header_height,
         );
         self.spinner_area = if self.loading {
@@ -622,6 +650,9 @@ impl TuiNode for BacklogTree {
         ctx.push_slot(ChildKey::new("refresh"), self.refresh_area, |ctx| {
             self.refresh.layout(self.refresh_area, ctx)
         });
+        ctx.push_slot(ChildKey::new("velocity"), self.velocity_area, |ctx| {
+            self.velocity.layout(self.velocity_area, ctx)
+        });
         ctx.push_slot(ChildKey::new("web"), self.web_area, |ctx| {
             self.web.layout(self.web_area, ctx)
         });
@@ -637,6 +668,7 @@ impl TuiNode for BacklogTree {
         ctx: &mut RenderCtx<'a>,
     ) {
         self.refresh.render(frame, self.refresh_area);
+        self.velocity.render(frame, self.velocity_area);
         self.web.render(frame, self.web_area, ctx);
         if self.loading {
             self.spinner.render(frame, self.spinner_area);
@@ -647,6 +679,7 @@ impl TuiNode for BacklogTree {
         let web_was_open = self.web.is_open();
         if matches!(event, TuiEvent::Mouse(_))
             && (self.refresh.event(event, ctx) == EventOutcome::Handled
+                || self.velocity.event(event, ctx) == EventOutcome::Handled
                 || self.web.event(event, ctx) == EventOutcome::Handled)
         {
             self.drain_web_menu(web_was_open);
@@ -666,6 +699,11 @@ impl TuiNode for BacklogTree {
             return self
                 .refresh
                 .dispatch_event(&EventRoute::new(refresh_path), event, ctx);
+        }
+        if let Some(velocity_path) = route.path.without_first_if(&ChildKey::new("velocity")) {
+            return self
+                .velocity
+                .dispatch_event(&EventRoute::new(velocity_path), event, ctx);
         }
         if let Some(web_path) = route.path.without_first_if(&ChildKey::new("web")) {
             let web_was_open = self.web.is_open();
@@ -693,6 +731,11 @@ impl TuiNode for BacklogTree {
                 dt,
                 settings,
             ))
+            .merge(<Button<()> as TuiNode<()>>::tick(
+                &mut self.velocity,
+                dt,
+                settings,
+            ))
             .merge(self.web.tick(dt, settings))
             .merge(if self.loading {
                 Animated::tick(&mut self.spinner, dt, settings)
@@ -707,6 +750,10 @@ impl TuiNode for BacklogTree {
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
         if let Some(refresh_target) = target.for_child(&ChildKey::new("refresh")) {
             self.refresh.dispatch_focus(&refresh_target, focused, ctx);
+            return;
+        }
+        if let Some(velocity_target) = target.for_child(&ChildKey::new("velocity")) {
+            self.velocity.dispatch_focus(&velocity_target, focused, ctx);
             return;
         }
         if let Some(web_target) = target.for_child(&ChildKey::new("web")) {

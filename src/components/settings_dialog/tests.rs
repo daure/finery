@@ -55,6 +55,7 @@ fn backlog_runway_changes_apply_to_live_settings() {
     let dialog = SettingsDialog::new(settings.clone(), service.clone());
     dialog.changes.borrow_mut().extend([
         SettingChange::BacklogUseJiraVelocity(true),
+        SettingChange::BacklogJiraVelocitySprints("4".into()),
         SettingChange::BacklogFixedSprintCapacity("18.5".into()),
         SettingChange::BacklogUseAverageTicketSize(true),
         SettingChange::BacklogFixedTicketSize("2.5".into()),
@@ -65,6 +66,7 @@ fn backlog_runway_changes_apply_to_live_settings() {
 
     let settings = settings.read().unwrap();
     assert!(settings.backlog_runway.use_jira_velocity);
+    assert_eq!(settings.backlog_runway.jira_velocity_sprints, 4);
     assert_eq!(settings.backlog_runway.fixed_sprint_capacity, 18.5);
     assert!(settings.backlog_runway.use_average_ticket_size);
     assert_eq!(settings.backlog_runway.fixed_ticket_size, 2.5);

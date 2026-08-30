@@ -150,6 +150,7 @@ fn workspace_limits_only_unplanned_tickets_and_omits_closed_change_sets() {
             work_items: (51..102).map(work_item).collect(),
             warnings: vec!["Story points are unavailable".into()],
             runway: None,
+            velocity: None,
         },
         Versioned {
             revision: 7,

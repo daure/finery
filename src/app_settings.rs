@@ -16,6 +16,7 @@ pub(crate) const JIRA_STORY_POINTS_BOARD_ID_SETTING: &str = "jira.story_points_b
 pub(crate) const JIRA_STORY_POINTS_DISCOVERY_COMPLETE_SETTING: &str =
     "jira.story_points_discovery_complete";
 pub(crate) const BACKLOG_USE_JIRA_VELOCITY_SETTING: &str = "backlog.use_jira_velocity";
+pub(crate) const BACKLOG_JIRA_VELOCITY_SPRINTS_SETTING: &str = "backlog.jira_velocity_sprints";
 pub(crate) const BACKLOG_FIXED_SPRINT_CAPACITY_SETTING: &str = "backlog.fixed_sprint_capacity";
 pub(crate) const BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING: &str = "backlog.use_average_ticket_size";
 pub(crate) const BACKLOG_FIXED_TICKET_SIZE_SETTING: &str = "backlog.fixed_ticket_size";
@@ -23,6 +24,7 @@ pub(crate) const BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING: &str =
     "backlog.sprint_tolerance_percent";
 pub(crate) const SPEED_READER_WPM_SETTING: &str = "reader.wpm";
 pub(crate) const SPEED_READER_BLOCK_DELAY_SETTING: &str = "reader.markdown_block_pause_ms";
+pub(crate) const RECENT_TICKETS_LIMIT_SETTING: &str = "recent_tickets.limit";
 pub(crate) const COMPOSER_ADD_SIBLING_KEY_SETTING: &str = "composer.add_sibling_key";
 pub(crate) const COMPOSER_ADD_CHILD_KEY_SETTING: &str = "composer.add_child_key";
 pub(crate) const COMPOSER_COMMIT_KEY_SETTING: &str = "composer.commit_key";
@@ -274,7 +276,7 @@ fn sequences_conflict(sequence: &str, candidate: &str) -> bool {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AppSettings {
     pub(crate) jira_base_url: String,
     pub(crate) jira_email: String,
@@ -286,12 +288,33 @@ pub(crate) struct AppSettings {
     pub(crate) jira_story_points_discovery_complete: bool,
     pub(crate) backlog_runway: BacklogRunwaySettings,
     pub(crate) speed_reader: SpeedReaderSettings,
+    pub(crate) recent_tickets_limit: usize,
     pub(crate) composer_keys: ComposerKeyBindings,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            jira_base_url: String::new(),
+            jira_email: String::new(),
+            jira_api_token: String::new(),
+            jira_default_project: String::new(),
+            jira_default_board: String::new(),
+            jira_story_points_field_id: String::new(),
+            jira_story_points_board_id: String::new(),
+            jira_story_points_discovery_complete: false,
+            backlog_runway: BacklogRunwaySettings::default(),
+            speed_reader: SpeedReaderSettings::default(),
+            recent_tickets_limit: 15,
+            composer_keys: ComposerKeyBindings::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BacklogRunwaySettings {
     pub(crate) use_jira_velocity: bool,
+    pub(crate) jira_velocity_sprints: usize,
     pub(crate) fixed_sprint_capacity: f64,
     pub(crate) use_average_ticket_size: bool,
     pub(crate) fixed_ticket_size: f64,
@@ -302,6 +325,7 @@ impl Default for BacklogRunwaySettings {
     fn default() -> Self {
         Self {
             use_jira_velocity: false,
+            jira_velocity_sprints: 4,
             fixed_sprint_capacity: 20.0,
             use_average_ticket_size: false,
             fixed_ticket_size: 3.0,
@@ -343,6 +367,11 @@ impl AppSettings {
                 use_jira_velocity: values
                     .get(BACKLOG_USE_JIRA_VELOCITY_SETTING)
                     .is_some_and(|value| value == "true"),
+                jira_velocity_sprints: values
+                    .get(BACKLOG_JIRA_VELOCITY_SPRINTS_SETTING)
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|value| *value > 0)
+                    .unwrap_or(defaults.backlog_runway.jira_velocity_sprints),
                 fixed_sprint_capacity: setting_number(
                     values,
                     BACKLOG_FIXED_SPRINT_CAPACITY_SETTING,
@@ -374,6 +403,11 @@ impl AppSettings {
                     .and_then(|value| parse_markdown_block_pause(value))
                     .unwrap_or(defaults.speed_reader.markdown_block_pause),
             },
+            recent_tickets_limit: values
+                .get(RECENT_TICKETS_LIMIT_SETTING)
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| (1..=100).contains(value))
+                .unwrap_or(15),
             composer_keys: ComposerKeyBindings::from_values(values)?,
         })
     }
@@ -405,6 +439,10 @@ impl AppSettings {
                 self.backlog_runway.use_jira_velocity.to_string(),
             ),
             (
+                BACKLOG_JIRA_VELOCITY_SPRINTS_SETTING,
+                self.backlog_runway.jira_velocity_sprints.to_string(),
+            ),
+            (
                 BACKLOG_FIXED_SPRINT_CAPACITY_SETTING,
                 self.backlog_runway.fixed_sprint_capacity.to_string(),
             ),
@@ -427,6 +465,10 @@ impl AppSettings {
                     .markdown_block_pause
                     .as_millis()
                     .to_string(),
+            ),
+            (
+                RECENT_TICKETS_LIMIT_SETTING,
+                self.recent_tickets_limit.to_string(),
             ),
             (
                 COMPOSER_ADD_SIBLING_KEY_SETTING,

@@ -485,6 +485,73 @@ impl Storage {
         transaction.commit().await?;
         Ok(())
     }
+
+    pub(crate) async fn record_recent_ticket(
+        &self,
+        key: &str,
+        opened_order: u64,
+        limit: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut transaction = self.pool.begin().await?;
+        let upsert = format!(
+            "INSERT INTO recent_tickets (ticket_key, opened_order) VALUES ({}, {}) ON CONFLICT (ticket_key) DO UPDATE SET opened_order = excluded.opened_order",
+            self.dialect.placeholder(1),
+            self.dialect.placeholder(2),
+        );
+        sqlx::query(AssertSqlSafe(upsert.as_str()))
+            .bind(key)
+            .bind(i64::try_from(opened_order)?)
+            .execute(&mut *transaction)
+            .await?;
+        self.trim_recent_tickets_in_transaction(&mut transaction, limit)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn trim_recent_tickets(
+        &self,
+        limit: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut transaction = self.pool.begin().await?;
+        self.trim_recent_tickets_in_transaction(&mut transaction, limit)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn trim_recent_tickets_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Any>,
+        limit: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let trim = format!(
+            "DELETE FROM recent_tickets WHERE ticket_key NOT IN (SELECT ticket_key FROM recent_tickets ORDER BY opened_order DESC LIMIT {})",
+            self.dialect.placeholder(1),
+        );
+        sqlx::query(AssertSqlSafe(trim.as_str()))
+            .bind(i64::try_from(limit)?)
+            .execute(&mut **transaction)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn load_recent_ticket_keys(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let query = format!(
+            "SELECT ticket_key FROM recent_tickets ORDER BY opened_order DESC LIMIT {}",
+            self.dialect.placeholder(1),
+        );
+        Ok(sqlx::query(AssertSqlSafe(query.as_str()))
+            .bind(i64::try_from(limit)?)
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(|row| row.try_get("ticket_key"))
+            .collect::<Result<_, _>>()?)
+    }
 }
 
 fn pool_options(dialect: SqlDialect) -> AnyPoolOptions {

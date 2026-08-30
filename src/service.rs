@@ -7,6 +7,7 @@ use std::{
         mpsc::{self, Sender},
     },
     thread,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use tokio::runtime::Runtime;
@@ -22,7 +23,7 @@ use crate::{
         VersionedChangeSetCatalog,
     },
     store::composer::{ChangeSet, Ticket, TicketChange},
-    store::work_items::{BacklogSnapshot, RankPlan},
+    store::work_items::{BacklogSnapshot, RankPlan, WorkItem},
 };
 
 pub(crate) mod composer_service;
@@ -34,6 +35,7 @@ mod tests;
 pub(crate) struct AppService {
     settings: Arc<RwLock<AppSettings>>,
     settings_revision: Arc<AtomicU64>,
+    recent_ticket_order: Arc<AtomicU64>,
     storage: Storage,
     runtime: Arc<Runtime>,
     errors: Arc<Mutex<Vec<String>>>,
@@ -44,6 +46,12 @@ pub(crate) struct AppService {
     jira_submit: Arc<Mutex<Option<TestJiraSubmit>>>,
     #[cfg(test)]
     discovery_persistence_pause: Arc<Mutex<Option<DiscoveryPersistencePause>>>,
+}
+
+pub(crate) struct RecentTickets {
+    pub work_items: Vec<WorkItem>,
+    pub story_points_configured: bool,
+    pub assumed_story_points: f64,
 }
 
 #[cfg(test)]
@@ -58,6 +66,8 @@ struct DiscoveryPersistencePause {
 
 enum PersistenceCommand {
     SaveSettings(Vec<(&'static str, String)>),
+    RecordRecentTicket(String, u64, usize),
+    TrimRecentTickets(usize),
     SaveChangeSet(ChangeSet, Option<i64>),
     SaveChangeSetDurably(
         ChangeSet,
@@ -238,6 +248,7 @@ impl AppService {
             Self {
                 settings: Arc::new(RwLock::new(settings)),
                 settings_revision: Arc::new(AtomicU64::new(0)),
+                recent_ticket_order: Arc::new(AtomicU64::new(recent_ticket_order_seed()?)),
                 storage,
                 runtime,
                 errors,
@@ -273,6 +284,7 @@ impl AppService {
         Self {
             settings: Arc::new(RwLock::new(AppSettings::default())),
             settings_revision: Arc::new(AtomicU64::new(0)),
+            recent_ticket_order: Arc::new(AtomicU64::new(recent_ticket_order_seed().unwrap())),
             storage,
             runtime,
             errors,
@@ -331,10 +343,16 @@ impl AppService {
     pub(crate) fn save_settings(&self, settings: AppSettings) {
         let mut current = self.settings.write().expect("settings lock poisoned");
         let changed_values = settings.changed_values(&current);
+        let recent_ticket_limit_changed =
+            settings.recent_tickets_limit != current.recent_tickets_limit;
+        let recent_ticket_limit = settings.recent_tickets_limit;
         *current = settings;
         if !changed_values.is_empty() {
             self.settings_revision.fetch_add(1, Ordering::Relaxed);
             self.send(PersistenceCommand::SaveSettings(changed_values));
+            if recent_ticket_limit_changed {
+                self.send(PersistenceCommand::TrimRecentTickets(recent_ticket_limit));
+            }
         }
         drop(current);
     }
@@ -627,10 +645,43 @@ impl AppService {
             if error.kind() == std::io::ErrorKind::NotFound
                 && spawn_browser(xdg_open_command(&url)).is_ok()
             {
+                self.record_recent_ticket(key);
                 return;
             }
             self.report_error(format!("Could not open Jira ticket in browser: {error}"));
+            return;
         }
+        self.record_recent_ticket(key);
+    }
+
+    pub(crate) fn load_recent_jira_tickets(&self) -> Result<RecentTickets, String> {
+        let (limit, settings) = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())
+            .map(|settings| (settings.recent_tickets_limit, settings.clone()))?;
+        let keys = self
+            .runtime
+            .block_on(self.storage.load_recent_ticket_keys(limit))
+            .map_err(|error| error.to_string())?;
+        let story_points_configured = !settings.jira_story_points_field_id.trim().is_empty();
+        let assumed_story_points = settings.backlog_runway.fixed_ticket_size;
+        if keys.is_empty() {
+            return Ok(RecentTickets {
+                work_items: Vec::new(),
+                story_points_configured,
+                assumed_story_points,
+            });
+        }
+        let tickets = jira::fetch_recent_work_items(&settings, &keys)?;
+        Ok(RecentTickets {
+            work_items: keys
+                .into_iter()
+                .filter_map(|key| tickets.get(&key).cloned())
+                .collect(),
+            story_points_configured,
+            assumed_story_points,
+        })
     }
 
     pub(crate) fn open_jira_board_page(&self, page: Option<&str>) {
@@ -812,6 +863,19 @@ impl AppService {
         }
     }
 
+    fn record_recent_ticket(&self, key: &str) {
+        let limit = match self.settings.read() {
+            Ok(settings) => settings.recent_tickets_limit,
+            Err(_) => return,
+        };
+        let opened_order = self.recent_ticket_order.fetch_add(1, Ordering::Relaxed);
+        self.send(PersistenceCommand::RecordRecentTicket(
+            key.to_owned(),
+            opened_order,
+            limit,
+        ));
+    }
+
     fn save_discovered_story_points(
         &self,
         expected_board_id: &str,
@@ -928,6 +992,10 @@ fn spawn_browser(mut command: Command) -> Result<(), std::io::Error> {
         .map(|_| ())
 }
 
+fn recent_ticket_order_seed() -> Result<u64, Box<dyn std::error::Error>> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
+}
+
 fn start_persistence_worker(
     storage: Storage,
     runtime: Arc<Runtime>,
@@ -942,6 +1010,12 @@ fn start_persistence_worker(
                 let result = match command {
                     PersistenceCommand::SaveSettings(values) => {
                         runtime.block_on(async { storage.set_settings(&values).await })
+                    }
+                    PersistenceCommand::RecordRecentTicket(key, opened_order, limit) => {
+                        runtime.block_on(storage.record_recent_ticket(&key, opened_order, limit))
+                    }
+                    PersistenceCommand::TrimRecentTickets(limit) => {
+                        runtime.block_on(storage.trim_recent_tickets(limit))
                     }
                     PersistenceCommand::SaveChangeSet(set, expected) => {
                         save_change_set(&storage, &runtime, &composer_sync, set, expected)

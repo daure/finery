@@ -15,7 +15,7 @@ use super::{
     same_jira_content, search_jql, select_backlog_board, should_discover_story_points,
     sprint_issues, story_points_field_for_load, story_points_field_id, story_points_warning,
     submit_failure, submit_ordered_changes, text_search_jql, to_ticket, to_work_item,
-    update_payload, velocity_average,
+    update_payload, velocity_average, velocity_report,
 };
 use crate::{
     app_settings::AppSettings,
@@ -675,6 +675,7 @@ fn backlog_warns_when_loaded_tickets_lack_story_points() {
         )],
         warnings: Vec::new(),
         runway: None,
+        velocity: None,
     };
 
     assert!(
@@ -695,6 +696,37 @@ fn velocity_chart_average_uses_completed_estimates() {
     .unwrap();
 
     assert_eq!(average, 20.0);
+}
+
+#[test]
+fn velocity_report_uses_the_most_recent_configured_sprints_and_their_names() {
+    let report = velocity_report(
+        json!({
+            "sprints": [
+                { "id": 103, "name": "Sprint 3" },
+                { "id": 102, "name": "Sprint 2" },
+                { "id": 101, "name": "Sprint 1" }
+            ],
+            "velocityStatEntries": {
+                "101": { "completed": { "value": 16.0 } },
+                "102": { "completed": { "value": 24.0 } },
+                "103": { "completed": { "value": 20.0 } }
+            }
+        }),
+        2,
+    )
+    .unwrap();
+
+    assert_eq!(report.configured_sprints, 2);
+    assert_eq!(report.dynamic_capacity, Some(22.0));
+    assert_eq!(
+        report
+            .sprints
+            .iter()
+            .map(|sprint| sprint.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Sprint 3", "Sprint 2", "Sprint 1"]
+    );
 }
 
 #[test]
