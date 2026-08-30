@@ -116,7 +116,10 @@ pub(crate) fn loaded_story_point_average(snapshot: &BacklogSnapshot) -> Option<f
         .filter_map(|item| item.story_points)
         .filter(|points| points.is_finite() && *points >= 0.0)
         .collect::<Vec<_>>();
-    (!points.is_empty()).then(|| points.iter().sum::<f64>() / points.len() as f64)
+    (!points.is_empty()).then(|| {
+        let average = points.iter().sum::<f64>() / points.len() as f64;
+        (average * 10.0).round() / 10.0
+    })
 }
 
 pub(crate) fn apply_capacity(
@@ -226,20 +229,24 @@ fn effective_points(item: &WorkItem, assumed_ticket_size: f64) -> (f64, bool) {
         .filter(|points| points.is_finite() && *points >= 0.0)
         .map(|points| (points, false))
         .unwrap_or_else(|| {
-            if item.kind.eq_ignore_ascii_case("bug") {
-                (0.0, false)
-            } else {
+            if accepts_assumed_story_points(item) {
                 (assumed_ticket_size, true)
+            } else {
+                (0.0, false)
             }
         })
 }
 
 fn needs_assumption(item: &WorkItem) -> bool {
-    !item.kind.eq_ignore_ascii_case("bug")
+    accepts_assumed_story_points(item)
         && item
             .story_points
             .filter(|points| points.is_finite() && *points >= 0.0)
             .is_none()
+}
+
+fn accepts_assumed_story_points(item: &WorkItem) -> bool {
+    item.kind.eq_ignore_ascii_case("story") || item.kind.eq_ignore_ascii_case("task")
 }
 
 #[cfg(test)]

@@ -10,14 +10,14 @@ use serde_json::json;
 use super::{
     AgileBoard, AgileIssuePage, BACKLOG_FIELDS, BACKLOG_JQL, ISSUE_FIELDS, IssuePickerResponse,
     JiraIssue, JiraSprint, MAX_VELOCITY_GOAL_LOOKUPS, SubmitBatchOutcome, ambiguous_create_failure,
-    backlog_page_complete, board_backlog_query, board_sprints, board_velocity, commit_order,
-    create_available_statuses_from_value, create_issue_fields, create_issue_type,
+    backlog_page_complete, board_backlog, board_backlog_query, board_sprints, board_velocity,
+    commit_order, create_available_statuses_from_value, create_issue_fields, create_issue_type,
     create_issue_types_from_value, create_response_failure, created_issue_failure,
-    discover_story_points, is_ticket_number_query, issue_fields, issue_picker_keys, move_payload,
-    options_from_values, rank_payload, same_jira_content, search_jql, select_backlog_board,
-    should_discover_story_points, sprint_issues, story_points_field_for_load,
-    story_points_field_id, story_points_warning, submit_failure, submit_ordered_changes,
-    text_search_jql, to_ticket, to_work_item, update_payload, velocity_average, velocity_report,
+    discover_story_points, is_ticket_number_query, issue_fields, issue_key_jql, issue_picker_keys,
+    move_payload, options_from_values, rank_payload, same_jira_content, search_jql,
+    select_backlog_board, should_discover_story_points, sprint_issues, story_points_field_for_load,
+    story_points_field_id, story_points_warning, submit_failure, submit_ordered_changes, to_ticket,
+    to_work_item, to_work_item_with_subtasks, update_payload, velocity_average, velocity_report,
 };
 use crate::{
     app_settings::AppSettings,
@@ -69,15 +69,21 @@ fn added(key: &str, kind: TicketKind, parent_key: Option<&str>) -> TicketChange 
 }
 
 #[test]
-fn jira_search_handles_recent_results_text_and_exact_keys() {
-    assert_eq!(search_jql(""), "updated >= -90d ORDER BY updated DESC");
-    assert!(search_jql("checkout words").contains("summary ~"));
-    assert!(search_jql("kan").contains("project = \"KAN\""));
-    assert!(text_search_jql("quant").contains("summary ~ \"quant*\""));
-    assert!(text_search_jql("cart quant").contains("summary ~ \"cart* quant*\""));
-    let exact = search_jql("OPS-42");
+fn jira_search_scopes_free_text_but_not_issue_keys() {
+    assert_eq!(
+        search_jql("", Some("FIN")),
+        "project = \"FIN\" AND updated >= -90d ORDER BY updated DESC"
+    );
+    assert!(search_jql("checkout words", Some("FIN")).starts_with("project = \"FIN\" AND"));
+    assert!(search_jql("kan", Some("FIN")).contains("summary ~ \"kan*\""));
+    let exact = search_jql("OPS-42", Some("FIN"));
     assert!(exact.contains("key = \"OPS-42\""));
+    assert!(!exact.contains("project ="));
     assert!(exact.ends_with("ORDER BY updated DESC"));
+    assert_eq!(
+        issue_key_jql("FIN-1000"),
+        "key = \"FIN-1000\" ORDER BY updated DESC"
+    );
 }
 
 #[test]
@@ -680,6 +686,33 @@ fn backlog_work_items_parse_numeric_story_points() {
 }
 
 #[test]
+fn sprint_work_items_include_embedded_subtasks_when_jira_omits_them() {
+    let (parent, subtasks) = to_work_item_with_subtasks(
+        JiraIssue {
+            key: "FIN-1".into(),
+            fields: json!({
+                "summary": "Parent work",
+                "subtasks": [{
+                    "key": "FIN-2",
+                    "fields": {
+                        "summary": "Child work",
+                        "issuetype": { "name": "Sub-task" },
+                        "status": { "name": "To Do" }
+                    }
+                }]
+            }),
+        },
+        None,
+    );
+
+    assert_eq!(parent.key, "FIN-1");
+    assert_eq!(subtasks.len(), 1);
+    assert_eq!(subtasks[0].key, "FIN-2");
+    assert_eq!(subtasks[0].parent_key.as_deref(), Some("FIN-1"));
+    assert_eq!(subtasks[0].parent_title.as_deref(), Some("Parent work"));
+}
+
+#[test]
 fn backlog_warns_when_loaded_tickets_lack_story_points() {
     let snapshot = crate::store::work_items::BacklogSnapshot {
         board_name: "Finery".into(),
@@ -1090,4 +1123,61 @@ fn sprint_loading_uses_agile_offset_pagination_across_pages() {
             .iter()
             .all(|request| !request.contains("nextPageToken"))
     );
+}
+
+#[test]
+fn backlog_loading_includes_embedded_subtasks() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        let size = stream.read(&mut request).unwrap();
+        let body = json!({
+            "issues": [{
+                "key": "FIN-1",
+                "fields": {
+                    "summary": "Parent",
+                    "subtasks": [{
+                        "key": "FIN-2",
+                        "fields": { "summary": "Child", "issuetype": { "name": "Sub-task" } }
+                    }]
+                }
+            }],
+            "isLast": true,
+            "startAt": 0,
+            "maxResults": 100,
+            "total": 1
+        })
+        .to_string();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+        String::from_utf8_lossy(&request[..size]).into_owned()
+    });
+
+    let items = board_backlog(
+        &reqwest::blocking::Client::new(),
+        &base_url,
+        "user@example.com",
+        "token",
+        42,
+        None,
+    )
+    .unwrap();
+    let request = server.join().unwrap();
+
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item.key.as_str())
+            .collect::<Vec<_>>(),
+        ["FIN-1", "FIN-2"]
+    );
+    assert_eq!(items[1].parent_key.as_deref(), Some("FIN-1"));
+    assert!(request.contains("/rest/agile/1.0/board/42/backlog"));
 }

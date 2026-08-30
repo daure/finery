@@ -21,7 +21,7 @@ use tuicore::{
 };
 
 use crate::{
-    app_settings::BacklogRunwaySettings,
+    app_settings::{BacklogFilter, BacklogRunwaySettings},
     service::AppService,
     store::work_items::{
         BacklogSnapshot, RankPlan, VelocityReport, VelocitySprint, apply_capacity,
@@ -29,9 +29,11 @@ use crate::{
     },
 };
 
+#[cfg(test)]
+use super::components::backlog_tree;
 use super::components::{
     BacklogDestination, BacklogQuickMenu, BacklogQuickMenuEvent, BacklogSectionEvent, BacklogTree,
-    backlog_tree,
+    backlog_tree_with_filters,
 };
 
 type BacklogQuickMenuLayer = DialogLayer<BacklogTree, BacklogQuickMenu>;
@@ -235,6 +237,12 @@ impl BacklogPage {
         let move_locked = Rc::new(Cell::new(false));
         let velocity_dialog_close_requested = Rc::new(Cell::new(false));
         let settings_revision = service.settings_revision();
+        let filters = service
+            .settings()
+            .read()
+            .expect("settings lock poisoned")
+            .backlog_filters
+            .clone();
         Self {
             service,
             sender,
@@ -245,6 +253,7 @@ impl BacklogPage {
                 section_sender.clone(),
                 move_locked.clone(),
                 Rc::clone(&velocity_dialog_close_requested),
+                filters,
             ),
             loading_view: loading_view(),
             loading: false,
@@ -577,6 +586,11 @@ impl BacklogPage {
                         self.reload();
                     }
                 }
+                BacklogSectionEvent::FiltersChanged(selected) => {
+                    self.set_filters(selected);
+                    self.focus_backlog_data(ctx);
+                }
+                BacklogSectionEvent::FiltersSubmitted => self.focus_backlog_data(ctx),
                 BacklogSectionEvent::OpenVelocity => self.open_velocity_dialog(ctx),
                 BacklogSectionEvent::OpenReports => {
                     self.service.open_jira_board_page(Some("reports"));
@@ -1054,6 +1068,16 @@ impl BacklogPage {
         self.load(false, false);
         true
     }
+
+    fn set_filters(&mut self, selected: Vec<BacklogFilter>) {
+        let settings = self.service.settings();
+        let mut updated = settings.read().expect("settings lock poisoned").clone();
+        updated.backlog_filters.set_selected(selected);
+        let filters = updated.backlog_filters.clone();
+        self.service.save_settings(updated);
+        self.settings_revision = self.service.settings_revision();
+        self.view.base_mut().base_mut().set_filters(filters);
+    }
 }
 
 pub(super) fn recalculate_capacity(
@@ -1323,9 +1347,10 @@ fn backlog_view(
     section_sender: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
     velocity_dialog_close_requested: Rc<Cell<bool>>,
+    filters: crate::app_settings::BacklogFilterSettings,
 ) -> BacklogView {
     let quick_menu = DialogLayer::new(
-        backlog_tree(snapshot, section_sender, move_locked.clone()),
+        backlog_tree_with_filters(snapshot, section_sender, move_locked.clone(), filters),
         BacklogQuickMenu::new(move_locked),
     )
     .active(false)

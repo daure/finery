@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 
 use super::{
-    AppSettings, BACKLOG_FIXED_SPRINT_CAPACITY_SETTING, BACKLOG_FIXED_TICKET_SIZE_SETTING,
-    BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING, BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING,
-    BACKLOG_USE_JIRA_VELOCITY_SETTING, COMPOSER_ADD_CHILD_KEY_SETTING,
-    COMPOSER_ADD_SIBLING_KEY_SETTING, COMPOSER_COMMIT_KEY_SETTING,
+    AppSettings, BACKLOG_FILTERS_SETTING, BACKLOG_FIXED_SPRINT_CAPACITY_SETTING,
+    BACKLOG_FIXED_TICKET_SIZE_SETTING, BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING,
+    BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING, BACKLOG_USE_JIRA_VELOCITY_SETTING,
+    COMPOSER_ADD_CHILD_KEY_SETTING, COMPOSER_ADD_SIBLING_KEY_SETTING, COMPOSER_COMMIT_KEY_SETTING,
     COMPOSER_CREATE_SUBMIT_KEY_SETTING, COMPOSER_DESCRIPTION_FOCUS_KEY_SETTING,
     COMPOSER_DESCRIPTION_READER_KEY_SETTING, COMPOSER_ISSUE_TYPE_KEY_SETTING,
-    COMPOSER_VIEW_KEY_SETTING, JIRA_STORY_POINTS_BOARD_ID_SETTING,
-    JIRA_STORY_POINTS_FIELD_ID_SETTING, RECENT_TICKETS_LIMIT_SETTING, SPEED_READER_WPM_SETTING,
+    COMPOSER_VIEW_KEY_SETTING, JIRA_COMPANY_MANAGED_URLS_SETTING,
+    JIRA_STORY_POINTS_BOARD_ID_SETTING, JIRA_STORY_POINTS_FIELD_ID_SETTING,
+    RECENT_TICKETS_LIMIT_SETTING, SPEED_READER_WPM_SETTING,
 };
 
 #[test]
@@ -51,6 +52,22 @@ fn story_points_field_id_round_trips_through_settings_values() {
 }
 
 #[test]
+fn company_managed_url_setting_round_trips_through_settings_values() {
+    let settings = AppSettings::resolve(&HashMap::from([(
+        JIRA_COMPANY_MANAGED_URLS_SETTING.into(),
+        "true".into(),
+    )]))
+    .unwrap();
+
+    assert!(settings.jira_company_managed_urls);
+    assert!(
+        settings
+            .values()
+            .contains(&(JIRA_COMPANY_MANAGED_URLS_SETTING, "true".into()))
+    );
+}
+
+#[test]
 fn jira_issue_url_uses_the_configured_site_and_trims_trailing_slashes() {
     let settings = AppSettings {
         jira_base_url: "https://finery.atlassian.net///".into(),
@@ -79,6 +96,14 @@ fn jira_board_url_uses_the_configured_project_and_board() {
     assert_eq!(
         settings.jira_board_url(None).as_deref(),
         Some("https://finery.atlassian.net/jira/software/projects/FIN/boards/42")
+    );
+    let company_managed = AppSettings {
+        jira_company_managed_urls: true,
+        ..settings.clone()
+    };
+    assert_eq!(
+        company_managed.jira_board_url(Some("reports")).as_deref(),
+        Some("https://finery.atlassian.net/jira/software/c/projects/FIN/boards/42/reports")
     );
     assert_eq!(
         settings.jira_releases_url().as_deref(),
@@ -121,6 +146,26 @@ fn backlog_runway_settings_round_trip_and_reject_invalid_values() {
     .unwrap();
     assert_eq!(defaults.backlog_runway.fixed_sprint_capacity, 20.0);
     assert_eq!(defaults.backlog_runway.sprint_tolerance_percent, 20);
+}
+
+#[test]
+fn backlog_filters_round_trip_in_their_display_order() {
+    let settings = AppSettings::resolve(&HashMap::from([(
+        BACKLOG_FILTERS_SETTING.into(),
+        "hide_unestimated,hide_done,unknown,hide_estimated".into(),
+    )]))
+    .unwrap();
+
+    assert_eq!(
+        settings
+            .values()
+            .into_iter()
+            .find(|(key, _)| *key == BACKLOG_FILTERS_SETTING),
+        Some((
+            BACKLOG_FILTERS_SETTING,
+            "hide_done,hide_estimated,hide_unestimated".into()
+        ))
+    );
 }
 
 #[test]

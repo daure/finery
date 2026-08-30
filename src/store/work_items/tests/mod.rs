@@ -115,6 +115,15 @@ fn loaded_story_point_average_uses_backlog_and_sprint_tickets() {
 }
 
 #[test]
+fn loaded_story_point_average_rounds_to_one_decimal_place() {
+    let mut snapshot = snapshot();
+    snapshot.sprints.clear();
+    snapshot.work_items = vec![work_item("FIN-1", Some(3.932_423_532))];
+
+    assert_eq!(loaded_story_point_average(&snapshot), Some(3.9));
+}
+
+#[test]
 fn sprint_health_marks_more_than_twenty_percent_over_capacity() {
     let mut snapshot = snapshot();
 
@@ -230,4 +239,38 @@ fn capacity_without_an_assumption_keeps_all_bug_loads() {
     let runway = snapshot.runway.as_ref().unwrap();
     assert_eq!(runway.tickets[0].effective_points, 0.0);
     assert!(!runway.tickets[0].assumed);
+}
+
+#[test]
+fn capacity_never_assumes_missing_subtask_story_points() {
+    let mut snapshot = snapshot();
+    snapshot.sprints[0].work_items = vec![
+        WorkItem {
+            kind: "Subtask".into(),
+            ..work_item("FIN-10", None)
+        },
+        WorkItem {
+            kind: "Sub-task".into(),
+            ..work_item("FIN-11", None)
+        },
+    ];
+    snapshot.work_items = vec![WorkItem {
+        kind: "Sub-task".into(),
+        ..work_item("FIN-1", None)
+    }];
+
+    apply_capacity(
+        &mut snapshot,
+        20.0,
+        Some((3.9, true)),
+        RunwayCapacitySource::Fixed,
+        20,
+    );
+
+    let capacity = snapshot.sprints[0].capacity.as_ref().unwrap();
+    assert_eq!(capacity.effective_points, 0.0);
+    assert_eq!(capacity.assumed_points, 0.0);
+    let runway_ticket = snapshot.runway.as_ref().unwrap().tickets.first().unwrap();
+    assert_eq!(runway_ticket.effective_points, 0.0);
+    assert!(!runway_ticket.assumed);
 }

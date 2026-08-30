@@ -127,6 +127,7 @@ fn ticket_row(state: &ComposerState, change: &TicketChange) -> Option<TicketRow>
             kind: ticket_kind(ticket.kind),
             priority: ticket.priority.clone(),
             status: ticket.status.clone(),
+            done: ticket.status.eq_ignore_ascii_case("done"),
             assignee: ticket.assignee.clone(),
             story_points: None,
             show_story_points: false,

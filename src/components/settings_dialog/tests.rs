@@ -49,6 +49,21 @@ fn board_changes_preserve_manual_story_points_field() {
 }
 
 #[test]
+fn company_managed_url_changes_apply_to_live_settings() {
+    let service = AppService::for_tests();
+    let settings = service.settings();
+    let dialog = SettingsDialog::new(settings.clone(), service);
+    dialog
+        .changes
+        .borrow_mut()
+        .push(SettingChange::JiraCompanyManagedUrls(true));
+
+    dialog.apply_changes(&mut EventCtx::default());
+
+    assert!(settings.read().unwrap().jira_company_managed_urls);
+}
+
+#[test]
 fn backlog_runway_changes_apply_to_live_settings() {
     let service = AppService::for_tests();
     let settings = service.settings();

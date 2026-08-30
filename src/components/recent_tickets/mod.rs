@@ -391,6 +391,7 @@ fn recent_ticket_row(
             kind: work_item_kind(&ticket.kind),
             priority: ticket.priority,
             status: ticket.status,
+            done: ticket.done,
             assignee: ticket.assignee,
             story_points: ticket.story_points.or(estimated_story_points),
             show_story_points: story_points_configured,

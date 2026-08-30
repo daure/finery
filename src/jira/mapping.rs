@@ -53,12 +53,39 @@ pub(super) fn to_ticket(issue: JiraIssue) -> Ticket {
 }
 
 pub(super) fn to_work_item(issue: JiraIssue, story_points_field_id: Option<&str>) -> WorkItem {
-    let field = |name: &str| issue.fields.get(name).unwrap_or(&Value::Null);
+    to_work_item_fields(&issue.key, &issue.fields, story_points_field_id)
+}
+
+pub(super) fn to_work_item_with_subtasks(
+    issue: JiraIssue,
+    story_points_field_id: Option<&str>,
+) -> (WorkItem, Vec<WorkItem>) {
+    let work_item = to_work_item_fields(&issue.key, &issue.fields, story_points_field_id);
+    let subtasks = issue
+        .fields
+        .get("subtasks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|subtask| {
+            let key = subtask.get("key")?.as_str()?;
+            let fields = subtask.get("fields")?;
+            let mut child = to_work_item_fields(key, fields, story_points_field_id);
+            child.parent_key = Some(work_item.key.clone());
+            child.parent_title = Some(work_item.title.clone());
+            Some(child)
+        })
+        .collect();
+    (work_item, subtasks)
+}
+
+fn to_work_item_fields(key: &str, fields: &Value, story_points_field_id: Option<&str>) -> WorkItem {
+    let field = |name: &str| fields.get(name).unwrap_or(&Value::Null);
     let (parent_key, parent_title) = parent_metadata(field("parent"));
     let subtask_progress = subtask_progress(field("subtasks"));
     WorkItem {
-        key: issue.key.clone(),
-        title: field("summary").as_str().unwrap_or(&issue.key).into(),
+        key: key.into(),
+        title: field("summary").as_str().unwrap_or(key).into(),
         kind: named_field(field("issuetype")).unwrap_or_else(|| "Issue".into()),
         status: named_field(field("status")).unwrap_or_default(),
         done: field("status")
@@ -172,30 +199,35 @@ pub(super) fn ticket_kind_name(kind: TicketKind) -> &'static str {
     }
 }
 
-pub(super) fn search_jql(query: &str) -> String {
+pub(super) fn search_jql(query: &str, default_project: Option<&str>) -> String {
     let query = query.trim();
-    if query.is_empty() {
-        return "updated >= -90d ORDER BY updated DESC".into();
-    }
-    let escaped = query.replace('\\', "\\\\").replace('"', "\\\"");
-    let text = wildcard_text(query);
     if looks_like_key(query) {
+        let escaped = escape_jql(query);
+        let text = wildcard_text(query);
         format!(
             "(key = \"{escaped}\" OR summary ~ \"{text}\" OR text ~ \"{text}\") ORDER BY updated DESC"
         )
-    } else if looks_like_project_key(query) {
-        format!(
-            "(project = \"{}\" OR summary ~ \"{text}\" OR text ~ \"{text}\") ORDER BY updated DESC",
-            escaped.to_ascii_uppercase()
-        )
     } else {
-        text_search_jql(query)
+        let project = default_project
+            .map(str::trim)
+            .filter(|project| !project.is_empty())
+            .map(|project| format!("project = \"{}\" AND ", escape_jql(project)))
+            .unwrap_or_default();
+        if query.is_empty() {
+            format!("{project}updated >= -90d ORDER BY updated DESC")
+        } else {
+            let text = wildcard_text(query);
+            format!("{project}(summary ~ \"{text}\" OR text ~ \"{text}\") ORDER BY updated DESC")
+        }
     }
 }
 
-pub(super) fn text_search_jql(query: &str) -> String {
-    let text = wildcard_text(query);
-    format!("(summary ~ \"{text}\" OR text ~ \"{text}\") ORDER BY updated DESC")
+pub(super) fn issue_key_jql(key: &str) -> String {
+    format!("key = \"{}\" ORDER BY updated DESC", escape_jql(key.trim()))
+}
+
+fn escape_jql(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn wildcard_text(query: &str) -> String {
@@ -204,14 +236,6 @@ fn wildcard_text(query: &str) -> String {
         .map(|term| format!("{}*", term.replace('\\', "\\\\").replace('"', "\\\"")))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-pub(super) fn looks_like_project_key(query: &str) -> bool {
-    !query.is_empty()
-        && query.len() <= 10
-        && query
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric())
 }
 
 fn looks_like_key(query: &str) -> bool {

@@ -12,6 +12,7 @@ pub(crate) struct WorkItemRow {
     pub kind: WorkItemKind,
     pub priority: String,
     pub status: String,
+    pub done: bool,
     pub assignee: String,
     pub story_points: Option<f64>,
     pub show_story_points: bool,
@@ -55,7 +56,8 @@ pub(crate) fn work_item_text(row: &WorkItemRow, number_query: Option<&str>) -> T
     } else {
         theme.text_fg()
     };
-    let mut metadata = ticket_key_spans(&row.key, number_query, Style::default().fg(text_color));
+    let key_style = ticket_key_style(row, Style::default().fg(text_color));
+    let mut metadata = ticket_key_spans(&row.key, number_query, key_style);
     metadata.extend([
         Span::styled(" • ", Style::default().fg(text_color)),
         crate::components::avatar::bubble_span(&row.assignee),
@@ -140,9 +142,12 @@ pub(crate) fn work_item_title_with_key_line_with_match(
             Style::default().fg(priority_color),
         ),
     ];
-    let key_style = Style::default()
-        .fg(theme.muted_fg())
-        .add_modifier(Modifier::BOLD);
+    let key_style = ticket_key_style(
+        row,
+        Style::default()
+            .fg(theme.muted_fg())
+            .add_modifier(Modifier::BOLD),
+    );
     if text_query.is_some() {
         spans.extend(search_match_spans(&row.key, text_query, key_style));
     } else {
@@ -155,6 +160,12 @@ pub(crate) fn work_item_title_with_key_line_with_match(
         Style::default().fg(text_color).add_modifier(Modifier::BOLD),
     ));
     Line::from(spans)
+}
+
+fn ticket_key_style(row: &WorkItemRow, style: Style) -> Style {
+    row.done
+        .then(|| style.add_modifier(Modifier::CROSSED_OUT))
+        .unwrap_or(style)
 }
 
 fn search_match_spans(text: &str, query: Option<&str>, style: Style) -> Vec<Span<'static>> {
@@ -235,6 +246,9 @@ pub(crate) fn story_points_label(row: &WorkItemRow) -> String {
     let prefix = (row.story_points_estimated && row.story_points_from_average)
         .then_some("~")
         .unwrap_or("");
+    if row.story_points_estimated && row.story_points_from_average {
+        return format!("{prefix}{points:.1}");
+    }
     format!("{prefix}{points}")
 }
 

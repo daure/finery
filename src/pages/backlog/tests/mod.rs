@@ -7,7 +7,7 @@ use tuicore::{
 };
 
 use super::{
-    components::backlog_tree,
+    components::{backlog_tree, backlog_tree_with_filters},
     page::{
         BacklogPage, MAX_UNCONFIRMED_TRANSFER_REFRESHES, PendingRank, PendingRankReconciliation,
         PendingTransfer, PendingTransferReconciliation, move_work_items_to_edge,
@@ -16,7 +16,7 @@ use super::{
         transfer_reconciliation_highlight,
     },
 };
-use crate::app_settings::BacklogRunwaySettings;
+use crate::app_settings::{BacklogFilter, BacklogFilterSettings, BacklogRunwaySettings};
 use crate::store::work_items::{
     BacklogSnapshot, RunwayCapacitySource, Sprint, SubtaskProgress, WorkItem, apply_capacity,
     rank_plan,
@@ -164,6 +164,69 @@ fn backlog_header_places_web_menu_before_the_right_aligned_refresh_button() {
 
     assert!(cell_position(&header, "Web") < cell_position(&header, "Velocity"));
     assert!(cell_position(&header, "Velocity") < cell_position(&header, "Refresh"));
+    assert!(cell_position(&header, "Refresh") < cell_position(&header, "Filter"));
+}
+
+#[test]
+fn backlog_filters_show_matching_tickets_and_hide_runway_gutters() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    let unpointed_parent = work_item("FIN-8", "Unpointed parent");
+    let unpointed_subtask = WorkItem {
+        kind: "Sub-task".into(),
+        parent_key: Some("FIN-8".into()),
+        story_points: Some(3.0),
+        ..work_item("FIN-9", "Hidden subtask")
+    };
+    let bug = WorkItem {
+        kind: "Bug".into(),
+        ..work_item("FIN-10", "Unpointed bug")
+    };
+    let bug_subtask = WorkItem {
+        kind: "Sub-task".into(),
+        parent_key: Some("FIN-10".into()),
+        ..work_item("FIN-11", "Visible bug subtask")
+    };
+    let pointed_story = WorkItem {
+        story_points: Some(8.0),
+        ..work_item("FIN-12", "Pointed story")
+    };
+    snapshot.work_items = vec![
+        unpointed_parent,
+        unpointed_subtask,
+        bug,
+        bug_subtask,
+        pointed_story,
+    ];
+    apply_capacity(
+        &mut snapshot,
+        9.1,
+        Some((3.0, false)),
+        RunwayCapacitySource::Fixed,
+        20,
+    );
+    let mut filters = BacklogFilterSettings::default();
+    filters.set_selected(vec![BacklogFilter::Pointed]);
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree_with_filters(&snapshot, sender, Default::default(), filters);
+    let area = Rect::new(0, 0, 100, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(!text.contains("Unpointed parent"));
+    assert!(!text.contains("Hidden subtask"));
+    assert!(text.contains("Unpointed bug"));
+    assert!(text.contains("Visible bug subtask"));
+    assert!(text.contains("Pointed story"));
+    assert!(!text.contains("┃"));
 }
 
 #[test]
@@ -234,6 +297,27 @@ fn backlog_velocity_is_focusable_with_shift_v() {
         receiver.try_recv(),
         Ok(super::components::BacklogSectionEvent::OpenVelocity)
     ));
+}
+
+#[test]
+fn backlog_filter_is_focusable_with_shift_f() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot(), sender, Default::default());
+    let area = Rect::new(0, 0, 100, 16);
+    let mut layout = LayoutCtx::new();
+    view.layout(area, &mut layout);
+
+    let filter = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.path == TreePath::from_keys([ChildKey::new("filters")])
+                && target.id.as_str() == "field"
+        })
+        .unwrap();
+
+    assert_eq!(filter.hotkey_sequences, ["shift+f"]);
 }
 
 #[test]
@@ -394,12 +478,83 @@ fn unified_backlog_tree_shows_collapsed_sprints_and_expanded_backlog() {
     }
     assert!(text.contains(" Sprint 7 • 18 Jun – 2 Jul"));
     assert!(text.contains(" Sprint 8 • 3 Jul – 17 Jul"));
-    assert!(text.contains(" Backlog • 1 items"));
+    assert!(text.contains(" Backlog • 1(1) items"));
     assert!(!text.contains("Finery"));
     assert!(!text.contains("Ship sprint work"));
     assert!(text.contains("Plan next sprint"));
     assert!(text.contains("FIN-8 Plan next sprint"));
     assert!(text.contains("- • @-- • To Do"));
+}
+
+#[test]
+fn expanded_sprint_shows_subtasks_under_their_parent() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let mut snapshot = snapshot();
+    let mut subtask = work_item("FIN-9", "Finish sprint work");
+    subtask.kind = "Sub-task".into();
+    subtask.parent_key = Some("FIN-7".into());
+    subtask.parent_title = Some("Ship sprint work".into());
+    snapshot.sprints[0].work_items.push(subtask);
+    let mut view = backlog_tree(&snapshot, sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    view.dispatch_focus(
+        &data_focus_target(),
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+    view.highlight("section:sprint-7");
+    view.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Right)),
+        &mut EventCtx::new(AnimationSettings::default()),
+    );
+
+    let area = Rect::new(0, 0, 80, 16);
+    view.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            view.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(text.contains("FIN-7 Ship sprint work"));
+    assert!(text.contains("FIN-9 Finish sprint work"));
+    assert!(text.contains("1(2) items"));
+}
+
+#[test]
+fn subtasks_cannot_enter_reorder_mode() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let mut snapshot = snapshot();
+    let mut subtask = work_item("FIN-9", "Finish sprint work");
+    subtask.kind = "Sub-task".into();
+    subtask.parent_key = Some("FIN-7".into());
+    snapshot.sprints[0].work_items.push(subtask);
+    let mut view = backlog_tree(&snapshot, sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    view.dispatch_focus(
+        &data_focus_target(),
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+    view.highlight("ticket:FIN-9");
+
+    view.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('m'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::new(AnimationSettings::default()),
+    );
+
+    assert!(!view.is_reordering_for_test());
 }
 
 #[test]
@@ -615,7 +770,7 @@ fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
     assert!(text.contains("3 • @AD • To Do"));
     let lines = rendered_lines(&terminal, area);
     let capacity_line = lines.iter().find(|line| line.contains("✓ 1/1")).unwrap();
-    assert!(capacity_line.contains(" 18/20 pts • ✓ 1/1 • 1 items"));
+    assert!(capacity_line.contains(" 18/20 pts • ✓ 1/1 • 1(1) items"));
     assert_eq!(cell_position(capacity_line, ""), Some(2));
     assert!(!text.contains("assumed"));
     let ticket_position = |key| {
@@ -681,7 +836,7 @@ fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
     }
     assert!(text.contains("Velocity"));
     assert!(text.contains(" Sprint 7 • 18 Jun – 2 Jul"));
-    assert!(text.contains(" ~5.4/20 pts • ✓ 1/1 • 1 items"));
+    assert!(text.contains(" ~5.4/20 pts • ✓ 1/1 • 1(1) items"));
     assert!(text.contains("5.4 • @AD • To Do"));
 
     snapshot.sprints[0].work_items[0].story_points = None;
@@ -701,7 +856,7 @@ fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
         })
         .unwrap();
     let text = rendered_lines(&terminal, area).concat();
-    assert!(text.contains(" ~5.4/20 pts • 󰄰 0/1 • 1 items"));
+    assert!(text.contains(" ~5.4/20 pts • 󰄰 0/1 • 1(1) items"));
 
     apply_capacity(
         &mut snapshot,
@@ -719,7 +874,7 @@ fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
         })
         .unwrap();
     let text = rendered_lines(&terminal, area).concat();
-    assert!(text.contains(" 5.4/20 pts • 󰄰 0/1 • 1 items"));
+    assert!(text.contains(" 5.4/20 pts • 󰄰 0/1 • 1(1) items"));
     assert!(!text.contains("~5.4/20 pts"));
 }
 
@@ -771,7 +926,7 @@ fn sprint_estimation_coverage_excludes_bugs_and_counts_all_sprint_items() {
         })
         .unwrap();
     let text = rendered_lines(&terminal, area).concat();
-    assert!(text.contains(" ~10/20 pts • ✓ 1/1 • 4 items"));
+    assert!(text.contains(" ~7/20 pts • ✓ 1/1 • 4(4) items"));
 
     let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
     tree.dispatch_focus(
@@ -824,7 +979,7 @@ fn sprint_load_marks_zero_valued_average_assumptions() {
     assert!(
         rendered_lines(&terminal, area)
             .concat()
-            .contains(" ~0/20 pts • 󰄰 0/1 • 1 items")
+            .contains(" ~0/20 pts • 󰄰 0/1 • 1(1) items")
     );
 }
 

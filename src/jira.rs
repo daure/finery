@@ -251,18 +251,22 @@ struct JiraUser {
 pub(crate) fn search(settings: &AppSettings, query: &str) -> Result<Vec<Ticket>, String> {
     let (client, base_url, email, token) = configured_client(settings)?;
     if is_ticket_number_query(query) {
+        let project = settings.jira_default_project.trim();
+        if !project.is_empty() {
+            let jql = issue_key_jql(&format!("{project}-{}", query.trim()));
+            let response = request_search(&client, &base_url, &email, &token, &jql)
+                .map_err(|(_, error)| error)?;
+            return Ok(response.issues.into_iter().map(to_ticket).collect());
+        }
         return search_ticket_number(&client, &base_url, &email, &token, query.trim());
     }
-    let response = match request_search(&client, &base_url, &email, &token, &search_jql(query)) {
-        Err((Some(400), _)) if looks_like_project_key(query.trim()) => request_search(
-            &client,
-            &base_url,
-            &email,
-            &token,
-            &text_search_jql(query.trim()),
-        ),
-        result => result,
-    }
+    let response = request_search(
+        &client,
+        &base_url,
+        &email,
+        &token,
+        &search_jql(query, Some(settings.jira_default_project.trim())),
+    )
     .map_err(|(_, error)| error)?;
     Ok(response.issues.into_iter().map(to_ticket).collect())
 }
@@ -893,6 +897,7 @@ fn sprint_issues(
 ) -> Result<Vec<WorkItem>, String> {
     let mut start_at = 0;
     let mut work_items = Vec::new();
+    let mut embedded_subtasks = Vec::new();
     loop {
         let query = vec![
             ("startAt", start_at.to_string()),
@@ -910,12 +915,13 @@ fn sprint_issues(
         let page = response_json::<AgileIssuePage>(response)?;
         let loaded = page.issues.len();
         let complete = backlog_page_complete(&page, loaded);
-        work_items.extend(
-            page.issues
-                .into_iter()
-                .map(|issue| to_work_item(issue, story_points_field_id)),
-        );
+        for issue in page.issues {
+            let (work_item, subtasks) = to_work_item_with_subtasks(issue, story_points_field_id);
+            work_items.push(work_item);
+            embedded_subtasks.extend(subtasks);
+        }
         if complete {
+            append_embedded_subtasks(&mut work_items, embedded_subtasks);
             return Ok(work_items);
         }
         start_at = page.start_at.saturating_add(page.max_results.max(loaded));
@@ -932,6 +938,7 @@ fn board_backlog(
 ) -> Result<Vec<WorkItem>, String> {
     let mut start_at = 0;
     let mut work_items = Vec::new();
+    let mut embedded_subtasks = Vec::new();
     loop {
         let response = client
             .get(format!(
@@ -944,16 +951,29 @@ fn board_backlog(
         let page = response_json::<AgileIssuePage>(response)?;
         let loaded = page.issues.len();
         let complete = backlog_page_complete(&page, loaded);
-        work_items.extend(
-            page.issues
-                .into_iter()
-                .map(|issue| to_work_item(issue, story_points_field_id)),
-        );
+        for issue in page.issues {
+            let (work_item, subtasks) = to_work_item_with_subtasks(issue, story_points_field_id);
+            work_items.push(work_item);
+            embedded_subtasks.extend(subtasks);
+        }
         if complete {
+            append_embedded_subtasks(&mut work_items, embedded_subtasks);
             return Ok(work_items);
         }
         start_at = page.start_at.saturating_add(page.max_results.max(loaded));
     }
+}
+
+fn append_embedded_subtasks(work_items: &mut Vec<WorkItem>, subtasks: Vec<WorkItem>) {
+    let loaded_keys = work_items
+        .iter()
+        .map(|item| item.key.clone())
+        .collect::<HashSet<_>>();
+    work_items.extend(
+        subtasks
+            .into_iter()
+            .filter(|subtask| !loaded_keys.contains(&subtask.key)),
+    );
 }
 
 fn backlog_page_complete(page: &AgileIssuePage, loaded: usize) -> bool {

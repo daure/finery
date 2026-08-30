@@ -11,6 +11,7 @@ pub(crate) const JIRA_EMAIL_SETTING: &str = "jira.email";
 pub(crate) const JIRA_API_TOKEN_SETTING: &str = "jira.api_token";
 pub(crate) const JIRA_DEFAULT_PROJECT_SETTING: &str = "jira.default_project";
 pub(crate) const JIRA_DEFAULT_BOARD_SETTING: &str = "jira.default_board";
+pub(crate) const JIRA_COMPANY_MANAGED_URLS_SETTING: &str = "jira.company_managed_urls";
 pub(crate) const JIRA_STORY_POINTS_FIELD_ID_SETTING: &str = "jira.story_points_field_id";
 pub(crate) const JIRA_STORY_POINTS_BOARD_ID_SETTING: &str = "jira.story_points_board_id";
 pub(crate) const JIRA_STORY_POINTS_DISCOVERY_COMPLETE_SETTING: &str =
@@ -22,6 +23,7 @@ pub(crate) const BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING: &str = "backlog.use_av
 pub(crate) const BACKLOG_FIXED_TICKET_SIZE_SETTING: &str = "backlog.fixed_ticket_size";
 pub(crate) const BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING: &str =
     "backlog.sprint_tolerance_percent";
+pub(crate) const BACKLOG_FILTERS_SETTING: &str = "backlog.filters";
 pub(crate) const SPEED_READER_WPM_SETTING: &str = "reader.wpm";
 pub(crate) const SPEED_READER_BLOCK_DELAY_SETTING: &str = "reader.markdown_block_pause_ms";
 pub(crate) const RECENT_TICKETS_LIMIT_SETTING: &str = "recent_tickets.limit";
@@ -283,10 +285,12 @@ pub(crate) struct AppSettings {
     pub(crate) jira_api_token: String,
     pub(crate) jira_default_project: String,
     pub(crate) jira_default_board: String,
+    pub(crate) jira_company_managed_urls: bool,
     pub(crate) jira_story_points_field_id: String,
     pub(crate) jira_story_points_board_id: String,
     pub(crate) jira_story_points_discovery_complete: bool,
     pub(crate) backlog_runway: BacklogRunwaySettings,
+    pub(crate) backlog_filters: BacklogFilterSettings,
     pub(crate) speed_reader: SpeedReaderSettings,
     pub(crate) recent_tickets_limit: usize,
     pub(crate) composer_keys: ComposerKeyBindings,
@@ -300,10 +304,12 @@ impl Default for AppSettings {
             jira_api_token: String::new(),
             jira_default_project: String::new(),
             jira_default_board: String::new(),
+            jira_company_managed_urls: false,
             jira_story_points_field_id: String::new(),
             jira_story_points_board_id: String::new(),
             jira_story_points_discovery_complete: false,
             backlog_runway: BacklogRunwaySettings::default(),
+            backlog_filters: BacklogFilterSettings::default(),
             speed_reader: SpeedReaderSettings::default(),
             recent_tickets_limit: 15,
             composer_keys: ComposerKeyBindings::default(),
@@ -319,6 +325,83 @@ pub(crate) struct BacklogRunwaySettings {
     pub(crate) use_average_ticket_size: bool,
     pub(crate) fixed_ticket_size: f64,
     pub(crate) sprint_tolerance_percent: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum BacklogFilter {
+    Done,
+    Open,
+    Pointed,
+    Unpointed,
+}
+
+impl BacklogFilter {
+    pub(crate) const ALL: [Self; 4] = [Self::Done, Self::Open, Self::Pointed, Self::Unpointed];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Done => "Done",
+            Self::Open => "Open",
+            Self::Pointed => "Pointed",
+            Self::Unpointed => "Unpointed",
+        }
+    }
+
+    fn setting_value(self) -> &'static str {
+        match self {
+            Self::Done => "hide_done",
+            Self::Open => "hide_not_done",
+            Self::Pointed => "hide_estimated",
+            Self::Unpointed => "hide_unestimated",
+        }
+    }
+
+    fn from_setting_value(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|filter| filter.setting_value() == value)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct BacklogFilterSettings {
+    selected: Vec<BacklogFilter>,
+}
+
+impl BacklogFilterSettings {
+    pub(crate) fn selected(&self) -> &[BacklogFilter] {
+        &self.selected
+    }
+
+    pub(crate) fn set_selected(&mut self, selected: Vec<BacklogFilter>) {
+        self.selected = BacklogFilter::ALL
+            .into_iter()
+            .filter(|filter| selected.contains(filter))
+            .collect();
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        !self.selected.is_empty()
+    }
+
+    fn from_setting_value(value: Option<&String>) -> Self {
+        let selected = value
+            .into_iter()
+            .flat_map(|value| value.split(','))
+            .filter_map(|value| BacklogFilter::from_setting_value(value.trim()))
+            .collect();
+        let mut settings = Self::default();
+        settings.set_selected(selected);
+        settings
+    }
+
+    fn setting_value(&self) -> String {
+        self.selected
+            .iter()
+            .map(|filter| filter.setting_value())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
 }
 
 impl Default for BacklogRunwaySettings {
@@ -352,6 +435,9 @@ impl AppSettings {
                 "JIRA_DEFAULT_PROJECT",
             ),
             jira_default_board: value_or_env(JIRA_DEFAULT_BOARD_SETTING, "JIRA_DEFAULT_BOARD"),
+            jira_company_managed_urls: values
+                .get(JIRA_COMPANY_MANAGED_URLS_SETTING)
+                .is_some_and(|value| value == "true"),
             jira_story_points_field_id: values
                 .get(JIRA_STORY_POINTS_FIELD_ID_SETTING)
                 .cloned()
@@ -393,6 +479,9 @@ impl AppSettings {
                     .filter(|value| *value <= 100)
                     .unwrap_or(defaults.backlog_runway.sprint_tolerance_percent),
             },
+            backlog_filters: BacklogFilterSettings::from_setting_value(
+                values.get(BACKLOG_FILTERS_SETTING),
+            ),
             speed_reader: SpeedReaderSettings {
                 wpm: values
                     .get(SPEED_READER_WPM_SETTING)
@@ -422,6 +511,10 @@ impl AppSettings {
                 self.jira_default_project.clone(),
             ),
             (JIRA_DEFAULT_BOARD_SETTING, self.jira_default_board.clone()),
+            (
+                JIRA_COMPANY_MANAGED_URLS_SETTING,
+                self.jira_company_managed_urls.to_string(),
+            ),
             (
                 JIRA_STORY_POINTS_FIELD_ID_SETTING,
                 self.jira_story_points_field_id.clone(),
@@ -457,6 +550,10 @@ impl AppSettings {
             (
                 BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING,
                 self.backlog_runway.sprint_tolerance_percent.to_string(),
+            ),
+            (
+                BACKLOG_FILTERS_SETTING,
+                self.backlog_filters.setting_value(),
             ),
             (SPEED_READER_WPM_SETTING, self.speed_reader.wpm.to_string()),
             (
@@ -630,7 +727,12 @@ impl AppSettings {
         let project = self.jira_default_project.trim();
         let board = self.jira_default_board.trim();
         (!base_url.is_empty() && !project.is_empty() && !board.is_empty()).then(|| {
-            let url = format!("{base_url}/jira/software/projects/{project}/boards/{board}");
+            let route = if self.jira_company_managed_urls {
+                "c/projects"
+            } else {
+                "projects"
+            };
+            let url = format!("{base_url}/jira/software/{route}/{project}/boards/{board}");
             page.filter(|page| !page.is_empty())
                 .map(|page| format!("{url}/{page}"))
                 .unwrap_or(url)

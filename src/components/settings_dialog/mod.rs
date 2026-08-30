@@ -27,6 +27,7 @@ enum SettingChange {
     JiraApiToken(String),
     JiraDefaultProject(String),
     JiraDefaultBoard(String),
+    JiraCompanyManagedUrls(bool),
     JiraStoryPointsFieldId(String),
     BacklogUseJiraVelocity(bool),
     BacklogJiraVelocitySprints(String),
@@ -55,6 +56,7 @@ impl SettingsDialog {
         let token_changes = Rc::clone(&changes);
         let project_changes = Rc::clone(&changes);
         let board_changes = Rc::clone(&changes);
+        let company_managed_urls_changes = Rc::clone(&changes);
         let story_points_changes = Rc::clone(&changes);
         let velocity_changes = Rc::clone(&changes);
         let velocity_sprints_changes = Rc::clone(&changes);
@@ -130,6 +132,17 @@ impl SettingsDialog {
                             .push(SettingChange::JiraDefaultBoard(value));
                     }),
                 FlexItem::fixed(3),
+            )
+            .child(
+                "jira-company-managed-urls",
+                Toggle::new("Jira project is company-managed")
+                    .checked(values.jira_company_managed_urls)
+                    .on_change(move |value| {
+                        company_managed_urls_changes
+                            .borrow_mut()
+                            .push(SettingChange::JiraCompanyManagedUrls(value));
+                    }),
+                FlexItem::fixed(1),
             )
             .child(
                 "jira-story-points-field-id",
@@ -301,6 +314,10 @@ impl SettingsDialog {
                         settings.jira_default_board = value;
                         settings.invalidate_discovered_story_points();
                     }
+                    changed = true;
+                }
+                SettingChange::JiraCompanyManagedUrls(value) => {
+                    settings.jira_company_managed_urls = value;
                     changed = true;
                 }
                 SettingChange::JiraStoryPointsFieldId(value) => {
