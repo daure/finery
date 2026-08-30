@@ -40,6 +40,7 @@ pub(crate) struct AppService {
     runtime: Arc<Runtime>,
     errors: Arc<Mutex<Vec<String>>>,
     notifications: Arc<Mutex<Vec<tuicore::Notification>>>,
+    jira_reorder: Arc<Mutex<()>>,
     persistence: Sender<PersistenceCommand>,
     composer_sync: Arc<Mutex<ComposerSyncState>>,
     #[cfg(test)]
@@ -253,6 +254,7 @@ impl AppService {
                 runtime,
                 errors,
                 notifications,
+                jira_reorder: Arc::new(Mutex::new(())),
                 persistence,
                 composer_sync,
                 #[cfg(test)]
@@ -289,6 +291,7 @@ impl AppService {
             runtime,
             errors,
             notifications,
+            jira_reorder: Arc::new(Mutex::new(())),
             persistence,
             composer_sync,
             jira_submit: Arc::new(Mutex::new(None)),
@@ -557,6 +560,29 @@ impl AppService {
         jira::search(&settings, query)
     }
 
+    pub(crate) fn search_jira_work_items(&self, query: &str) -> Result<RecentTickets, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        let keys = jira::search(&settings, query).map(|tickets| {
+            tickets
+                .into_iter()
+                .map(|ticket| ticket.key)
+                .collect::<Vec<_>>()
+        })?;
+        let work_items = jira::fetch_recent_work_items(&settings, &keys)?;
+        Ok(RecentTickets {
+            work_items: keys
+                .into_iter()
+                .filter_map(|key| work_items.get(&key).cloned())
+                .collect(),
+            story_points_configured: !settings.jira_story_points_field_id.trim().is_empty(),
+            assumed_story_points: settings.backlog_runway.fixed_ticket_size,
+        })
+    }
+
     pub(crate) fn jira_backlog(&self) -> Result<BacklogSnapshot, String> {
         let settings = self
             .settings
@@ -578,6 +604,10 @@ impl AppService {
     }
 
     pub(crate) fn jira_rank(&self, plan: &RankPlan) -> Result<(), String> {
+        self.with_jira_reorder(|service| service.jira_rank_while_reorder_locked(plan))
+    }
+
+    pub(crate) fn jira_rank_while_reorder_locked(&self, plan: &RankPlan) -> Result<(), String> {
         let settings = self
             .settings
             .read()
@@ -586,7 +616,7 @@ impl AppService {
         jira::rank(&settings, plan)
     }
 
-    pub(crate) fn jira_move_to_sprint(
+    pub(crate) fn jira_move_to_sprint_while_reorder_locked(
         &self,
         sprint_id: u64,
         issue_keys: &[String],
@@ -599,13 +629,47 @@ impl AppService {
         jira::move_to_sprint(&settings, sprint_id, issue_keys)
     }
 
-    pub(crate) fn jira_move_to_backlog(&self, issue_keys: &[String]) -> Result<(), String> {
+    pub(crate) fn jira_move_to_backlog_while_reorder_locked(
+        &self,
+        issue_keys: &[String],
+    ) -> Result<(), String> {
         let settings = self
             .settings
             .read()
             .map_err(|_| "settings lock is unavailable".to_string())?
             .clone();
         jira::move_to_backlog(&settings, issue_keys)
+    }
+
+    pub(crate) fn jira_transfer(
+        &self,
+        sprint_id: Option<u64>,
+        issue_keys: &[String],
+        rank_plan: Option<&RankPlan>,
+    ) -> Result<(), String> {
+        self.with_jira_reorder(|service| {
+            match sprint_id {
+                Some(sprint_id) => {
+                    service.jira_move_to_sprint_while_reorder_locked(sprint_id, issue_keys)?
+                }
+                None => service.jira_move_to_backlog_while_reorder_locked(issue_keys)?,
+            }
+            if let Some(rank_plan) = rank_plan {
+                service.jira_rank_while_reorder_locked(rank_plan)?;
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn with_jira_reorder<T>(
+        &self,
+        operation: impl FnOnce(&Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _guard = self
+            .jira_reorder
+            .lock()
+            .map_err(|_| "Jira reorder lock is unavailable".to_string())?;
+        operation(self)
     }
 
     pub(crate) fn jira_projects(&self) -> Result<Vec<jira::JiraProject>, String> {

@@ -883,11 +883,7 @@ fn typing_a_ticket_number_selects_an_exact_composer_ticket_while_search_is_activ
             &mut ctx,
         );
     }
-    page.dispatch_event(
-        &route,
-        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
-        &mut ctx,
-    );
+    page.dispatch_event(&route, &TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
     for digit in ['1', '4', '2'] {
         page.dispatch_event(
             &route,

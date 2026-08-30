@@ -4,6 +4,7 @@ pub(crate) struct WorkItem {
     pub title: String,
     pub kind: String,
     pub status: String,
+    pub done: bool,
     pub priority: String,
     pub assignee: String,
     pub parent_key: Option<String>,
@@ -26,6 +27,7 @@ pub(crate) struct Sprint {
     pub id: u64,
     pub name: String,
     pub state: String,
+    pub goal: Option<String>,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
     pub work_items: Vec<WorkItem>,
@@ -55,6 +57,7 @@ pub(crate) struct VelocitySprint {
     pub id: u64,
     pub name: String,
     pub completed: f64,
+    pub goal: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +78,7 @@ pub(crate) enum RunwayCapacitySource {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RunwayTicket {
+    pub key: String,
     pub virtual_sprint: usize,
     pub effective_points: f64,
     pub assumed: bool,
@@ -168,6 +172,7 @@ pub(crate) fn apply_capacity(
                 estimated_points += effective_points;
             }
             RunwayTicket {
+                key: item.key.clone(),
                 virtual_sprint,
                 effective_points,
                 assumed,

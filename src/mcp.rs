@@ -1,4 +1,7 @@
-use std::{collections::HashMap, net::SocketAddr};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+};
 
 use rmcp::{
     Json, ServerHandler, ServiceExt,
@@ -14,16 +17,16 @@ use crate::{
     service::{
         AppService,
         composer_service::{
-            ChangeKindView, ChangeSetCatalogView, ChangeSetPatchOperation, ChangeSetPatchResponse,
-            ChangeSetView, ComposerService, RecoveredCreate, ServiceError, SubmitChangeSetResponse,
-            TicketChangeView, TicketKindView, TicketView, Versioned,
+            ChangeSetCatalogView, ChangeSetPatchOperation, ChangeSetPatchResponse, ChangeSetView,
+            ComposerService, RecoveredCreate, ServiceError, SubmitChangeSetResponse, Versioned,
         },
     },
-    store::work_items::{BacklogSnapshot, WorkItem},
+    store::work_items::{BacklogSnapshot, RankPlan, RunwayCapacitySource, WorkItem, rank_plan},
 };
 
-const MCP_INSTRUCTIONS: &str = "Read and edit Finery Composer change sets. get_workspace returns compact active/future sprint tickets, plus the top 50 unplanned Jira tickets in rank order. Full sprint lists are never capped. backlog.unplanned_ticket_limit, backlog.unplanned_total_count, and backlog.unplanned_truncated make that limit explicit. Workspace tickets never include descriptions, include direct-parent metadata and has_children, and include only open Composer change sets. It refreshes Jira baselines for tickets in those open change sets through one batched Jira request. Revisions are optimistic-concurrency tokens: read current data before mutations and send its revision as expected_revision. apply_change_set_patch persists local edits only; it never submits Jira. refresh_change_set refreshes Jira baselines and returns the refreshed canonical change set. recover_submission_attempt clears safely claimed attempts or reconciles marked draft creates only after explicit Jira-key confirmation. submit_change_set is the only Jira submission tool and requires explicit ticket IDs. A submitted ticket cannot be edited or submitted again.";
+const MCP_INSTRUCTIONS: &str = "Read Composer change sets and Jira backlog order. Before mutating a change set, reread it and send its current revision as expected_revision. Before Jira reordering, state the exact move and get explicit user confirmation; reread the workspace afterward. apply_change_set_patch persists local edits only. submit_change_set is the only Composer Jira submission path, requires explicit ticket IDs, and submitted tickets cannot be changed or resubmitted. Recover marked draft creates only with confirmed Jira keys; never retry ambiguous creates.";
 const WORKSPACE_UNPLANNED_TICKET_LIMIT: usize = 50;
+const WORKSPACE_VELOCITY_SPRINT_LIMIT: usize = 10;
 
 #[derive(Clone)]
 struct McpServer {
@@ -79,10 +82,39 @@ struct RecoverSubmissionAttempt {
     recovered_creates: Vec<RecoveredCreate>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PlaceJiraItems {
+    #[schemars(length(min = 1, max = 50))]
+    issue_keys: Vec<String>,
+    destination: JiraDestination,
+    position: JiraPosition,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum JiraDestination {
+    Backlog,
+    Sprint { sprint_id: u64 },
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum JiraPosition {
+    Top,
+    Bottom,
+    Before { issue_key: String },
+    After { issue_key: String },
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SwapJiraItems {
+    first_issue_key: String,
+    second_issue_key: String,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 struct WorkspaceView {
     backlog: WorkspaceBacklogView,
-    change_set_catalog_revision: i64,
     change_sets: Vec<WorkspaceChangeSetView>,
 }
 
@@ -90,11 +122,54 @@ struct WorkspaceView {
 struct WorkspaceBacklogView {
     board_name: String,
     warnings: Vec<String>,
+    story_points_configured: bool,
+    velocity: Option<WorkspaceVelocityView>,
+    capacity_guidance: Option<WorkspaceCapacityGuidanceView>,
     sprints: Vec<WorkspaceSprintView>,
-    unplanned_tickets: Vec<WorkspaceWorkItemView>,
-    unplanned_ticket_limit: usize,
-    unplanned_total_count: usize,
-    unplanned_truncated: bool,
+    unplanned: WorkspaceUnplannedView,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct WorkspaceUnplannedView {
+    total_count: usize,
+    tickets: Vec<WorkspaceWorkItemView>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct WorkspaceVelocityView {
+    average_completed_points: Option<f64>,
+    sprints: Vec<WorkspaceVelocitySprintView>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct WorkspaceVelocitySprintView {
+    name: String,
+    completed_points: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    goal: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct WorkspaceCapacityGuidanceView {
+    capacity: f64,
+    source: String,
+    first_unplanned_capacity_band: Vec<WorkspaceCapacityBandTicketView>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct WorkspaceCapacityBandTicketView {
+    key: String,
+    effective_points: f64,
+    points_source: WorkspacePointsSource,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum WorkspacePointsSource {
+    StoryPoints,
+    FixedAssumption,
+    AverageAssumption,
+    UnestimatedBug,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -102,6 +177,12 @@ struct WorkspaceSprintView {
     id: u64,
     name: String,
     state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    goal: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_date: Option<String>,
     tickets: Vec<WorkspaceWorkItemView>,
 }
 
@@ -111,12 +192,19 @@ struct WorkspaceWorkItemView {
     title: String,
     kind: String,
     status: String,
+    done: bool,
     priority: String,
     assignee: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     parent: Option<WorkspaceParentTicketView>,
+    #[serde(skip_serializing_if = "is_false")]
     has_children: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     story_points: Option<f64>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -130,19 +218,6 @@ struct WorkspaceChangeSetView {
     id: String,
     name: String,
     revision: i64,
-    closed: bool,
-    tickets: Vec<WorkspaceChangeTicketView>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-struct WorkspaceChangeTicketView {
-    id: String,
-    kind: ChangeKindView,
-    original: Option<WorkspaceComposerTicketView>,
-    updated: Option<WorkspaceComposerTicketView>,
-    submitted: bool,
-    selected_for_commit: bool,
-    children: Vec<WorkspaceChangeTicketView>,
 }
 
 fn mcp_error(error: ServiceError) -> String {
@@ -193,27 +268,277 @@ async fn run_workspace(service: AppService) -> Result<WorkspaceView, String> {
             .open_change_set_jira_ticket_keys()
             .map_err(mcp_error)?;
         let backlog = service
-            .jira_backlog()
+            .with_jira_reorder(|service| service.jira_backlog())
             .map_err(|error| format!("jira_backlog_failed: {error}"))?;
         let refreshed_tickets = service.fetch_jira_tickets(&jira_ticket_keys)?;
         let change_sets = composer
             .refresh_open_change_set_baselines(&refreshed_tickets)
             .map_err(mcp_error)?;
-        Ok(workspace_view(backlog, change_sets))
+        workspace_view(backlog, change_sets)
     })
     .await
     .map_err(|_| "internal_error: background task failed".to_string())?
 }
 
+async fn run_jira_reorder(
+    service: AppService,
+    operation: impl FnOnce(&AppService) -> Result<BacklogSnapshot, String> + Send + 'static,
+) -> Result<WorkspaceView, String> {
+    let reorder_service = service.clone();
+    let backlog = tokio::task::spawn_blocking(move || {
+        reorder_service.with_jira_reorder(|service| operation(service))
+    })
+    .await
+    .map_err(|_| "internal_error: background task failed".to_string())??;
+    tokio::task::spawn_blocking(move || workspace_with_backlog(service, backlog))
+        .await
+        .map_err(|_| "internal_error: background task failed".to_string())?
+}
+
+fn workspace_with_backlog(
+    service: AppService,
+    backlog: BacklogSnapshot,
+) -> Result<WorkspaceView, String> {
+    let composer = service.composer_service();
+    let jira_ticket_keys = composer
+        .open_change_set_jira_ticket_keys()
+        .map_err(mcp_error)?;
+    let refreshed_tickets = service.fetch_jira_tickets(&jira_ticket_keys)?;
+    let change_sets = composer
+        .refresh_open_change_set_baselines(&refreshed_tickets)
+        .map_err(mcp_error)?;
+    workspace_view(backlog, change_sets)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JiraSection {
+    Backlog,
+    Sprint(u64),
+}
+
+impl JiraDestination {
+    fn section(&self) -> JiraSection {
+        match self {
+            Self::Backlog => JiraSection::Backlog,
+            Self::Sprint { sprint_id } => JiraSection::Sprint(*sprint_id),
+        }
+    }
+}
+
+fn section_order(snapshot: &BacklogSnapshot, section: JiraSection) -> Result<Vec<String>, String> {
+    match section {
+        JiraSection::Backlog => Ok(snapshot
+            .work_items
+            .iter()
+            .map(|item| item.key.clone())
+            .collect()),
+        JiraSection::Sprint(sprint_id) => snapshot
+            .sprints
+            .iter()
+            .find(|sprint| sprint.id == sprint_id)
+            .map(|sprint| {
+                sprint
+                    .work_items
+                    .iter()
+                    .map(|item| item.key.clone())
+                    .collect()
+            })
+            .ok_or_else(|| format!("Sprint {sprint_id} is not active or future on this board")),
+    }
+}
+
+fn issue_sections(snapshot: &BacklogSnapshot) -> HashMap<String, JiraSection> {
+    let mut sections = snapshot
+        .work_items
+        .iter()
+        .map(|item| (item.key.clone(), JiraSection::Backlog))
+        .collect::<HashMap<_, _>>();
+    for sprint in &snapshot.sprints {
+        sections.extend(
+            sprint
+                .work_items
+                .iter()
+                .map(|item| (item.key.clone(), JiraSection::Sprint(sprint.id))),
+        );
+    }
+    sections
+}
+
+fn validate_issue_keys(
+    issue_keys: &[String],
+    sections: &HashMap<String, JiraSection>,
+) -> Result<(), String> {
+    if issue_keys.is_empty() || issue_keys.len() > 50 {
+        return Err("issue_keys must contain between 1 and 50 issues".into());
+    }
+    let unique = issue_keys.iter().collect::<HashSet<_>>();
+    if unique.len() != issue_keys.len() {
+        return Err("issue_keys must not contain duplicates".into());
+    }
+    if let Some(issue_key) = issue_keys
+        .iter()
+        .find(|issue_key| !sections.contains_key(*issue_key))
+    {
+        return Err(format!(
+            "Issue '{issue_key}' is not in this board's active, future, or backlog sections"
+        ));
+    }
+    Ok(())
+}
+
+fn final_order(
+    destination_order: &[String],
+    issue_keys: &[String],
+    position: &JiraPosition,
+) -> Result<Vec<String>, String> {
+    let moved = issue_keys.iter().collect::<HashSet<_>>();
+    let mut order = destination_order
+        .iter()
+        .filter(|key| !moved.contains(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    let index = match position {
+        JiraPosition::Top => 0,
+        JiraPosition::Bottom => order.len(),
+        JiraPosition::Before { issue_key } => order
+            .iter()
+            .position(|key| key == issue_key)
+            .ok_or_else(|| {
+                format!("Anchor '{issue_key}' is not in the destination or is being moved")
+            })?,
+        JiraPosition::After { issue_key } => order
+            .iter()
+            .position(|key| key == issue_key)
+            .map(|index| index + 1)
+            .ok_or_else(|| {
+                format!("Anchor '{issue_key}' is not in the destination or is being moved")
+            })?,
+    };
+    order.splice(index..index, issue_keys.iter().cloned());
+    Ok(order)
+}
+
+fn placement_rank_plan(
+    issue_keys: &[String],
+    final_order: &[String],
+) -> Result<Option<RankPlan>, String> {
+    if issue_keys.len() == final_order.len() {
+        return Ok((issue_keys.len() > 1).then(|| RankPlan {
+            issues: issue_keys[1..].to_vec(),
+            rank_before_issue: None,
+            rank_after_issue: Some(issue_keys[0].clone()),
+        }));
+    }
+    rank_plan(issue_keys.to_vec(), final_order)
+}
+
+fn place_jira_items(
+    service: &AppService,
+    input: PlaceJiraItems,
+) -> Result<BacklogSnapshot, String> {
+    let destination = input.destination.section();
+    let snapshot = service.jira_backlog()?;
+    let sections = issue_sections(&snapshot);
+    validate_issue_keys(&input.issue_keys, &sections)?;
+    let destination_order = section_order(&snapshot, destination)?;
+    final_order(&destination_order, &input.issue_keys, &input.position)?;
+    let moving_sections = input
+        .issue_keys
+        .iter()
+        .filter(|issue_key| sections.get(*issue_key) != Some(&destination))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !moving_sections.is_empty() {
+        match destination {
+            JiraSection::Backlog => {
+                service.jira_move_to_backlog_while_reorder_locked(&moving_sections)?
+            }
+            JiraSection::Sprint(sprint_id) => {
+                service.jira_move_to_sprint_while_reorder_locked(sprint_id, &moving_sections)?
+            }
+        }
+    }
+    let snapshot = service.jira_backlog()?;
+    let destination_order = section_order(&snapshot, destination)?;
+    let final_order = final_order(&destination_order, &input.issue_keys, &input.position)?;
+    if let Some(plan) = placement_rank_plan(&input.issue_keys, &final_order)? {
+        service.jira_rank_while_reorder_locked(&plan)?;
+    }
+    service.jira_backlog()
+}
+
+fn swap_jira_items(service: &AppService, input: SwapJiraItems) -> Result<BacklogSnapshot, String> {
+    if input.first_issue_key == input.second_issue_key {
+        return Err("Swap requires two distinct issue keys".into());
+    }
+    let snapshot = service.jira_backlog()?;
+    let sections = issue_sections(&snapshot);
+    validate_issue_keys(
+        &[
+            input.first_issue_key.clone(),
+            input.second_issue_key.clone(),
+        ],
+        &sections,
+    )?;
+    let first_section = sections[&input.first_issue_key];
+    if sections[&input.second_issue_key] != first_section {
+        return Err("Swap requires both issues to be in the same backlog or sprint section".into());
+    }
+    let order = section_order(&snapshot, first_section)?;
+    let first_index = order
+        .iter()
+        .position(|key| key == &input.first_issue_key)
+        .unwrap();
+    let second_index = order
+        .iter()
+        .position(|key| key == &input.second_issue_key)
+        .unwrap();
+    let (earlier, later, earlier_index, later_index) = if first_index < second_index {
+        (
+            &input.first_issue_key,
+            &input.second_issue_key,
+            first_index,
+            second_index,
+        )
+    } else {
+        (
+            &input.second_issue_key,
+            &input.first_issue_key,
+            second_index,
+            first_index,
+        )
+    };
+    service.jira_rank_while_reorder_locked(&RankPlan {
+        issues: vec![later.clone()],
+        rank_before_issue: Some(earlier.clone()),
+        rank_after_issue: None,
+    })?;
+    if later_index > earlier_index + 1 {
+        service.jira_rank_while_reorder_locked(&RankPlan {
+            issues: vec![earlier.clone()],
+            rank_before_issue: None,
+            rank_after_issue: Some(order[later_index - 1].clone()),
+        })?;
+    }
+    service.jira_backlog()
+}
+
 fn workspace_view(
     backlog: BacklogSnapshot,
     change_sets: Versioned<ChangeSetCatalogView>,
-) -> WorkspaceView {
+) -> Result<WorkspaceView, String> {
     let unplanned_total_count = backlog.work_items.len();
-    WorkspaceView {
+    let capacity_guidance = backlog
+        .runway
+        .map(|runway| workspace_capacity_guidance_view(runway, &backlog.work_items))
+        .transpose()?;
+    Ok(WorkspaceView {
         backlog: WorkspaceBacklogView {
             board_name: backlog.board_name,
             warnings: backlog.warnings,
+            story_points_configured: backlog.story_points_configured,
+            velocity: backlog.velocity.map(workspace_velocity_view),
+            capacity_guidance,
             sprints: backlog
                 .sprints
                 .into_iter()
@@ -221,20 +546,22 @@ fn workspace_view(
                     id: sprint.id,
                     name: sprint.name,
                     state: sprint.state,
+                    goal: sprint.goal,
+                    start_date: sprint.start_date,
+                    end_date: sprint.end_date,
                     tickets: sprint.work_items.into_iter().map(Into::into).collect(),
                 })
                 .collect(),
-            unplanned_tickets: backlog
-                .work_items
-                .into_iter()
-                .take(WORKSPACE_UNPLANNED_TICKET_LIMIT)
-                .map(Into::into)
-                .collect(),
-            unplanned_ticket_limit: WORKSPACE_UNPLANNED_TICKET_LIMIT,
-            unplanned_total_count,
-            unplanned_truncated: unplanned_total_count > WORKSPACE_UNPLANNED_TICKET_LIMIT,
+            unplanned: WorkspaceUnplannedView {
+                total_count: unplanned_total_count,
+                tickets: backlog
+                    .work_items
+                    .into_iter()
+                    .take(WORKSPACE_UNPLANNED_TICKET_LIMIT)
+                    .map(Into::into)
+                    .collect(),
+            },
         },
-        change_set_catalog_revision: change_sets.revision,
         change_sets: change_sets
             .value
             .change_sets
@@ -242,84 +569,118 @@ fn workspace_view(
             .filter(|change_set| !change_set.value.closed)
             .map(workspace_change_set_view)
             .collect(),
-    }
+    })
 }
 
-fn workspace_change_set_view(change_set: Versioned<ChangeSetView>) -> WorkspaceChangeSetView {
-    let ChangeSetView {
-        id,
-        name,
-        closed,
-        tickets,
-        ..
-    } = change_set.value;
-    WorkspaceChangeSetView {
-        id,
-        name,
-        revision: change_set.revision,
-        closed,
-        tickets: workspace_change_ticket_tree(tickets),
-    }
-}
-
-fn workspace_change_ticket_tree(tickets: Vec<TicketChangeView>) -> Vec<WorkspaceChangeTicketView> {
-    let aliases = tickets
-        .iter()
-        .flat_map(|ticket| {
-            let id = ticket.id.clone();
-            std::iter::once((id.clone(), id.clone())).chain(
-                ticket
-                    .updated
-                    .as_ref()
-                    .or(ticket.original.as_ref())
-                    .map(|ticket| (ticket.key.clone(), id)),
+fn workspace_velocity_view(
+    velocity: crate::store::work_items::VelocityReport,
+) -> WorkspaceVelocityView {
+    WorkspaceVelocityView {
+        average_completed_points: velocity.dynamic_capacity,
+        sprints: velocity
+            .sprints
+            .into_iter()
+            .take(
+                velocity
+                    .configured_sprints
+                    .min(WORKSPACE_VELOCITY_SPRINT_LIMIT),
             )
-        })
-        .collect::<HashMap<_, _>>();
-    let mut children = HashMap::<String, Vec<TicketChangeView>>::new();
-    let mut roots = Vec::new();
-    for ticket in tickets {
-        let parent = ticket
-            .updated
-            .as_ref()
-            .or(ticket.original.as_ref())
-            .and_then(|ticket| ticket.parent_key.as_deref());
-        if let Some(parent) = parent.and_then(|parent| aliases.get(parent)) {
-            children.entry(parent.into()).or_default().push(ticket);
-        } else {
-            roots.push(ticket);
+            .map(|sprint| WorkspaceVelocitySprintView {
+                name: sprint.name,
+                completed_points: sprint.completed,
+                goal: sprint.goal,
+            })
+            .collect(),
+    }
+}
+
+fn workspace_capacity_guidance_view(
+    runway: crate::store::work_items::BacklogRunway,
+    work_items: &[WorkItem],
+) -> Result<WorkspaceCapacityGuidanceView, String> {
+    let mut work_items_by_key = HashMap::with_capacity(work_items.len());
+    for ticket in work_items {
+        if work_items_by_key
+            .insert(ticket.key.as_str(), ticket)
+            .is_some()
+        {
+            return Err(format!("duplicate backlog ticket key '{}'", ticket.key));
         }
     }
-    roots
-        .into_iter()
-        .map(|ticket| workspace_change_ticket_view(ticket, &mut children))
-        .collect()
+    let mut runway_keys = HashSet::with_capacity(runway.tickets.len());
+    for runway_ticket in &runway.tickets {
+        if !runway_keys.insert(runway_ticket.key.as_str()) {
+            return Err(format!(
+                "duplicate runway ticket key '{}'",
+                runway_ticket.key
+            ));
+        }
+        if !work_items_by_key.contains_key(runway_ticket.key.as_str()) {
+            return Err(format!(
+                "runway ticket '{}' is not in the loaded backlog",
+                runway_ticket.key
+            ));
+        }
+    }
+    if let Some(key) = work_items_by_key
+        .keys()
+        .find(|key| !runway_keys.contains(*key))
+    {
+        return Err(format!("loaded backlog ticket '{key}' has no runway entry"));
+    }
+    let first_unplanned_capacity_band = runway
+        .tickets
+        .iter()
+        .filter(|runway_ticket| runway_ticket.virtual_sprint == 1)
+        .take(WORKSPACE_UNPLANNED_TICKET_LIMIT)
+        .map(|runway_ticket| {
+            let ticket = work_items_by_key
+                .get(runway_ticket.key.as_str())
+                .expect("runway tickets are validated against the loaded backlog");
+            Ok(WorkspaceCapacityBandTicketView {
+                key: runway_ticket.key.clone(),
+                effective_points: runway_ticket.effective_points,
+                points_source: workspace_points_source(ticket, runway_ticket),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(WorkspaceCapacityGuidanceView {
+        capacity: runway.capacity,
+        source: match runway.source {
+            RunwayCapacitySource::JiraVelocity => "jira_velocity",
+            RunwayCapacitySource::Fixed => "fixed",
+            RunwayCapacitySource::FixedFallback => "fixed_fallback",
+        }
+        .into(),
+        first_unplanned_capacity_band,
+    })
 }
 
-fn workspace_change_ticket_view(
-    ticket: TicketChangeView,
-    children_by_parent: &mut HashMap<String, Vec<TicketChangeView>>,
-) -> WorkspaceChangeTicketView {
-    let children = children_by_parent
-        .remove(&ticket.id)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|child| workspace_change_ticket_view(child, children_by_parent))
-        .collect::<Vec<_>>();
-    let has_children = !children.is_empty();
-    let original = ticket
-        .original
-        .map(|ticket| WorkspaceComposerTicketView::from(ticket, has_children));
-    WorkspaceChangeTicketView {
-        id: ticket.id,
-        kind: ticket.kind,
-        original,
-        updated: ticket
-            .updated
-            .map(|ticket| WorkspaceComposerTicketView::from(ticket, has_children)),
-        submitted: ticket.submitted,
-        selected_for_commit: ticket.selected_for_commit,
-        children,
+fn workspace_points_source(
+    ticket: &WorkItem,
+    runway_ticket: &crate::store::work_items::RunwayTicket,
+) -> WorkspacePointsSource {
+    if ticket
+        .story_points
+        .is_some_and(|points| points.is_finite() && points >= 0.0)
+    {
+        WorkspacePointsSource::StoryPoints
+    } else if ticket.kind.eq_ignore_ascii_case("bug") {
+        WorkspacePointsSource::UnestimatedBug
+    } else if runway_ticket.assumed_from_average {
+        WorkspacePointsSource::AverageAssumption
+    } else {
+        WorkspacePointsSource::FixedAssumption
+    }
+}
+
+fn workspace_change_set_view(
+    change_set: Versioned<crate::service::composer_service::ChangeSetView>,
+) -> WorkspaceChangeSetView {
+    WorkspaceChangeSetView {
+        id: change_set.value.id,
+        name: change_set.value.name,
+        revision: change_set.revision,
     }
 }
 
@@ -330,38 +691,12 @@ impl From<WorkItem> for WorkspaceWorkItemView {
             title: ticket.title,
             kind: ticket.kind,
             status: ticket.status,
+            done: ticket.done,
             priority: ticket.priority,
             assignee: ticket.assignee,
             parent: workspace_parent(ticket.parent_key, ticket.parent_title),
             has_children: ticket.has_children,
             story_points: ticket.story_points,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-struct WorkspaceComposerTicketView {
-    key: String,
-    title: String,
-    kind: String,
-    status: String,
-    priority: String,
-    assignee: String,
-    parent: Option<WorkspaceParentTicketView>,
-    has_children: bool,
-}
-
-impl WorkspaceComposerTicketView {
-    fn from(ticket: TicketView, has_children: bool) -> Self {
-        Self {
-            key: ticket.key,
-            title: ticket.title,
-            kind: workspace_ticket_kind(ticket.kind).into(),
-            status: ticket.status,
-            priority: ticket.priority,
-            assignee: ticket.assignee,
-            parent: workspace_parent(ticket.parent_key, ticket.parent_title),
-            has_children: ticket.has_children || has_children,
         }
     }
 }
@@ -376,23 +711,41 @@ fn workspace_parent(
     })
 }
 
-fn workspace_ticket_kind(kind: TicketKindView) -> &'static str {
-    match kind {
-        TicketKindView::Epic => "Epic",
-        TicketKindView::Story => "Story",
-        TicketKindView::Task => "Task",
-        TicketKindView::Bug => "Bug",
-        TicketKindView::Subtask => "Subtask",
-    }
-}
-
 #[tool_router]
 impl McpServer {
     #[tool(
-        description = "Get active/future sprint tickets and the top 50 unplanned Jira tickets in rank order. Full sprint lists are never capped. backlog.unplanned_ticket_limit, backlog.unplanned_total_count, and backlog.unplanned_truncated describe the unplanned limit. Tickets include compact metadata, never descriptions. Only open Composer change sets are returned."
+        description = "Get active/future sprints, top 50 rank-ordered unplanned tickets with total_count, up to 10 recent velocity sprints, empty-sprint capacity guidance, and open change-set summaries. Tickets are compact and omit descriptions."
     )]
     async fn get_workspace(&self) -> Result<Json<WorkspaceView>, String> {
         run_workspace(self.service.clone()).await.map(Json)
+    }
+
+    #[tool(
+        description = "Move one ordered block of up to 50 Jira issues to the backlog or an active/future sprint, then place it at the top, bottom, before, or after a destination issue. This writes directly to Jira. State the exact proposed move and get explicit user confirmation before calling it. A failure after a Jira write may leave a partial move; call get_workspace to inspect Jira before retrying."
+    )]
+    async fn place_jira_items(
+        &self,
+        Parameters(input): Parameters<PlaceJiraItems>,
+    ) -> Result<Json<WorkspaceView>, String> {
+        run_jira_reorder(self.service.clone(), move |service| {
+            place_jira_items(service, input)
+        })
+        .await
+        .map(Json)
+    }
+
+    #[tool(
+        description = "Swap two Jira issues in the same backlog or sprint section. This writes directly to Jira and can require two rank writes. State the exact proposed swap and get explicit user confirmation before calling it. A failure after a Jira write may leave a partial swap; call get_workspace to inspect Jira before retrying."
+    )]
+    async fn swap_jira_items(
+        &self,
+        Parameters(input): Parameters<SwapJiraItems>,
+    ) -> Result<Json<WorkspaceView>, String> {
+        run_jira_reorder(self.service.clone(), move |service| {
+            swap_jira_items(service, input)
+        })
+        .await
+        .map(Json)
     }
 
     #[tool(description = "List Composer change sets with revisioned canonical data")]

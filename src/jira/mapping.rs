@@ -61,6 +61,10 @@ pub(super) fn to_work_item(issue: JiraIssue, story_points_field_id: Option<&str>
         title: field("summary").as_str().unwrap_or(&issue.key).into(),
         kind: named_field(field("issuetype")).unwrap_or_else(|| "Issue".into()),
         status: named_field(field("status")).unwrap_or_default(),
+        done: field("status")
+            .pointer("/statusCategory/key")
+            .and_then(Value::as_str)
+            .is_some_and(|category| category.eq_ignore_ascii_case("done")),
         priority: named_field(field("priority")).unwrap_or_default(),
         assignee: field("assignee")
             .get("displayName")

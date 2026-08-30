@@ -9,6 +9,7 @@ fn work_item(key: &str, story_points: Option<f64>) -> WorkItem {
         title: key.into(),
         kind: "Story".into(),
         status: "To Do".into(),
+        done: false,
         priority: "Medium".into(),
         assignee: "Unassigned".into(),
         parent_key: None,
@@ -29,6 +30,7 @@ fn snapshot() -> BacklogSnapshot {
             id: 1,
             name: "Sprint 1".into(),
             state: "future".into(),
+            goal: None,
             start_date: None,
             end_date: None,
             work_items: vec![work_item("FIN-10", Some(26.0))],
@@ -71,6 +73,7 @@ fn capacity_assigns_ranked_tickets_to_virtual_sprints_without_creating_rows() {
     );
     assert!(runway.tickets[3].assumed);
     assert!(!runway.tickets[3].assumed_from_average);
+    assert_eq!(runway.tickets[3].key, "FIN-4");
     assert_eq!(runway.estimated_points, 25.0);
     assert_eq!(runway.assumed_points, 6.0);
 }

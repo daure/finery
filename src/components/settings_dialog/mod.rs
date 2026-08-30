@@ -312,7 +312,11 @@ impl SettingsDialog {
                     changed = true;
                 }
                 SettingChange::BacklogJiraVelocitySprints(value) => {
-                    let Some(value) = value.trim().parse::<usize>().ok().filter(|value| *value > 0)
+                    let Some(value) = value
+                        .trim()
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|value| *value > 0)
                     else {
                         ctx.notify(tuicore::Notification::warning(
                             "Invalid velocity sprint count",

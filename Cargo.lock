@@ -3016,6 +3016,7 @@ dependencies = [
  "axum",
  "clap",
  "dirs",
+ "libc",
  "ratatui",
  "reqwest 0.13.4",
  "rmcp",
@@ -9479,7 +9480,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tuicore"
-version = "0.20.0"
+version = "0.22.0"
 dependencies = [
  "ansi-to-tui",
  "base64 0.22.1",

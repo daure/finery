@@ -1,4 +1,10 @@
-use std::{cell::{Cell, RefCell}, collections::HashMap, rc::Rc, sync::mpsc::Sender, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+    sync::mpsc::Sender,
+    time::Duration,
+};
 
 use ratatui::{
     Frame,
@@ -9,18 +15,19 @@ use ratatui::{
 use tuicore::{
     Animated, Button, CellContext, ChildKey, Column, EventCtx, EventOutcome, EventRoute, FocusCtx,
     FocusId, FocusTarget, Key, KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult,
-    LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlKeyBindings, MenuButton,
-    MenuItem, RenderCtx, SearchMode, Spinner, TickResult, TreeAdapter, TuiEvent, TuiNode,
+    LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlKeyBindings,
+    MenuButton, MenuItem, RenderCtx, SearchMode, Spinner, TickResult, TreeAdapter, TuiEvent,
+    TuiNode,
 };
 
 use crate::{
     components::{
         avatar::bubble_span,
-        work_item_rows::{
-            WorkItemKind, WorkItemRow, story_points_label, work_item_title_prefix_width,
-            work_item_title_with_key_line,
-        },
         ticket_number_jump::{TicketNumberJump, exact_ticket_number_matches},
+        work_item_rows::{
+            WorkItemKind, WorkItemRow, append_release_chip, story_points_label,
+            work_item_title_prefix_width, work_item_title_with_key_line,
+        },
     },
     store::work_items::{
         BacklogSnapshot, RunwayCapacitySource, RunwayTicket, Sprint, SprintCapacityState,
@@ -132,9 +139,7 @@ pub(in crate::pages::backlog) fn backlog_tree(
         }
     });
     control.data_view_mut().set_wrap_cells(true);
-    control
-        .data_view_mut()
-        .set_show_inactive_highlight(true);
+    control.data_view_mut().set_show_inactive_highlight(true);
     control
         .data_view_mut()
         .set_row_style_by(|row| match &row.content {
@@ -228,9 +233,10 @@ impl BacklogTree {
         self.control
             .data_view_mut()
             .restore_tree_expansion(expanded);
-        if highlighted.as_ref().is_some_and(|id| {
-            !self.control.items().iter().any(|row| &row.id == id)
-        }) {
+        if highlighted
+            .as_ref()
+            .is_some_and(|id| !self.control.items().iter().any(|row| &row.id == id))
+        {
             let fallback = highlighted_parent
                 .filter(|id| self.control.items().iter().any(|row| &row.id == id))
                 .unwrap_or_else(|| section_row_id("backlog"));
@@ -406,7 +412,12 @@ impl BacklogTree {
             return true;
         }
         if self.number_jump.borrow().accepts(*key) {
-            let number = self.number_jump.borrow().query().unwrap_or_default().to_owned();
+            let number = self
+                .number_jump
+                .borrow()
+                .query()
+                .unwrap_or_default()
+                .to_owned();
             let row_id = self.exact_ticket_row_id(&number);
             self.number_jump.borrow_mut().clear();
             if let Some(row_id) = row_id {
@@ -419,7 +430,12 @@ impl BacklogTree {
         if !self.number_jump.borrow_mut().push(*key) {
             return false;
         }
-        let number = self.number_jump.borrow().query().unwrap_or_default().to_owned();
+        let number = self
+            .number_jump
+            .borrow()
+            .query()
+            .unwrap_or_default()
+            .to_owned();
         self.control.data_view_mut().expand_all();
         let matching_count = self
             .control
@@ -440,14 +456,17 @@ impl BacklogTree {
     }
 
     fn exact_ticket_row_id(&self, number: &str) -> Option<String> {
-        self.control.items().iter().find_map(|row| match &row.content {
-            BacklogRowContent::WorkItem(item)
-                if exact_ticket_number_matches(&item.item.key, number) =>
-            {
-                Some(row.id.clone())
-            }
-            _ => None,
-        })
+        self.control
+            .items()
+            .iter()
+            .find_map(|row| match &row.content {
+                BacklogRowContent::WorkItem(item)
+                    if exact_ticket_number_matches(&item.item.key, number) =>
+                {
+                    Some(row.id.clone())
+                }
+                _ => None,
+            })
     }
 
     fn jump_to_ticket(&mut self, row_id: &str) {
@@ -605,14 +624,18 @@ impl TuiNode for BacklogTree {
                 .saturating_sub(refresh_width)
                 .saturating_sub(u16::from(refresh_width > 0)),
         );
-        let web_width = self.web.measure(LayoutProposal::at_most(area.width, header_height)).preferred.width.min(
-            area
+        let web_width = self
+            .web
+            .measure(LayoutProposal::at_most(area.width, header_height))
+            .preferred
             .width
-                .saturating_sub(refresh_width)
-                .saturating_sub(velocity_width)
-                .saturating_sub(u16::from(refresh_width > 0))
-                .saturating_sub(u16::from(velocity_width > 0)),
-        );
+            .min(
+                area.width
+                    .saturating_sub(refresh_width)
+                    .saturating_sub(velocity_width)
+                    .saturating_sub(u16::from(refresh_width > 0))
+                    .saturating_sub(u16::from(velocity_width > 0)),
+            );
         self.web_area = ratatui::layout::Rect::new(area.x, area.y, web_width, header_height);
         self.refresh_area = ratatui::layout::Rect::new(
             area.x
@@ -707,7 +730,9 @@ impl TuiNode for BacklogTree {
         }
         if let Some(web_path) = route.path.without_first_if(&ChildKey::new("web")) {
             let web_was_open = self.web.is_open();
-            let outcome = self.web.dispatch_event(&EventRoute::new(web_path), event, ctx);
+            let outcome = self
+                .web
+                .dispatch_event(&EventRoute::new(web_path), event, ctx);
             self.drain_web_menu(web_was_open);
             return outcome;
         }
@@ -721,7 +746,8 @@ impl TuiNode for BacklogTree {
             if jump.advance(dt) {
                 TickResult::CHANGED
             } else {
-                jump.remaining().map_or(TickResult::IDLE, TickResult::scheduled_after)
+                jump.remaining()
+                    .map_or(TickResult::IDLE, TickResult::scheduled_after)
             }
         };
         self.control
@@ -1005,15 +1031,7 @@ fn backlog_work_item_text(row: &BacklogWorkItem, number_query: Option<&str>) -> 
         );
     }
     if !row.fix_versions.is_empty() {
-        append_metadata(
-            &mut metadata,
-            Span::styled(
-                row.fix_versions.join(", "),
-                Style::default()
-                    .fg(theme.highlight_fg())
-                    .bg(theme.highlight_bg()),
-            ),
-        );
+        append_release_chip(&mut metadata, &row.fix_versions);
     }
     if let Some(epic_name) = &row.epic_name {
         append_metadata(

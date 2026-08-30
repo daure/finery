@@ -32,9 +32,9 @@ use super::{
     fields::{DescriptionAction, PendingDescriptionActions},
     source::SourceController,
     submission::SubmissionController,
-        ticket_rows::{
-            TicketRow, set_active_ticket_style, ticket_data_view_with_number_jump, ticket_rows,
-        },
+    ticket_rows::{
+        TicketRow, set_active_ticket_style, ticket_data_view_with_number_jump, ticket_rows,
+    },
     ticket_toolbar::{ToolbarEvent, ToolbarEvents, ToolbarFeedback, toolbar},
     title_guidance::{TitleFeedback, format_title},
 };
@@ -353,13 +353,9 @@ impl TicketEditor {
             .composer_keys
             .clone();
         let number_jump = Rc::new(RefCell::new(TicketNumberJump::default()));
-        let ticket_list = Panel::new()
-            .top_left("Change sets")
-            .one_row(true)
-            .host(ticket_data_view_with_number_jump(
-                &state.borrow(),
-                Rc::clone(&number_jump),
-            ));
+        let ticket_list = Panel::new().top_left("Change sets").one_row(true).host(
+            ticket_data_view_with_number_jump(&state.borrow(), Rc::clone(&number_jump)),
+        );
 
         let detail = DetailPane::new(
             Rc::clone(&state),
@@ -1326,7 +1322,12 @@ impl TicketEditor {
             return Some(EventOutcome::Handled);
         }
         if self.number_jump.borrow().accepts(*key) {
-            let number = self.number_jump.borrow().query().unwrap_or_default().to_owned();
+            let number = self
+                .number_jump
+                .borrow()
+                .query()
+                .unwrap_or_default()
+                .to_owned();
             let row_id = self.exact_ticket_row_id(&number);
             self.number_jump.borrow_mut().clear();
             if let Some(row_id) = row_id {
@@ -1339,7 +1340,12 @@ impl TicketEditor {
         if !self.number_jump.borrow_mut().push(*key) {
             return None;
         }
-        let number = self.number_jump.borrow().query().unwrap_or_default().to_owned();
+        let number = self
+            .number_jump
+            .borrow()
+            .query()
+            .unwrap_or_default()
+            .to_owned();
         let matching_count = self
             .table()
             .rows()
@@ -1825,7 +1831,8 @@ impl TuiNode for TicketEditor {
             if jump.advance(dt) {
                 TickResult::CHANGED
             } else {
-                jump.remaining().map_or(TickResult::IDLE, TickResult::scheduled_after)
+                jump.remaining()
+                    .map_or(TickResult::IDLE, TickResult::scheduled_after)
             }
         };
         self.view

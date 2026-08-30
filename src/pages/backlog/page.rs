@@ -688,7 +688,9 @@ impl BacklogPage {
                     self.report_move_locked();
                     self.view.base_mut().set_active_with_context(false, ctx);
                 }
-                BacklogQuickMenuEvent::Closed => self.view.base_mut().set_active_with_context(false, ctx),
+                BacklogQuickMenuEvent::Closed => {
+                    self.view.base_mut().set_active_with_context(false, ctx)
+                }
             }
         }
         changed
@@ -700,7 +702,9 @@ impl BacklogPage {
         self.velocity_dialog_close_requested.set(false);
         self.view.replace_layer(
             velocity_dialog(
-                self.snapshot.as_ref().and_then(|snapshot| snapshot.velocity.as_ref()),
+                self.snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.velocity.as_ref()),
                 &settings.backlog_runway,
                 self.snapshot.as_ref().and_then(loaded_story_point_average),
                 Rc::clone(&self.velocity_dialog_close_requested),
@@ -800,24 +804,20 @@ impl BacklogPage {
         if let Err(error) = std::thread::Builder::new()
             .name("finery-jira-transfer".into())
             .spawn(move || {
-                let result = if destination.section_id == "backlog" {
-                    service.jira_move_to_backlog(&keys)
-                } else {
-                    let sprint_id = destination
-                        .section_id
-                        .strip_prefix("sprint-")
-                        .ok_or_else(|| "Unknown sprint destination".to_string())
-                        .and_then(|id| {
-                            id.parse::<u64>()
-                                .map_err(|_| "Invalid sprint destination".to_string())
-                        });
-                    sprint_id.and_then(|sprint_id| service.jira_move_to_sprint(sprint_id, &keys))
-                }
-                .and_then(|()| {
-                    placement_plan
-                        .as_ref()
-                        .map(|plan| service.jira_rank(plan))
-                        .unwrap_or(Ok(()))
+                let sprint_id = (destination.section_id != "backlog")
+                    .then(|| {
+                        destination
+                            .section_id
+                            .strip_prefix("sprint-")
+                            .ok_or_else(|| "Unknown sprint destination".to_string())
+                            .and_then(|id| {
+                                id.parse::<u64>()
+                                    .map_err(|_| "Invalid sprint destination".to_string())
+                            })
+                    })
+                    .transpose();
+                let result = sprint_id.and_then(|sprint_id| {
+                    service.jira_transfer(sprint_id, &keys, placement_plan.as_ref())
                 });
                 let _ = sender.send(BacklogResult::Transferred {
                     generation,
@@ -907,7 +907,10 @@ impl BacklogPage {
         });
         self.snapshot = Some(optimistic.clone());
         self.view.base_mut().base_mut().set_snapshot(&optimistic);
-        self.view.base_mut().base_mut().highlight(&highlighted_row_id);
+        self.view
+            .base_mut()
+            .base_mut()
+            .highlight(&highlighted_row_id);
         true
     }
 
@@ -1350,7 +1353,9 @@ fn velocity_dialog(
     dynamic_ticket_size: Option<f64>,
     close_requested: Rc<Cell<bool>>,
 ) -> VelocityDialog {
-    let latest_sprints = report.map_or(settings.jira_velocity_sprints, |report| report.configured_sprints);
+    let latest_sprints = report.map_or(settings.jira_velocity_sprints, |report| {
+        report.configured_sprints
+    });
     let dynamic_value = report
         .and_then(|report| report.dynamic_capacity)
         .map(|value| format!("~{value:.1}"))
@@ -1364,18 +1369,28 @@ fn velocity_dialog(
     let rows = report.map_or_else(Vec::new, |report| report.sprints.clone());
     let table = DataView::new(rows, |sprint: &VelocitySprint| sprint.id)
         .columns(vec![
-            Column::text("sprint", "Sprint", Constraint::Percentage(75), |sprint: &VelocitySprint| {
-                sprint.name.clone()
-            }),
-            Column::text("completed", "Completed", Constraint::Percentage(25), |sprint: &VelocitySprint| {
-                format!("{:.1}", sprint.completed)
-            }),
+            Column::text(
+                "sprint",
+                "Sprint",
+                Constraint::Percentage(75),
+                |sprint: &VelocitySprint| sprint.name.clone(),
+            ),
+            Column::text(
+                "completed",
+                "Completed",
+                Constraint::Percentage(25),
+                |sprint: &VelocitySprint| format!("{:.1}", sprint.completed),
+            ),
         ])
         .headers(true)
         .row_height(1)
         .focused(true);
     let content = Flex::column()
-        .child("status", VelocityStatus::new(status), FlexItem::fit_content())
+        .child(
+            "status",
+            VelocityStatus::new(status),
+            FlexItem::fit_content(),
+        )
         .child("padding", Paragraph::new(""), FlexItem::fixed(1))
         .child("table", table, FlexItem::fixed(9));
     Dialog::new()

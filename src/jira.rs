@@ -1,7 +1,11 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    cmp::Reverse,
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use reqwest::{StatusCode, blocking::Client};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value, json};
 
 use crate::{
@@ -12,8 +16,7 @@ use crate::{
     },
     store::work_items::{
         BacklogSnapshot, RankPlan, RunwayCapacitySource, Sprint, VelocityReport, VelocitySprint,
-        WorkItem, apply_capacity,
-        loaded_story_point_average,
+        WorkItem, apply_capacity, loaded_story_point_average,
     },
 };
 
@@ -44,6 +47,7 @@ const BACKLOG_FIELDS: [&str; 8] = [
     "fixVersions",
 ];
 const BACKLOG_JQL: &str = "issuetype not in subTaskIssueTypes() AND issuetype != Epic";
+const MAX_VELOCITY_GOAL_LOOKUPS: usize = 10;
 
 pub(crate) struct BacklogLoad {
     pub snapshot: BacklogSnapshot,
@@ -104,6 +108,23 @@ struct SearchResponse {
 }
 
 #[derive(Deserialize)]
+struct IssuePickerResponse {
+    #[serde(default)]
+    sections: Vec<IssuePickerSection>,
+}
+
+#[derive(Deserialize)]
+struct IssuePickerSection {
+    #[serde(default)]
+    issues: Vec<IssuePickerIssue>,
+}
+
+#[derive(Deserialize)]
+struct IssuePickerIssue {
+    key: String,
+}
+
+#[derive(Deserialize)]
 struct AgileBoardPage {
     values: Vec<AgileBoard>,
     #[serde(default, rename = "isLast")]
@@ -138,10 +159,26 @@ struct JiraSprint {
     id: u64,
     name: String,
     state: String,
+    #[serde(default, deserialize_with = "deserialize_sprint_goal")]
+    goal: Option<String>,
     #[serde(rename = "startDate")]
     start_date: Option<String>,
     #[serde(rename = "endDate")]
     end_date: Option<String>,
+}
+
+fn deserialize_sprint_goal<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(normalize_sprint_goal)
+}
+
+fn normalize_sprint_goal(goal: Option<String>) -> Option<String> {
+    goal.and_then(|goal| {
+        let goal = goal.trim();
+        (!goal.is_empty()).then(|| goal.to_owned())
+    })
 }
 
 #[derive(Deserialize)]
@@ -213,6 +250,9 @@ struct JiraUser {
 
 pub(crate) fn search(settings: &AppSettings, query: &str) -> Result<Vec<Ticket>, String> {
     let (client, base_url, email, token) = configured_client(settings)?;
+    if is_ticket_number_query(query) {
+        return search_ticket_number(&client, &base_url, &email, &token, query.trim());
+    }
     let response = match request_search(&client, &base_url, &email, &token, &search_jql(query)) {
         Err((Some(400), _)) if looks_like_project_key(query.trim()) => request_search(
             &client,
@@ -225,6 +265,56 @@ pub(crate) fn search(settings: &AppSettings, query: &str) -> Result<Vec<Ticket>,
     }
     .map_err(|(_, error)| error)?;
     Ok(response.issues.into_iter().map(to_ticket).collect())
+}
+
+fn is_ticket_number_query(query: &str) -> bool {
+    !query.trim().is_empty()
+        && query
+            .trim()
+            .chars()
+            .all(|character| character.is_ascii_digit())
+}
+
+fn search_ticket_number(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    query: &str,
+) -> Result<Vec<Ticket>, String> {
+    let keys = issue_picker_keys(request_issue_picker(client, base_url, email, token, query)?);
+    let tickets = bulk_fetch_tickets(client, base_url, email, token, &keys)?;
+    Ok(keys
+        .into_iter()
+        .filter_map(|key| tickets.get(&key).cloned())
+        .collect())
+}
+
+fn request_issue_picker(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    query: &str,
+) -> Result<IssuePickerResponse, String> {
+    let response = client
+        .get(format!("{base_url}/rest/api/3/issue/picker"))
+        .basic_auth(email, Some(token))
+        .query(&[("query", query), ("showSubTasks", "true")])
+        .send()
+        .map_err(|error| error.to_string())?;
+    response_json(response)
+}
+
+fn issue_picker_keys(response: IssuePickerResponse) -> Vec<String> {
+    let mut seen = HashSet::new();
+    response
+        .sections
+        .into_iter()
+        .flat_map(|section| section.issues)
+        .map(|issue| issue.key)
+        .filter(|key| seen.insert(key.clone()))
+        .collect()
 }
 
 pub(crate) fn fetch_tickets(
@@ -355,6 +445,7 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
                     id: sprint.id,
                     name: sprint.name,
                     state: sprint.state,
+                    goal: sprint.goal,
                     start_date: sprint.start_date,
                     end_date: sprint.end_date,
                     work_items,
@@ -381,9 +472,9 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
     }
     let (capacity, source) = match (settings.backlog_runway.use_jira_velocity, velocity) {
         (true, Ok(report)) => (
-            report
-                .dynamic_capacity
-                .ok_or_else(|| "Jira velocity chart did not contain completed estimates".to_string())?,
+            report.dynamic_capacity.ok_or_else(|| {
+                "Jira velocity chart did not contain completed estimates".to_string()
+            })?,
             RunwayCapacitySource::JiraVelocity,
         ),
         (true, Err(error)) => {
@@ -596,7 +687,33 @@ fn board_velocity(
         .query(&[("rapidViewId", board_id.to_string())])
         .send()
         .map_err(|error| error.to_string())?;
-    response_json::<Value>(response).and_then(|chart| velocity_report(chart, sprint_count))
+    let mut report =
+        response_json::<Value>(response).and_then(|chart| velocity_report(chart, sprint_count))?;
+    for sprint in report
+        .sprints
+        .iter_mut()
+        .take(report.configured_sprints.min(MAX_VELOCITY_GOAL_LOOKUPS))
+    {
+        sprint.goal = sprint_goal(client, base_url, email, token, sprint.id)
+            .ok()
+            .flatten();
+    }
+    Ok(report)
+}
+
+fn sprint_goal(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    sprint_id: u64,
+) -> Result<Option<String>, String> {
+    let response = client
+        .get(format!("{base_url}/rest/agile/1.0/sprint/{sprint_id}"))
+        .basic_auth(email, Some(token))
+        .send()
+        .map_err(|error| error.to_string())?;
+    Ok(response_json::<JiraSprint>(response)?.goal)
 }
 
 fn velocity_report(chart: Value, sprint_count: usize) -> Result<VelocityReport, String> {
@@ -618,7 +735,7 @@ fn velocity_report(chart: Value, sprint_count: usize) -> Result<VelocityReport, 
             _ => None,
         })
         .ok_or_else(|| "Jira velocity chart did not contain sprint entries".to_string())?;
-    let sprints = chart
+    let mut sprints = chart
         .get("sprints")
         .and_then(Value::as_array)
         .map(|sprints| {
@@ -636,6 +753,7 @@ fn velocity_report(chart: Value, sprint_count: usize) -> Result<VelocityReport, 
                         id,
                         name: sprint.get("name")?.as_str()?.into(),
                         completed,
+                        goal: None,
                     })
                 })
                 .collect::<Vec<_>>()
@@ -653,13 +771,18 @@ fn velocity_report(chart: Value, sprint_count: usize) -> Result<VelocityReport, 
                         id: *id,
                         name: "Unknown sprint".into(),
                         completed,
+                        goal: None,
                     })
                 })
                 .collect()
         });
+    sprints.sort_by_key(|sprint| Reverse(sprint.id));
     let dynamic_sprints = sprints.iter().take(sprint_count).collect::<Vec<_>>();
     let dynamic_capacity = (!dynamic_sprints.is_empty()).then(|| {
-        dynamic_sprints.iter().map(|sprint| sprint.completed).sum::<f64>()
+        dynamic_sprints
+            .iter()
+            .map(|sprint| sprint.completed)
+            .sum::<f64>()
             / dynamic_sprints.len() as f64
     });
     Ok(VelocityReport {

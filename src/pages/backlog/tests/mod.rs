@@ -2,8 +2,8 @@ use std::sync::mpsc;
 
 use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Modifier};
 use tuicore::{
-    AnimationSettings, ChildKey, EventCtx, EventRoute, FocusCtx, FocusId, FocusRequest, FocusTarget, Key,
-    KeyEvent, KeyModifiers, LayoutCtx, RenderCtx, TreePath, TuiEvent, TuiNode,
+    AnimationSettings, ChildKey, EventCtx, EventRoute, FocusCtx, FocusId, FocusRequest,
+    FocusTarget, Key, KeyEvent, KeyModifiers, LayoutCtx, RenderCtx, TreePath, TuiEvent, TuiNode,
 };
 
 use super::{
@@ -11,9 +11,9 @@ use super::{
     page::{
         BacklogPage, MAX_UNCONFIRMED_TRANSFER_REFRESHES, PendingRank, PendingRankReconciliation,
         PendingTransfer, PendingTransferReconciliation, move_work_items_to_edge,
-        recalculate_capacity, reconcile_pending_rank,
-        reconcile_pending_transfer, should_poll, source_transfer_highlight,
-        source_transfer_highlight_key, transfer_destinations, transfer_reconciliation_highlight,
+        recalculate_capacity, reconcile_pending_rank, reconcile_pending_transfer, should_poll,
+        source_transfer_highlight, source_transfer_highlight_key, transfer_destinations,
+        transfer_reconciliation_highlight,
     },
 };
 use crate::app_settings::BacklogRunwaySettings;
@@ -28,6 +28,7 @@ fn work_item(key: &str, title: &str) -> WorkItem {
         title: title.into(),
         kind: "Story".into(),
         status: "To Do".into(),
+        done: false,
         priority: "High".into(),
         assignee: "Ada".into(),
         parent_key: None,
@@ -48,6 +49,7 @@ fn snapshot() -> BacklogSnapshot {
             id: 7,
             name: "Sprint 7".into(),
             state: "active".into(),
+            goal: None,
             start_date: Some("2026-06-18T09:00:00.000Z".into()),
             end_date: Some("2026-07-02T09:00:00.000Z".into()),
             work_items: vec![work_item("FIN-7", "Ship sprint work")],
@@ -246,7 +248,9 @@ fn backlog_web_menu_opens_with_shift_w_and_emits_board_event() {
     let web = layout
         .focus_targets()
         .iter()
-        .find(|target| target.path == TreePath::from_keys([ChildKey::new("web"), ChildKey::new("trigger")]))
+        .find(|target| {
+            target.path == TreePath::from_keys([ChildKey::new("web"), ChildKey::new("trigger")])
+        })
         .unwrap();
     assert_eq!(web.hotkey_sequences, ["shift+w"]);
 
@@ -258,12 +262,18 @@ fn backlog_web_menu_opens_with_shift_w_and_emits_board_event() {
     );
     view.layout(area, &mut LayoutCtx::new());
     view.dispatch_event(
-        &EventRoute::new(TreePath::from_keys([ChildKey::new("web"), ChildKey::new("menu")])),
+        &EventRoute::new(TreePath::from_keys([
+            ChildKey::new("web"),
+            ChildKey::new("menu"),
+        ])),
         &TuiEvent::Key(KeyEvent::from(Key::Enter)),
         &mut ctx,
     );
 
-    assert_eq!(receiver.try_recv(), Ok(super::components::BacklogSectionEvent::OpenBoard));
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(super::components::BacklogSectionEvent::OpenBoard)
+    );
 }
 
 #[test]
@@ -297,7 +307,11 @@ fn selecting_a_web_menu_item_returns_focus_to_the_backlog_data_view() {
     assert_eq!(
         ctx.focus_request(),
         Some(&FocusRequest::TargetAt {
-            path: TreePath::from_keys([ChildKey::first(), ChildKey::first(), ChildKey::new("data")]),
+            path: TreePath::from_keys([
+                ChildKey::first(),
+                ChildKey::first(),
+                ChildKey::new("data")
+            ]),
             id: FocusId::new("data-view"),
         })
     );
@@ -334,7 +348,11 @@ fn closing_the_web_menu_returns_focus_to_the_backlog_data_view() {
     assert_eq!(
         ctx.focus_request(),
         Some(&FocusRequest::TargetAt {
-            path: TreePath::from_keys([ChildKey::first(), ChildKey::first(), ChildKey::new("data")]),
+            path: TreePath::from_keys([
+                ChildKey::first(),
+                ChildKey::first(),
+                ChildKey::new("data")
+            ]),
             id: FocusId::new("data-view"),
         })
     );
@@ -351,6 +369,7 @@ fn unified_backlog_tree_shows_collapsed_sprints_and_expanded_backlog() {
         id: 8,
         name: "Sprint 8".into(),
         state: "future".into(),
+        goal: None,
         start_date: Some("2026-07-03T09:00:00.000Z".into()),
         end_date: Some("2026-07-17T09:00:00.000Z".into()),
         work_items: Vec::new(),
@@ -432,13 +451,19 @@ fn refreshed_backlog_keeps_the_highlighted_ticket_and_expanded_sprint() {
         .unwrap();
 
     assert!(rendered_lines(&terminal, area).concat().contains("FIN-7"));
-    assert_eq!(view.highlighted_id_for_test().as_deref(), Some("ticket:FIN-7"));
+    assert_eq!(
+        view.highlighted_id_for_test().as_deref(),
+        Some("ticket:FIN-7")
+    );
 }
 
 #[test]
 fn page_refresh_keeps_the_highlighted_ticket() {
     let mut page = BacklogPage::with_snapshot_for_test(snapshot());
-    page.view_for_test().base_mut().base_mut().highlight("ticket:FIN-8");
+    page.view_for_test()
+        .base_mut()
+        .base_mut()
+        .highlight("ticket:FIN-8");
 
     page.refresh_snapshot_for_test(snapshot());
 
@@ -482,7 +507,7 @@ fn backlog_story_rows_show_identity_then_subtask_release_and_epic_metadata() {
     let text = lines.concat();
 
     assert!(text.contains("FIN-8 Plan next sprint"));
-    assert!(text.contains("3 • @MV • 0/2  • To Do • 1.4.0 • Shopping cart"));
+    assert!(text.contains("3 • @MV • 0/2  • To Do • 1.4.0 • Shopping cart"));
     let (ticket_y, ticket_line) = lines
         .iter()
         .enumerate()
@@ -529,7 +554,7 @@ fn backlog_story_rows_show_identity_then_subtask_release_and_epic_metadata() {
         .buffer()
         .cell((version_x, metadata_y as u16))
         .unwrap();
-    assert!(!metadata_cell.modifier.contains(Modifier::BOLD));
+    assert!(metadata_cell.modifier.contains(Modifier::BOLD));
     assert_eq!(metadata_cell.bg, tuicore::theme().highlight_bg());
     assert_eq!(
         terminal
@@ -938,26 +963,26 @@ fn ticket_number_prefixes_wait_for_enter_and_underline_each_matching_number() {
         .find(|(_, line)| line.contains("KAN-34 Sprint ticket"))
         .unwrap();
     let key_x = cell_position(line, "KAN-34").unwrap() as u16;
-    assert!(!terminal
-        .backend()
-        .buffer()
-        .cell((key_x, y as u16))
-        .unwrap()
-        .modifier
-        .contains(Modifier::UNDERLINED));
-    assert!((key_x + 4..key_x + 6).all(|x| terminal
-        .backend()
-        .buffer()
-        .cell((x, y as u16))
-        .unwrap()
-        .modifier
-        .contains(Modifier::UNDERLINED)));
-
-    tree.dispatch_event(
-        &route,
-        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
-        &mut ctx,
+    assert!(
+        !terminal
+            .backend()
+            .buffer()
+            .cell((key_x, y as u16))
+            .unwrap()
+            .modifier
+            .contains(Modifier::UNDERLINED)
     );
+    assert!((key_x + 4..key_x + 6).all(|x| {
+        terminal
+            .backend()
+            .buffer()
+            .cell((x, y as u16))
+            .unwrap()
+            .modifier
+            .contains(Modifier::UNDERLINED)
+    }));
+
+    tree.dispatch_event(&route, &TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
     terminal
         .draw(|frame| {
             let mut render = RenderCtx::new();
@@ -965,13 +990,15 @@ fn ticket_number_prefixes_wait_for_enter_and_underline_each_matching_number() {
             render.flush(frame);
         })
         .unwrap();
-    assert!(!terminal
-        .backend()
-        .buffer()
-        .cell((key_x + 4, y as u16))
-        .unwrap()
-        .modifier
-        .contains(Modifier::UNDERLINED));
+    assert!(
+        !terminal
+            .backend()
+            .buffer()
+            .cell((key_x + 4, y as u16))
+            .unwrap()
+            .modifier
+            .contains(Modifier::UNDERLINED)
+    );
 }
 
 fn cell_position(line: &str, content: &str) -> Option<usize> {
@@ -1065,7 +1092,6 @@ fn backlog_search_filters_tickets_and_hides_runway_bands() {
         }),
         "search results must not retain virtual sprint background bands"
     );
-
 }
 
 #[test]
@@ -1168,9 +1194,11 @@ fn backlog_search_matches_epic_names() {
         })
         .unwrap();
 
-    assert!(rendered_lines(&terminal, area)
-        .concat()
-        .contains("Improve deployment reporting"));
+    assert!(
+        rendered_lines(&terminal, area)
+            .concat()
+            .contains("Improve deployment reporting")
+    );
 }
 
 #[test]
@@ -1364,7 +1392,11 @@ fn optimistic_transfer_recalculates_destination_sprint_capacity() {
     recalculate_capacity(&mut snapshot, &BacklogRunwaySettings::default());
 
     assert_eq!(
-        snapshot.sprints[0].capacity.as_ref().unwrap().effective_points,
+        snapshot.sprints[0]
+            .capacity
+            .as_ref()
+            .unwrap()
+            .effective_points,
         18.0
     );
 }

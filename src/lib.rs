@@ -1,5 +1,6 @@
 mod app;
 mod app_settings;
+pub mod cli;
 mod components;
 mod jira;
 mod mcp;

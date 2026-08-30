@@ -11,6 +11,7 @@ use tuicore::{
 use crate::{
     components::{
         self,
+        jira_search::{JiraSearchMenu, JiraSearchMenuEvent},
         recent_tickets::{RecentTicketsMenu, RecentTicketsMenuEvent},
         settings_dialog::SettingsDialog,
     },
@@ -21,7 +22,8 @@ use crate::{
 
 type SettingsHost = DialogHost<SettingsDialog, ()>;
 type SettingsLayer = DialogLayer<Flex<()>, SettingsHost>;
-type AppView = DialogLayer<SettingsLayer, RecentTicketsMenu>;
+type RecentTicketsLayer = DialogLayer<SettingsLayer, RecentTicketsMenu>;
+type AppView = DialogLayer<RecentTicketsLayer, JiraSearchMenu>;
 
 pub(crate) struct App {
     view: AppView,
@@ -65,7 +67,14 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
         .fit_content()
         .base_overlays_visible(true)
         .backdrop(DialogBackdrop::dim().amount(0.5));
-    let view = DialogLayer::new(settings_view, RecentTicketsMenu::new(service.clone()))
+    let recent_tickets_view =
+        DialogLayer::new(settings_view, RecentTicketsMenu::new(service.clone()))
+            .active(false)
+            .fit_content()
+            .fit_content_max(56, u16::MAX)
+            .base_overlays_visible(true)
+            .backdrop(DialogBackdrop::dim().amount(0.55));
+    let view = DialogLayer::new(recent_tickets_view, JiraSearchMenu::new(service.clone()))
         .active(false)
         .fit_content()
         .fit_content_max(56, u16::MAX)
@@ -83,18 +92,35 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
 impl App {
     fn apply_dialog_signals(&mut self, ctx: &mut EventCtx<()>) {
         if self.open_settings.replace(false) {
-            self.view.base_mut().set_active_with_context(true, ctx);
+            self.view
+                .base_mut()
+                .base_mut()
+                .set_active_with_context(true, ctx);
         }
         if self.close_dialog.replace(false) {
-            self.view.base_mut().set_active_with_context(false, ctx);
+            self.view
+                .base_mut()
+                .base_mut()
+                .set_active_with_context(false, ctx);
         }
-        for event in self.view.layer_mut().take_events() {
+        for event in self.view.base_mut().layer_mut().take_events() {
             match event {
                 RecentTicketsMenuEvent::OpenTicket(key) => {
                     self.service.open_jira_issue(&key);
+                    self.view.base_mut().set_active_with_context(false, ctx);
+                }
+                RecentTicketsMenuEvent::Closed => {
+                    self.view.base_mut().set_active_with_context(false, ctx)
+                }
+            }
+        }
+        for event in self.view.layer_mut().take_events() {
+            match event {
+                JiraSearchMenuEvent::OpenTicket(key) => {
+                    self.service.open_jira_issue(&key);
                     self.view.set_active_with_context(false, ctx);
                 }
-                RecentTicketsMenuEvent::Closed => self.view.set_active_with_context(false, ctx),
+                JiraSearchMenuEvent::Closed => self.view.set_active_with_context(false, ctx),
             }
         }
         if self.drain_service_notifications() {
@@ -105,7 +131,21 @@ impl App {
 
     fn open_recent_tickets(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
         if self.view.is_active()
+            || self.view.base().is_active()
             || !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Char('e'), KeyModifiers::CONTROL).matches(*key))
+        {
+            return false;
+        }
+        self.view.base_mut().layer_mut().open(ctx);
+        self.view.base_mut().set_active_with_context(true, ctx);
+        ctx.stop_propagation();
+        true
+    }
+
+    fn open_jira_search(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        if self.view.is_active()
+            || self.view.base().is_active()
+            || !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Char('f'), KeyModifiers::CONTROL).matches(*key))
         {
             return false;
         }
@@ -148,7 +188,7 @@ impl TuiNode for App {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        if self.open_recent_tickets(event, ctx) {
+        if self.open_jira_search(event, ctx) || self.open_recent_tickets(event, ctx) {
             return EventOutcome::Handled;
         }
         let outcome = self.view.event(event, ctx);
@@ -162,7 +202,7 @@ impl TuiNode for App {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        if self.open_recent_tickets(event, ctx) {
+        if self.open_jira_search(event, ctx) || self.open_recent_tickets(event, ctx) {
             return EventOutcome::Handled;
         }
         let outcome = self.view.dispatch_event(route, event, ctx);

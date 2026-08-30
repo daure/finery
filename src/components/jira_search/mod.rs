@@ -16,8 +16,7 @@ use tuicore::{
     AnimationSettings, AxisProposal, CellContext, ChildKey, Column, EventCtx, EventOutcome,
     EventRoute, FocusCtx, FocusId, FocusTarget, Key, KeyEvent, KeyModifiers, KeySpec, LayoutCtx,
     LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, ListControl,
-    ListControlKeyBindings, RenderCtx, SearchMode, TextInput, TickResult, TuiEvent, TuiNode,
-    search_match,
+    ListControlKeyBindings, RenderCtx, TextInput, TickResult, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -25,7 +24,7 @@ use crate::{
         avatar::bubble_span,
         work_item_rows::{
             WorkItemKind, WorkItemRow, append_release_chip, story_points_label,
-            work_item_title_prefix_width, work_item_title_with_key_line,
+            work_item_title_prefix_width, work_item_title_with_key_line_with_match,
         },
     },
     service::{AppService, RecentTickets},
@@ -34,8 +33,10 @@ use crate::{
 
 const MENU_WIDTH: u16 = 56;
 const MAX_VISIBLE_ROWS: u16 = 10;
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-enum RecentTicketsResult {
+enum JiraSearchResult {
     Loaded {
         generation: u64,
         result: Result<RecentTickets, String>,
@@ -43,51 +44,56 @@ enum RecentTicketsResult {
 }
 
 #[derive(Clone)]
-struct RecentTicketRow {
+struct JiraSearchRow {
     item: WorkItemRow,
     epic_name: Option<String>,
     subtask_progress: Option<SubtaskProgress>,
     fix_versions: Vec<String>,
+    match_query: String,
     alternate_background: bool,
 }
 
-pub(crate) struct RecentTicketsMenu {
+pub(crate) struct JiraSearchMenu {
     service: AppService,
     input: TextInput<()>,
-    list: ListControl<RecentTicketRow, String>,
+    list: ListControl<JiraSearchRow, String>,
     query: Rc<RefCell<Option<String>>>,
-    events: Vec<RecentTicketsMenuEvent>,
-    sender: Sender<RecentTicketsResult>,
-    receiver: Receiver<RecentTicketsResult>,
+    events: Vec<JiraSearchMenuEvent>,
+    sender: Sender<JiraSearchResult>,
+    receiver: Receiver<JiraSearchResult>,
     generation: u64,
+    last_query: String,
+    pending_search: Option<Duration>,
     loading: bool,
     input_area: Rect,
     list_area: Rect,
 }
 
-pub(crate) enum RecentTicketsMenuEvent {
+pub(crate) enum JiraSearchMenuEvent {
     OpenTicket(String),
     Closed,
 }
 
-impl RecentTicketsMenu {
+impl JiraSearchMenu {
     pub(crate) fn new(service: AppService) -> Self {
         let (sender, receiver) = mpsc::channel();
         let query = Rc::new(RefCell::new(None));
         let query_changes = Rc::clone(&query);
         let input = TextInput::new()
-            .placeholder("Search recent tickets…")
+            .placeholder("Search Jira tickets…")
             .focused(true)
             .on_change(move |value| *query_changes.borrow_mut() = Some(value));
         Self {
             service,
             input,
-            list: recent_ticket_list(),
+            list: jira_search_list(),
             query,
             events: Vec::new(),
             sender,
             receiver,
             generation: 0,
+            last_query: String::new(),
+            pending_search: None,
             loading: false,
             input_area: Rect::default(),
             list_area: Rect::default(),
@@ -95,73 +101,89 @@ impl RecentTicketsMenu {
     }
 
     pub(crate) fn open(&mut self, ctx: &mut EventCtx<()>) {
-        self.generation = self.generation.saturating_add(1);
-        self.loading = true;
         self.events.clear();
         self.input.set_value("");
         self.query.borrow_mut().take();
+        self.last_query.clear();
+        self.pending_search = None;
         self.list.set_rows(Vec::new());
         self.list.data_view_mut().set_search_query("");
         self.list.data_view_mut().set_focused(true);
-        let generation = self.generation;
-        let service = self.service.clone();
-        let sender = self.sender.clone();
-        if let Err(error) = std::thread::Builder::new()
-            .name("finery-recent-tickets".into())
-            .spawn(move || {
-                let _ = sender.send(RecentTicketsResult::Loaded {
-                    generation,
-                    result: service.load_recent_jira_tickets(),
-                });
-            })
-        {
-            self.loading = false;
-            self.service
-                .report_error(format!("Could not load recent Jira tickets: {error}"));
-        }
+        self.start_search();
         ctx.request_layout();
         ctx.request_redraw();
         ctx.request_tick();
     }
 
-    pub(crate) fn take_events(&mut self) -> Vec<RecentTicketsMenuEvent> {
+    pub(crate) fn take_events(&mut self) -> Vec<JiraSearchMenuEvent> {
         std::mem::take(&mut self.events)
+    }
+
+    fn start_search(&mut self) {
+        self.generation = self.generation.saturating_add(1);
+        self.loading = true;
+        let generation = self.generation;
+        let query = self.last_query.clone();
+        let service = self.service.clone();
+        let sender = self.sender.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name(format!("finery-jira-search-{generation}"))
+            .spawn(move || {
+                let _ = sender.send(JiraSearchResult::Loaded {
+                    generation,
+                    result: service.search_jira_work_items(&query),
+                });
+            })
+        {
+            self.loading = false;
+            self.service
+                .report_error(format!("Could not start Jira search: {error}"));
+        }
     }
 
     fn sync_query(&mut self) -> bool {
         let Some(query) = self.query.borrow_mut().take() else {
             return false;
         };
-        self.list.data_view_mut().set_search_query(query);
-        self.highlight_first_visible();
+        if query == self.last_query {
+            return false;
+        }
+        self.last_query = query;
+        self.generation = self.generation.saturating_add(1);
+        self.pending_search = Some(Duration::ZERO);
+        self.loading = true;
+        self.list.set_rows(Vec::new());
+        self.list.data_view_mut().set_search_query("");
         true
     }
 
     fn drain_results(&mut self) -> bool {
         let mut changed = false;
-        while let Ok(RecentTicketsResult::Loaded { generation, result }) = self.receiver.try_recv()
-        {
+        while let Ok(JiraSearchResult::Loaded { generation, result }) = self.receiver.try_recv() {
             if generation != self.generation {
                 continue;
             }
             self.loading = false;
             match result {
                 Ok(tickets) => {
-                    let rows = tickets
-                        .work_items
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, ticket)| {
-                            recent_ticket_row(
-                                ticket,
-                                tickets.story_points_configured,
-                                tickets.assumed_story_points,
-                                index % 2 == 0,
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    self.list.set_rows(rows);
-                    self.highlight_first_visible();
+                    let match_query = self.last_query.clone();
+                    self.list.set_rows(
+                        tickets
+                            .work_items
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, ticket)| {
+                                jira_search_row(
+                                    ticket,
+                                    tickets.story_points_configured,
+                                    tickets.assumed_story_points,
+                                    match_query.clone(),
+                                    index % 2 == 0,
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                    self.highlight_first_ticket();
                     self.input.set_focused(true);
                     self.input.set_insert_mode(true);
                     self.input.move_cursor_to_end();
@@ -169,11 +191,17 @@ impl RecentTicketsMenu {
                 }
                 Err(error) => self
                     .service
-                    .report_error(format!("Could not load recent Jira tickets: {error}")),
+                    .report_error(format!("Jira search failed: {error}")),
             }
             changed = true;
         }
         changed
+    }
+
+    fn highlight_first_ticket(&mut self) {
+        if let Some(key) = self.list.items().first().map(|row| row.item.key.clone()) {
+            self.list.set_highlighted_id(&key);
+        }
     }
 
     fn open_highlighted_ticket(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
@@ -184,7 +212,7 @@ impl RecentTicketsMenu {
         let Some(key) = self.list.data_view().highlighted_id() else {
             return false;
         };
-        self.events.push(RecentTicketsMenuEvent::OpenTicket(key));
+        self.events.push(JiraSearchMenuEvent::OpenTicket(key));
         ctx.stop_propagation();
         true
     }
@@ -198,7 +226,7 @@ impl RecentTicketsMenu {
         {
             return false;
         }
-        self.events.push(RecentTicketsMenuEvent::Closed);
+        self.events.push(JiraSearchMenuEvent::Closed);
         ctx.stop_propagation();
         true
     }
@@ -230,62 +258,19 @@ impl RecentTicketsMenu {
             ctx,
         ))
     }
-
-    fn visible_row_count(&self) -> usize {
-        let query = self.input.current_value().trim();
-        self.list
-            .items()
-            .iter()
-            .filter(|row| {
-                search_match(
-                    query,
-                    &format!(
-                        "{} {} {}",
-                        row.item.key,
-                        row.item.title,
-                        row.epic_name.as_deref().unwrap_or_default()
-                    ),
-                    SearchMode::Contains,
-                )
-                .is_some()
-            })
-            .count()
-    }
-
-    fn highlight_first_visible(&mut self) {
-        let query = self.input.current_value().trim();
-        let first_ticket = self.list.items().iter().find_map(|row| {
-            search_match(
-                query,
-                &format!(
-                    "{} {} {}",
-                    row.item.key,
-                    row.item.title,
-                    row.epic_name.as_deref().unwrap_or_default()
-                ),
-                SearchMode::Contains,
-            )
-            .is_some()
-            .then(|| row.item.key.clone())
-        });
-        if let Some(first_ticket) = first_ticket {
-            self.list.set_highlighted_id(&first_ticket);
-        }
-    }
 }
 
-fn recent_ticket_list() -> ListControl<RecentTicketRow, String> {
+fn jira_search_list() -> ListControl<JiraSearchRow, String> {
     let mut list = ListControl::new(
         Vec::new(),
-        |row: &RecentTicketRow| row.item.key.clone(),
+        |row: &JiraSearchRow| row.item.key.clone(),
         |_, _| unreachable!(),
     )
     .headers(false)
-    .columns(vec![recent_ticket_column()])
+    .columns(vec![jira_search_column()])
     .max_rows(usize::MAX)
     .panel_visible(false)
     .action_bar(false)
-    .search_mode(SearchMode::Contains)
     .keybindings(
         ListControlKeyBindings::default()
             .add([])
@@ -294,7 +279,8 @@ fn recent_ticket_list() -> ListControl<RecentTicketRow, String> {
             .remove([]),
     )
     .empty_message("No results found.");
-    list.data_view_mut().set_row_height(2);
+    list.data_view_mut()
+        .set_row_height_by(jira_search_row_height);
     list.data_view_mut().set_wrap_cells(true);
     list.data_view_mut().set_row_style_by(|row| {
         row.alternate_background
@@ -303,26 +289,27 @@ fn recent_ticket_list() -> ListControl<RecentTicketRow, String> {
     list
 }
 
-fn recent_ticket_column() -> Column<RecentTicketRow, String> {
+fn jira_search_row_height(row: &JiraSearchRow) -> u16 {
+    let title_width = usize::from(MENU_WIDTH)
+        .saturating_sub(work_item_title_prefix_width(&row.item))
+        .saturating_sub(2)
+        .max(1);
+    let title_lines = row.item.title.chars().count().div_ceil(title_width).max(1);
+    u16::try_from(title_lines.saturating_add(1)).unwrap_or(u16::MAX)
+}
+
+fn jira_search_column() -> Column<JiraSearchRow, String> {
     Column::multiline(
-        "recent-ticket",
+        "jira-search-ticket",
         "",
         Constraint::Percentage(100),
-        |row: &RecentTicketRow, _: &CellContext<String>| recent_ticket_text(row),
+        |row: &JiraSearchRow, _: &CellContext<String>| jira_search_text(row),
     )
     .constrained()
     .wrap_continuation_indent_by(|row| work_item_title_prefix_width(&row.item))
-    .search_key(|row| {
-        format!(
-            "{} {} {}",
-            row.item.key,
-            row.item.title,
-            row.epic_name.as_deref().unwrap_or_default()
-        )
-    })
 }
 
-fn recent_ticket_text(row: &RecentTicketRow) -> Text<'static> {
+fn jira_search_text(row: &JiraSearchRow) -> Text<'static> {
     let theme = tuicore::theme();
     let text_style = Style::default().fg(theme.text_fg());
     let muted_style = Style::default().fg(theme.muted_fg());
@@ -359,7 +346,7 @@ fn recent_ticket_text(row: &RecentTicketRow) -> Text<'static> {
         );
     }
     Text::from(vec![
-        work_item_title_with_key_line(&row.item, None),
+        work_item_title_with_key_line_with_match(&row.item, None, Some(&row.match_query)),
         Line::from(metadata),
     ])
 }
@@ -371,19 +358,20 @@ fn append_metadata(metadata: &mut Vec<Span<'static>>, value: Span<'static>) {
     metadata.push(value);
 }
 
-fn recent_ticket_row(
+fn jira_search_row(
     ticket: WorkItem,
     story_points_configured: bool,
     assumed_story_points: f64,
+    match_query: String,
     alternate_background: bool,
-) -> RecentTicketRow {
+) -> JiraSearchRow {
     let missing_estimate = ticket.story_points.is_none();
     let estimated_story_points = matches!(
         work_item_kind(&ticket.kind),
         WorkItemKind::Story | WorkItemKind::Task
     )
     .then_some(assumed_story_points);
-    RecentTicketRow {
+    JiraSearchRow {
         item: WorkItemRow {
             id: ticket.key.clone(),
             key: ticket.key,
@@ -402,6 +390,7 @@ fn recent_ticket_row(
         epic_name: ticket.epic_name,
         subtask_progress: ticket.subtask_progress,
         fix_versions: ticket.fix_versions,
+        match_query,
         alternate_background,
     }
 }
@@ -417,16 +406,19 @@ fn work_item_kind(kind: &str) -> WorkItemKind {
     }
 }
 
-#[cfg(test)]
-mod tests;
-
-impl TuiNode for RecentTicketsMenu {
+impl TuiNode for JiraSearchMenu {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
         let preferred_height = if self.loading {
             1
         } else {
-            let rows = self.visible_row_count().max(1).min(MAX_VISIBLE_ROWS.into());
-            1 + u16::try_from(rows).unwrap_or(MAX_VISIBLE_ROWS) * 2
+            1 + self
+                .list
+                .items()
+                .iter()
+                .take(MAX_VISIBLE_ROWS.into())
+                .map(jira_search_row_height)
+                .sum::<u16>()
+                .max(1)
         };
         let max_height = match proposal.height {
             AxisProposal::AtMost(height) | AxisProposal::Exact(height) => {
@@ -464,7 +456,7 @@ impl TuiNode for RecentTicketsMenu {
         if self.loading {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    "Loading…",
+                    "Searching Jira…",
                     Style::default().fg(tuicore::theme().muted_fg()),
                 )))
                 .alignment(Alignment::Right),
@@ -486,6 +478,7 @@ impl TuiNode for RecentTicketsMenu {
         if self.sync_query() {
             ctx.request_layout();
             ctx.request_redraw();
+            ctx.request_tick();
         }
         outcome
     }
@@ -502,20 +495,17 @@ impl TuiNode for RecentTicketsMenu {
         if let Some(outcome) = self.navigate_list(event, ctx) {
             return outcome;
         }
-        if let Some(search_route) = route.path.without_first_if(&ChildKey::new("search")) {
-            let outcome = self
-                .input
-                .dispatch_event(&EventRoute::new(search_route), event, ctx);
-            if self.sync_query() {
-                ctx.request_layout();
-                ctx.request_redraw();
-            }
-            return outcome;
-        }
-        let outcome = self.input.event(event, ctx);
+        let outcome =
+            if let Some(search_route) = route.path.without_first_if(&ChildKey::new("search")) {
+                self.input
+                    .dispatch_event(&EventRoute::new(search_route), event, ctx)
+            } else {
+                self.input.event(event, ctx)
+            };
         if self.sync_query() {
             ctx.request_layout();
             ctx.request_redraw();
+            ctx.request_tick();
         }
         outcome
     }
@@ -536,22 +526,29 @@ impl TuiNode for RecentTicketsMenu {
     }
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        let result = self
-            .input
-            .tick(dt, settings)
-            .merge(self.list.tick(dt, settings));
-        if self.drain_results() {
-            result.merge(TickResult {
-                changed: true,
-                layout: true,
-                active: false,
-                next_tick: None,
-            })
-        } else if self.loading {
-            result.merge(TickResult::scheduled_after(Duration::from_millis(50)))
-        } else {
-            result
+        let mut changed = self.drain_results();
+        if let Some(elapsed) = &mut self.pending_search {
+            *elapsed += dt;
+            if *elapsed >= SEARCH_DEBOUNCE {
+                self.pending_search = None;
+                self.start_search();
+                changed = true;
+            }
         }
+        self.input
+            .tick(dt, settings)
+            .merge(self.list.tick(dt, settings))
+            .merge(if changed {
+                TickResult {
+                    changed: true,
+                    layout: true,
+                    active: false,
+                    next_tick: None,
+                }
+            } else {
+                TickResult::IDLE
+            })
+            .merge(TickResult::scheduled_after(POLL_INTERVAL))
     }
 
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
@@ -562,6 +559,7 @@ impl TuiNode for RecentTicketsMenu {
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.input.mount(ctx);
         self.list.mount(ctx);
+        ctx.request_tick();
     }
 
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
@@ -574,3 +572,6 @@ impl TuiNode for RecentTicketsMenu {
         self.list.destroy(ctx);
     }
 }
+
+#[cfg(test)]
+mod tests;
