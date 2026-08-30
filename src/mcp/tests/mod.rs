@@ -243,7 +243,8 @@ fn workspace_caps_velocity_projection_at_ten_sprints() {
     )
     .unwrap();
 
-    let velocity_sprints = serde_json::to_value(view).unwrap()["backlog"]["velocity"]["sprints"]
+    let serialized_view = serde_json::to_value(view).unwrap();
+    let velocity_sprints = serialized_view["backlog"]["velocity"]["sprints"]
         .as_array()
         .unwrap();
     assert_eq!(velocity_sprints.len(), 10);
