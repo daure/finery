@@ -1,5 +1,3 @@
-#![allow(unused_must_use)]
-
 use serde_json::json;
 
 use super::{

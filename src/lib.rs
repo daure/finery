@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(unused_must_use))]
+
 mod app;
 mod app_settings;
 pub mod cli;
