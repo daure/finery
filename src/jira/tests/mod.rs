@@ -8,16 +8,18 @@ use std::{
 use serde_json::json;
 
 use super::{
-    AgileBoard, AgileIssuePage, BACKLOG_FIELDS, BACKLOG_JQL, ISSUE_FIELDS, IssuePickerResponse,
+    AgileBoard, AgileIssuePage, BACKLOG_FIELDS, BACKLOG_JQL, COMPOSER_FIELDS, ISSUE_FIELDS,
     JiraIssue, JiraSprint, MAX_VELOCITY_GOAL_LOOKUPS, SubmitBatchOutcome, ambiguous_create_failure,
     backlog_page_complete, board_backlog, board_backlog_query, board_sprints, board_velocity,
-    commit_order, create_available_statuses_from_value, create_issue_fields, create_issue_type,
-    create_issue_types_from_value, create_response_failure, created_issue_failure,
-    discover_story_points, is_ticket_number_query, issue_fields, issue_key_jql, issue_picker_keys,
-    move_payload, options_from_values, rank_payload, same_jira_content, search_jql,
-    select_backlog_board, should_discover_story_points, sprint_issues, story_points_field_for_load,
+    commit_order, composer_fields, create_available_statuses_from_value, create_issue_fields,
+    create_issue_type, create_issue_types_from_value, create_response_failure,
+    created_issue_failure, discover_story_points, fetch_composer_issues, is_ticket_number_query,
+    issue_fields, issue_key_jql, move_payload, options_from_values, rank_payload,
+    same_jira_content, search_composer_issues, search_jql, select_backlog_board,
+    should_discover_story_points, sprint_issues, story_points_field_for_load,
     story_points_field_id, story_points_warning, submit_failure, submit_ordered_changes, to_ticket,
-    to_work_item, to_work_item_with_subtasks, update_payload, velocity_average, velocity_report,
+    to_ticket_and_work_item, to_work_item, to_work_item_with_subtasks, update_payload,
+    velocity_average, velocity_report,
 };
 use crate::{
     app_settings::AppSettings,
@@ -45,6 +47,38 @@ fn ticket(key: &str, kind: TicketKind, parent_key: Option<&str>) -> Ticket {
         parent_kind: None,
         has_children: false,
     }
+}
+
+fn jira_settings(base_url: String) -> AppSettings {
+    AppSettings {
+        jira_base_url: base_url,
+        jira_email: "user@example.com".into(),
+        jira_api_token: "token".into(),
+        jira_default_project: "FIN".into(),
+        jira_story_points_field_id: "customfield_10016".into(),
+        ..AppSettings::default()
+    }
+}
+
+fn one_request_server(listener: TcpListener, body: String) -> thread::JoinHandle<(String, bool)> {
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        let size = stream.read(&mut request).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len(),
+        )
+        .unwrap();
+        listener.set_nonblocking(true).unwrap();
+        thread::sleep(Duration::from_millis(50));
+        let extra_request = listener.accept().is_ok();
+        (
+            String::from_utf8_lossy(&request[..size]).into_owned(),
+            extra_request,
+        )
+    })
 }
 
 #[test]
@@ -87,18 +121,82 @@ fn jira_search_scopes_free_text_but_not_issue_keys() {
 }
 
 #[test]
-fn ticket_number_search_uses_unique_issue_picker_keys() {
-    let picker: IssuePickerResponse = serde_json::from_value(json!({
-        "sections": [
-            { "issues": [{ "key": "KAN-42" }, { "key": "OPS-42" }] },
-            { "issues": [{ "key": "KAN-42" }] }
-        ]
-    }))
-    .unwrap();
+fn composer_fetch_fields_combine_ticket_and_presentation_fields() {
+    let fields = composer_fields(Some("customfield_10016"));
 
+    assert!(ISSUE_FIELDS.iter().all(|field| fields.contains(field)));
+    assert!(BACKLOG_FIELDS.iter().all(|field| fields.contains(field)));
+    assert!(COMPOSER_FIELDS.iter().all(|field| fields.contains(field)));
+    assert!(fields.contains(&"customfield_10016"));
     assert!(is_ticket_number_query("42"));
     assert!(!is_ticket_number_query("KAN-42"));
-    assert_eq!(issue_picker_keys(picker), ["KAN-42", "OPS-42"]);
+}
+
+#[test]
+fn composer_source_fetch_uses_one_bulk_request_and_maps_both_models() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let settings = jira_settings(format!("http://{}", listener.local_addr().unwrap()));
+    let server = one_request_server(
+        listener,
+        json!({
+            "issues": [{
+                "key": "FIN-1",
+                "fields": {
+                    "summary": "Ship search",
+                    "project": { "key": "FIN" },
+                    "issuetype": { "name": "Story" },
+                    "fixVersions": [{ "name": "1.0" }],
+                    "customfield_10016": 3
+                }
+            }]
+        })
+        .to_string(),
+    );
+
+    let issues = fetch_composer_issues(&settings, &["FIN-1".into()]).unwrap();
+    let (request, extra_request) = server.join().unwrap();
+
+    let issue = issues.get("FIN-1").unwrap();
+    assert_eq!(issue.ticket.title, "Ship search");
+    assert_eq!(issue.work_item.fix_versions, ["1.0"]);
+    assert_eq!(issue.work_item.story_points, Some(3.0));
+    assert!(request.starts_with("POST /rest/api/3/issue/bulkfetch"));
+    assert!(request.contains("\"description\""));
+    assert!(request.contains("\"fixVersions\""));
+    assert!(request.contains("\"customfield_10016\""));
+    assert!(!extra_request);
+}
+
+#[test]
+fn jira_search_uses_one_request_with_rich_presentation_fields() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let settings = jira_settings(format!("http://{}", listener.local_addr().unwrap()));
+    let server = one_request_server(
+        listener,
+        json!({
+            "issues": [
+                { "key": "FIN-2", "fields": { "summary": "Second", "fixVersions": [{ "name": "2.0" }] } },
+                { "key": "FIN-1", "fields": { "summary": "First", "fixVersions": [{ "name": "1.0" }] } }
+            ]
+        })
+        .to_string(),
+    );
+
+    let issues = search_composer_issues(&settings, "search").unwrap();
+    let (request, extra_request) = server.join().unwrap();
+
+    assert_eq!(
+        issues
+            .iter()
+            .map(|issue| issue.work_item.key.as_str())
+            .collect::<Vec<_>>(),
+        ["FIN-2", "FIN-1"]
+    );
+    assert_eq!(issues[0].work_item.fix_versions, ["2.0"]);
+    assert!(request.starts_with("POST /rest/api/3/search/jql"));
+    assert!(request.contains("\"description\""));
+    assert!(request.contains("\"fixVersions\""));
+    assert!(!extra_request);
 }
 
 #[test]
@@ -165,33 +263,36 @@ fn jira_project_statuses_match_ticket_kind_and_keep_status_ids() {
 }
 
 #[test]
-fn jira_issue_maps_search_fields_and_adf_description() {
-    let ticket = to_ticket(JiraIssue {
-        key: "OPS-42".into(),
-        fields: json!({
-            "summary": "Retry checkout",
-            "project": { "key": "OPS" },
-            "issuetype": { "name": "Story" },
-            "status": { "name": "In Progress" },
-            "priority": { "name": "High" },
-            "assignee": { "displayName": "Ada", "accountId": "ada-1" },
-            "parent": {
-                "key": "OPS-1",
-                "fields": {
-                    "summary": "Checkout",
-                    "issuetype": { "name": "Epic" }
+fn jira_issue_maps_ticket_and_presentation_fields_together() {
+    let (ticket, work_item) = to_ticket_and_work_item(
+        JiraIssue {
+            key: "OPS-42".into(),
+            fields: json!({
+                "summary": "Retry checkout",
+                "project": { "key": "OPS" },
+                "issuetype": { "name": "Story" },
+                "status": { "name": "In Progress" },
+                "priority": { "name": "High" },
+                "assignee": { "displayName": "Ada", "accountId": "ada-1" },
+                "parent": {
+                    "key": "OPS-1",
+                    "fields": {
+                        "summary": "Checkout",
+                        "issuetype": { "name": "Epic" }
+                    }
+                },
+                "description": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [{
+                        "type": "paragraph",
+                        "content": [{ "type": "text", "text": "Keep basket state." }]
+                    }]
                 }
-            },
-            "description": {
-                "type": "doc",
-                "version": 1,
-                "content": [{
-                    "type": "paragraph",
-                    "content": [{ "type": "text", "text": "Keep basket state." }]
-                }]
-            }
-        }),
-    });
+            }),
+        },
+        None,
+    );
 
     assert_eq!(ticket.key, "OPS-42");
     assert_eq!(ticket.project_key, "OPS");
@@ -203,6 +304,7 @@ fn jira_issue_maps_search_fields_and_adf_description() {
     assert_eq!(ticket.parent_key.as_deref(), Some("OPS-1"));
     assert_eq!(ticket.parent_title.as_deref(), Some("Checkout"));
     assert_eq!(ticket.parent_kind, Some(TicketKind::Epic));
+    assert_eq!(work_item.epic_name.as_deref(), Some("Checkout"));
     assert!(ISSUE_FIELDS.contains(&"parent"));
     assert!(ISSUE_FIELDS.contains(&"subtasks"));
 }

@@ -1,7 +1,8 @@
 use ratatui::style::Modifier;
 
 use super::{
-    WorkItemKind, WorkItemRow, story_points_label, work_item_title_with_key_line_with_match,
+    ChangeBadge, TicketRowDetails, WorkItemKind, WorkItemRow, story_points_label,
+    ticket_summary_text, work_item_title_with_key_line_with_match,
 };
 
 #[test]
@@ -84,4 +85,46 @@ fn average_derived_story_points_show_one_decimal_place() {
     };
 
     assert_eq!(story_points_label(&row), "~3.9");
+}
+
+#[test]
+fn ticket_annotations_extend_composer_metadata_without_hiding_change_state() {
+    tuicore::init();
+    let row = WorkItemRow {
+        id: "FIN-123".into(),
+        key: "FIN-123".into(),
+        title: "Move ticket".into(),
+        kind: WorkItemKind::Story,
+        priority: "High".into(),
+        status: "In Progress".into(),
+        done: false,
+        assignee: "Marlo".into(),
+        story_points: None,
+        show_story_points: false,
+        story_points_estimated: false,
+        story_points_from_average: false,
+        change_badge: Some(ChangeBadge::Modified),
+        submitted: true,
+    };
+
+    let text = ticket_summary_text(
+        &row,
+        None,
+        None,
+        TicketRowDetails {
+            subtask_progress: None,
+            fix_versions: &[],
+            epic_name: None,
+            annotation: Some("FIN-100 → FIN-200"),
+        },
+    );
+    let metadata = text.lines[1]
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+
+    assert!(metadata.contains("M"));
+    assert!(metadata.contains("submitted"));
+    assert!(metadata.contains("FIN-100 → FIN-200"));
 }

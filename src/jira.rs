@@ -46,6 +46,18 @@ const BACKLOG_FIELDS: [&str; 8] = [
     "subtasks",
     "fixVersions",
 ];
+const COMPOSER_FIELDS: [&str; 10] = [
+    "summary",
+    "description",
+    "issuetype",
+    "status",
+    "priority",
+    "assignee",
+    "project",
+    "parent",
+    "subtasks",
+    "fixVersions",
+];
 const BACKLOG_JQL: &str = "issuetype not in subTaskIssueTypes() AND issuetype != Epic";
 const MAX_VELOCITY_GOAL_LOOKUPS: usize = 10;
 
@@ -85,6 +97,11 @@ pub(crate) struct JiraAssignee {
     pub display_name: String,
 }
 
+pub(crate) struct JiraComposerIssue {
+    pub(crate) ticket: Ticket,
+    pub(crate) work_item: WorkItem,
+}
+
 pub(crate) enum SubmitBatchOutcome {
     PreflightError(String),
     Conflict(Vec<String>),
@@ -105,23 +122,6 @@ pub(crate) struct SubmitFailure {
 #[derive(Deserialize)]
 struct SearchResponse {
     issues: Vec<JiraIssue>,
-}
-
-#[derive(Deserialize)]
-struct IssuePickerResponse {
-    #[serde(default)]
-    sections: Vec<IssuePickerSection>,
-}
-
-#[derive(Deserialize)]
-struct IssuePickerSection {
-    #[serde(default)]
-    issues: Vec<IssuePickerIssue>,
-}
-
-#[derive(Deserialize)]
-struct IssuePickerIssue {
-    key: String,
 }
 
 #[derive(Deserialize)]
@@ -248,77 +248,12 @@ struct JiraUser {
     display_name: String,
 }
 
-pub(crate) fn search(settings: &AppSettings, query: &str) -> Result<Vec<Ticket>, String> {
-    let (client, base_url, email, token) = configured_client(settings)?;
-    if is_ticket_number_query(query) {
-        let project = settings.jira_default_project.trim();
-        if !project.is_empty() {
-            let jql = issue_key_jql(&format!("{project}-{}", query.trim()));
-            let response = request_search(&client, &base_url, &email, &token, &jql)
-                .map_err(|(_, error)| error)?;
-            return Ok(response.issues.into_iter().map(to_ticket).collect());
-        }
-        return search_ticket_number(&client, &base_url, &email, &token, query.trim());
-    }
-    let response = request_search(
-        &client,
-        &base_url,
-        &email,
-        &token,
-        &search_jql(query, Some(settings.jira_default_project.trim())),
-    )
-    .map_err(|(_, error)| error)?;
-    Ok(response.issues.into_iter().map(to_ticket).collect())
-}
-
 fn is_ticket_number_query(query: &str) -> bool {
     !query.trim().is_empty()
         && query
             .trim()
             .chars()
             .all(|character| character.is_ascii_digit())
-}
-
-fn search_ticket_number(
-    client: &Client,
-    base_url: &str,
-    email: &str,
-    token: &str,
-    query: &str,
-) -> Result<Vec<Ticket>, String> {
-    let keys = issue_picker_keys(request_issue_picker(client, base_url, email, token, query)?);
-    let tickets = bulk_fetch_tickets(client, base_url, email, token, &keys)?;
-    Ok(keys
-        .into_iter()
-        .filter_map(|key| tickets.get(&key).cloned())
-        .collect())
-}
-
-fn request_issue_picker(
-    client: &Client,
-    base_url: &str,
-    email: &str,
-    token: &str,
-    query: &str,
-) -> Result<IssuePickerResponse, String> {
-    let response = client
-        .get(format!("{base_url}/rest/api/3/issue/picker"))
-        .basic_auth(email, Some(token))
-        .query(&[("query", query), ("showSubTasks", "true")])
-        .send()
-        .map_err(|error| error.to_string())?;
-    response_json(response)
-}
-
-fn issue_picker_keys(response: IssuePickerResponse) -> Vec<String> {
-    let mut seen = HashSet::new();
-    response
-        .sections
-        .into_iter()
-        .flat_map(|section| section.issues)
-        .map(|issue| issue.key)
-        .filter(|key| seen.insert(key.clone()))
-        .collect()
 }
 
 pub(crate) fn fetch_tickets(
@@ -370,6 +305,82 @@ pub(crate) fn fetch_recent_work_items(
         .map(|issue| to_work_item(issue, story_points_field_id))
         .map(|item| (item.key.clone(), item))
         .collect())
+}
+
+pub(crate) fn search_work_items(
+    settings: &AppSettings,
+    query: &str,
+) -> Result<Vec<WorkItem>, String> {
+    Ok(search_composer_issues(settings, query)?
+        .into_iter()
+        .map(|issue| issue.work_item)
+        .collect())
+}
+
+pub(crate) fn search_composer_issues(
+    settings: &AppSettings,
+    query: &str,
+) -> Result<Vec<JiraComposerIssue>, String> {
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let story_points_field_id = story_points_field_for_load(settings, None);
+    let response = request_search(
+        &client,
+        &base_url,
+        &email,
+        &token,
+        &search_jql_for_query(settings, query),
+        &composer_fields(story_points_field_id),
+    )
+    .map_err(|(_, error)| error)?;
+    Ok(response
+        .issues
+        .into_iter()
+        .map(|issue| {
+            let (ticket, work_item) = to_ticket_and_work_item(issue, story_points_field_id);
+            JiraComposerIssue { ticket, work_item }
+        })
+        .collect())
+}
+
+pub(crate) fn fetch_composer_issues(
+    settings: &AppSettings,
+    keys: &[String],
+) -> Result<HashMap<String, JiraComposerIssue>, String> {
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let story_points_field_id = story_points_field_for_load(settings, None);
+    let response = request_bulk_fetch(
+        &client,
+        &base_url,
+        &email,
+        &token,
+        keys,
+        &composer_fields(story_points_field_id),
+    )?;
+    let issues = response
+        .issues
+        .into_iter()
+        .map(|issue| {
+            let (ticket, work_item) = to_ticket_and_work_item(issue, story_points_field_id);
+            let key = ticket.key.clone();
+            (key, JiraComposerIssue { ticket, work_item })
+        })
+        .collect::<HashMap<_, _>>();
+    let missing = keys
+        .iter()
+        .filter(|key| !issues.contains_key(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(issues)
+    } else {
+        Err(format!(
+            "Jira did not return requested tickets: {}",
+            missing.join(", ")
+        ))
+    }
 }
 
 pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
@@ -1003,6 +1014,24 @@ fn backlog_fields(story_points_field_id: Option<&str>) -> Vec<&str> {
     fields
 }
 
+fn composer_fields(story_points_field_id: Option<&str>) -> Vec<&str> {
+    let mut fields = COMPOSER_FIELDS.to_vec();
+    if let Some(field_id) = story_points_field_id.filter(|field_id| !field_id.trim().is_empty()) {
+        fields.push(field_id);
+    }
+    fields
+}
+
+fn search_jql_for_query(settings: &AppSettings, query: &str) -> String {
+    if is_ticket_number_query(query) {
+        let project = settings.jira_default_project.trim();
+        if !project.is_empty() {
+            return issue_key_jql(&format!("{project}-{}", query.trim()));
+        }
+    }
+    search_jql(query, Some(settings.jira_default_project.trim()))
+}
+
 pub(crate) fn fetch(settings: &AppSettings, key: &str) -> Result<Ticket, String> {
     let (client, base_url, email, token) = configured_client(settings)?;
     fetch_ticket(&client, &base_url, &email, &token, key)
@@ -1537,20 +1566,31 @@ fn bulk_fetch_tickets(
     if keys.is_empty() {
         return Ok(HashMap::new());
     }
-    let response = client
-        .post(format!("{base_url}/rest/api/3/issue/bulkfetch"))
-        .basic_auth(email, Some(token))
-        .header("Accept", "application/json")
-        .json(&json!({ "issueIdsOrKeys": keys, "fields": ISSUE_FIELDS }))
-        .send()
-        .map_err(|error| error.to_string())?;
-    let response = response_json::<SearchResponse>(response)?;
+    let response = request_bulk_fetch(client, base_url, email, token, keys, &ISSUE_FIELDS)?;
     Ok(response
         .issues
         .into_iter()
         .map(to_ticket)
         .map(|ticket| (ticket.key.clone(), ticket))
         .collect())
+}
+
+fn request_bulk_fetch(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    keys: &[String],
+    fields: &[&str],
+) -> Result<SearchResponse, String> {
+    let response = client
+        .post(format!("{base_url}/rest/api/3/issue/bulkfetch"))
+        .basic_auth(email, Some(token))
+        .header("Accept", "application/json")
+        .json(&json!({ "issueIdsOrKeys": keys, "fields": fields }))
+        .send()
+        .map_err(|error| error.to_string())?;
+    response_json(response)
 }
 
 fn fetch_ticket(
@@ -1966,6 +2006,7 @@ fn request_search(
     email: &str,
     token: &str,
     jql: &str,
+    fields: &[&str],
 ) -> Result<SearchResponse, (Option<u16>, String)> {
     let response = client
         .post(format!("{base_url}/rest/api/3/search/jql"))
@@ -1973,7 +2014,7 @@ fn request_search(
         .header("Accept", "application/json")
         .json(&serde_json::json!({
             "jql": jql,
-            "fields": ISSUE_FIELDS,
+            "fields": fields,
             "maxResults": 100
         }))
         .send()

@@ -14,6 +14,7 @@ use crate::{
         jira_search::{JiraSearchMenu, JiraSearchMenuEvent},
         recent_tickets::{RecentTicketsMenu, RecentTicketsMenuEvent},
         settings_dialog::SettingsDialog,
+        work_item_rows::TICKET_MENU_WIDTH,
     },
     pages,
     service::AppService,
@@ -24,8 +25,6 @@ type SettingsHost = DialogHost<SettingsDialog, ()>;
 type SettingsLayer = DialogLayer<Flex<()>, SettingsHost>;
 type RecentTicketsLayer = DialogLayer<SettingsLayer, RecentTicketsMenu>;
 type AppView = DialogLayer<RecentTicketsLayer, JiraSearchMenu>;
-
-const TICKET_MENU_MAX_WIDTH: u16 = 84;
 
 pub(crate) struct App {
     view: AppView,
@@ -73,13 +72,13 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
         DialogLayer::new(settings_view, RecentTicketsMenu::new(service.clone()))
             .active(false)
             .fit_content()
-            .fit_content_max(TICKET_MENU_MAX_WIDTH, u16::MAX)
+            .fit_content_max(TICKET_MENU_WIDTH, u16::MAX)
             .base_overlays_visible(true)
             .backdrop(DialogBackdrop::dim().amount(0.55));
     let view = DialogLayer::new(recent_tickets_view, JiraSearchMenu::new(service.clone()))
         .active(false)
         .fit_content()
-        .fit_content_max(TICKET_MENU_MAX_WIDTH, u16::MAX)
+        .fit_content_max(TICKET_MENU_WIDTH, u16::MAX)
         .base_overlays_visible(true)
         .backdrop(DialogBackdrop::dim().amount(0.55));
     App {
@@ -138,8 +137,8 @@ impl App {
         {
             return false;
         }
-        self.view.base_mut().layer_mut().open(ctx);
         self.view.base_mut().set_active_with_context(true, ctx);
+        self.view.base_mut().layer_mut().open(ctx);
         ctx.stop_propagation();
         true
     }
@@ -151,8 +150,8 @@ impl App {
         {
             return false;
         }
-        self.view.layer_mut().open(ctx);
         self.view.set_active_with_context(true, ctx);
+        self.view.layer_mut().open(ctx);
         ctx.stop_propagation();
         true
     }

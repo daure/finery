@@ -1,6 +1,6 @@
 use std::{cell::RefCell, rc::Rc};
 
-use ratatui::{layout::Constraint, style::Style, text::Line};
+use ratatui::{layout::Constraint, style::Style};
 use tuicore::{
     ActivationMode, CellContext, Column, DataView, SelectionGlyphs, SelectionMode,
     SelectionPropagation, SelectionTrigger, TreeAdapter, theme,
@@ -9,7 +9,9 @@ use tuicore::{
 use crate::{
     components::{
         ticket_number_jump::TicketNumberJump,
-        work_item_rows::{ChangeBadge, WorkItemKind, WorkItemRow, work_item_text},
+        work_item_rows::{
+            ChangeBadge, TicketRowDetails, WorkItemKind, WorkItemRow, ticket_summary_text,
+        },
     },
     store::composer::{ChangeKind, ComposerState, TicketChange, TicketKind},
 };
@@ -19,6 +21,9 @@ pub(super) struct TicketRow {
     pub(super) item: WorkItemRow,
     parent_id: Option<String>,
     parent_delta: Option<String>,
+    subtask_progress: Option<(usize, usize)>,
+    fix_versions: Vec<String>,
+    epic_name: Option<String>,
 }
 
 #[cfg(test)]
@@ -89,6 +94,10 @@ pub(super) fn ticket_rows(state: &ComposerState) -> Vec<TicketRow> {
 
 fn ticket_row(state: &ComposerState, change: &TicketChange) -> Option<TicketRow> {
     let ticket = state.ticket_for_change(change)?;
+    let presentation = state.presentation_for_change(change);
+    let estimated_story_points = matches!(ticket.kind, TicketKind::Story | TicketKind::Task)
+        .then(|| presentation.map(|presentation| presentation.assumed_story_points))
+        .flatten();
     let active_ids = state
         .active_set()?
         .tickets
@@ -128,17 +137,36 @@ fn ticket_row(state: &ComposerState, change: &TicketChange) -> Option<TicketRow>
             kind: ticket_kind(ticket.kind),
             priority: ticket.priority.clone(),
             status: ticket.status.clone(),
-            done: ticket.status.eq_ignore_ascii_case("done"),
+            done: presentation
+                .filter(|presentation| presentation.work_item.status == ticket.status)
+                .is_some_and(|presentation| presentation.work_item.done)
+                || ticket.status.eq_ignore_ascii_case("done"),
             assignee: ticket.assignee.clone(),
-            story_points: None,
-            show_story_points: false,
-            story_points_estimated: false,
+            story_points: presentation
+                .and_then(|presentation| presentation.work_item.story_points)
+                .or(estimated_story_points),
+            show_story_points: presentation
+                .is_some_and(|presentation| presentation.story_points_configured),
+            story_points_estimated: presentation
+                .is_some_and(|presentation| presentation.work_item.story_points.is_none())
+                && estimated_story_points.is_some(),
             story_points_from_average: false,
             change_badge: Some(change_badge(change.kind)),
             submitted: change.is_submitted(),
         },
         parent_id,
         parent_delta,
+        subtask_progress: presentation.and_then(|presentation| {
+            presentation
+                .work_item
+                .subtask_progress
+                .as_ref()
+                .map(|progress| (progress.completed, progress.total))
+        }),
+        fix_versions: presentation
+            .map(|presentation| presentation.work_item.fix_versions.clone())
+            .unwrap_or_default(),
+        epic_name: presentation.and_then(|presentation| presentation.work_item.epic_name.clone()),
     })
 }
 
@@ -158,11 +186,17 @@ fn ticket_columns(number_jump: Rc<RefCell<TicketNumberJump>>) -> Vec<Column<Tick
             "",
             Constraint::Percentage(100),
             move |row: &TicketRow, _: &CellContext<String>| {
-                let mut text = work_item_text(&row.item, number_jump.borrow().query());
-                if let Some(delta) = &row.parent_delta {
-                    text.lines[1] = Line::raw(delta.clone());
-                }
-                text
+                ticket_summary_text(
+                    &row.item,
+                    number_jump.borrow().query(),
+                    None,
+                    TicketRowDetails {
+                        subtask_progress: row.subtask_progress,
+                        fix_versions: &row.fix_versions,
+                        epic_name: row.epic_name.as_deref(),
+                        annotation: row.parent_delta.as_deref(),
+                    },
+                )
             },
         )
         .constrained(),

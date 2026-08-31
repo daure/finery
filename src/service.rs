@@ -22,7 +22,7 @@ use crate::{
         ConditionalDeleteChangeSetOutcome, ConditionalSaveChangeSetOutcome, Storage,
         VersionedChangeSetCatalog,
     },
-    store::composer::{ChangeSet, Ticket, TicketChange},
+    store::composer::{ChangeSet, Ticket, TicketChange, TicketPresentation},
     store::work_items::{BacklogSnapshot, RankPlan, WorkItem},
 };
 
@@ -53,6 +53,19 @@ pub(crate) struct RecentTickets {
     pub work_items: Vec<WorkItem>,
     pub story_points_configured: bool,
     pub assumed_story_points: f64,
+}
+
+#[derive(Clone)]
+pub(crate) struct ComposerSearchTicket {
+    pub ticket: Ticket,
+    pub work_item: WorkItem,
+    pub story_points_configured: bool,
+    pub assumed_story_points: f64,
+}
+
+pub(crate) struct ComposerSourceTicket {
+    pub ticket: Ticket,
+    pub presentation: TicketPresentation,
 }
 
 #[cfg(test)]
@@ -551,36 +564,41 @@ impl AppService {
             .unwrap_or_default()
     }
 
-    pub(crate) fn search_jira(&self, query: &str) -> Result<Vec<Ticket>, String> {
-        let settings = self
-            .settings
-            .read()
-            .map_err(|_| "settings lock is unavailable".to_string())?
-            .clone();
-        jira::search(&settings, query)
-    }
-
     pub(crate) fn search_jira_work_items(&self, query: &str) -> Result<RecentTickets, String> {
         let settings = self
             .settings
             .read()
             .map_err(|_| "settings lock is unavailable".to_string())?
             .clone();
-        let keys = jira::search(&settings, query).map(|tickets| {
-            tickets
-                .into_iter()
-                .map(|ticket| ticket.key)
-                .collect::<Vec<_>>()
-        })?;
-        let work_items = jira::fetch_recent_work_items(&settings, &keys)?;
+        let work_items = jira::search_work_items(&settings, query)?;
         Ok(RecentTickets {
-            work_items: keys
-                .into_iter()
-                .filter_map(|key| work_items.get(&key).cloned())
-                .collect(),
+            work_items,
             story_points_configured: !settings.jira_story_points_field_id.trim().is_empty(),
             assumed_story_points: settings.backlog_runway.fixed_ticket_size,
         })
+    }
+
+    pub(crate) fn search_jira_for_composer(
+        &self,
+        query: &str,
+    ) -> Result<Vec<ComposerSearchTicket>, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        let issues = jira::search_composer_issues(&settings, query)?;
+        let story_points_configured = !settings.jira_story_points_field_id.trim().is_empty();
+        let assumed_story_points = settings.backlog_runway.fixed_ticket_size;
+        Ok(issues
+            .into_iter()
+            .map(|issue| ComposerSearchTicket {
+                ticket: issue.ticket,
+                work_item: issue.work_item,
+                story_points_configured,
+                assumed_story_points,
+            })
+            .collect())
     }
 
     pub(crate) fn jira_backlog(&self) -> Result<BacklogSnapshot, String> {
@@ -681,13 +699,33 @@ impl AppService {
         jira::projects(&settings)
     }
 
-    pub(crate) fn fetch_jira(&self, key: &str) -> Result<Ticket, String> {
+    pub(crate) fn fetch_jira_for_composer(
+        &self,
+        keys: &[String],
+    ) -> Result<HashMap<String, ComposerSourceTicket>, String> {
         let settings = self
             .settings
             .read()
             .map_err(|_| "settings lock is unavailable".to_string())?
             .clone();
-        jira::fetch(&settings, key)
+        let story_points_configured = !settings.jira_story_points_field_id.trim().is_empty();
+        let assumed_story_points = settings.backlog_runway.fixed_ticket_size;
+        Ok(jira::fetch_composer_issues(&settings, keys)?
+            .into_iter()
+            .map(|(key, issue)| {
+                (
+                    key,
+                    ComposerSourceTicket {
+                        ticket: issue.ticket,
+                        presentation: TicketPresentation {
+                            work_item: issue.work_item,
+                            story_points_configured,
+                            assumed_story_points,
+                        },
+                    },
+                )
+            })
+            .collect())
     }
 
     pub(crate) fn open_jira_issue(&self, key: &str) {

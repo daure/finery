@@ -52,6 +52,15 @@ pub(super) fn to_ticket(issue: JiraIssue) -> Ticket {
     }
 }
 
+pub(super) fn to_ticket_and_work_item(
+    issue: JiraIssue,
+    story_points_field_id: Option<&str>,
+) -> (Ticket, WorkItem) {
+    let work_item = to_work_item_fields(&issue.key, &issue.fields, story_points_field_id);
+    let ticket = to_ticket(issue);
+    (ticket, work_item)
+}
+
 pub(super) fn to_work_item(issue: JiraIssue, story_points_field_id: Option<&str>) -> WorkItem {
     to_work_item_fields(&issue.key, &issue.fields, story_points_field_id)
 }

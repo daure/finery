@@ -5,6 +5,8 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use crate::store::work_items::WorkItem;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum TicketKind {
     Epic,
@@ -37,6 +39,13 @@ pub(crate) struct Ticket {
     pub parent_kind: Option<TicketKind>,
     #[serde(default)]
     pub has_children: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TicketPresentation {
+    pub work_item: WorkItem,
+    pub story_points_configured: bool,
+    pub assumed_story_points: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,18 +199,19 @@ impl ChangeSet {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ComposerState {
     pub change_sets: Vec<ChangeSet>,
     pub active_change_set: Option<String>,
     pub selected_ticket: Option<String>,
     pub view_mode: ComposerViewMode,
     pub sources: HashMap<(String, String), Ticket>,
+    presentations: HashMap<String, HashMap<String, TicketPresentation>>,
     submitting_change_sets: HashSet<String>,
     next_ticket: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)]
 pub(crate) enum ComposerAction {
     CreateChangeSet {
@@ -218,6 +228,11 @@ pub(crate) enum ComposerAction {
         change_set_id: String,
         id: String,
         ticket: Ticket,
+    },
+    SetPresentation {
+        change_set_id: String,
+        id: String,
+        presentation: TicketPresentation,
     },
     CreateTicket {
         title: String,
@@ -309,6 +324,7 @@ impl ComposerState {
             selected_ticket: None,
             view_mode: ComposerViewMode::Changes,
             sources: HashMap::new(),
+            presentations: HashMap::new(),
             submitting_change_sets: HashSet::new(),
             next_ticket,
         }
@@ -374,6 +390,7 @@ impl ComposerState {
             selected_ticket: None,
             view_mode: ComposerViewMode::Changes,
             sources: HashMap::new(),
+            presentations: HashMap::new(),
             submitting_change_sets: HashSet::new(),
             next_ticket: 1,
         }
@@ -389,6 +406,7 @@ impl ComposerState {
         let selected_ticket = self.selected_ticket.clone();
         self.change_sets = change_sets;
         self.sources.clear();
+        self.presentations.clear();
         self.submitting_change_sets
             .retain(|id| self.change_sets.iter().any(|set| &set.id == id));
         self.next_ticket = next_ticket_id(&self.change_sets);
@@ -510,6 +528,16 @@ impl ComposerState {
                 .or_else(|| self.changes_for_change(change)),
             ComposerViewMode::Changes | ComposerViewMode::Diff => self.changes_for_change(change),
         }
+    }
+
+    pub(crate) fn presentation_for_change(
+        &self,
+        change: &TicketChange,
+    ) -> Option<&TicketPresentation> {
+        self.active_change_set
+            .as_ref()
+            .and_then(|change_set_id| self.presentations.get(change_set_id))
+            .and_then(|presentations| presentations.get(&change.id))
     }
 
     pub(crate) fn selected_is_editable(&self) -> bool {
@@ -793,6 +821,11 @@ impl ComposerState {
                 id,
                 ticket,
             } => self.set_source(&change_set_id, id, ticket),
+            ComposerAction::SetPresentation {
+                change_set_id,
+                id,
+                presentation,
+            } => self.set_presentation(&change_set_id, &id, presentation),
             ComposerAction::CreateTicket { title, project_key } => {
                 self.create_ticket(title, project_key, TicketKind::Task, PlacementTarget::Root)?
             }
@@ -916,6 +949,33 @@ impl ComposerState {
             change.original = Some(ticket.clone());
         }
         self.sources.insert((change_set_id.to_owned(), id), ticket);
+    }
+
+    fn set_presentation(
+        &mut self,
+        change_set_id: &str,
+        id: &str,
+        presentation: TicketPresentation,
+    ) {
+        if self.active_change_set.as_deref() != Some(change_set_id)
+            || !self.remote_queries_allowed()
+        {
+            return;
+        }
+        let change_id = self
+            .active_set()
+            .and_then(|set| {
+                set.tickets
+                    .iter()
+                    .find(|change| change.matches_ticket_identity(id))
+            })
+            .map(|change| change.id.clone());
+        if let Some(change_id) = change_id {
+            self.presentations
+                .entry(change_set_id.into())
+                .or_default()
+                .insert(change_id, presentation);
+        }
     }
 
     fn close_change_set(&mut self) {

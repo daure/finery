@@ -5,8 +5,8 @@ use std::{
 };
 
 use crate::{
-    service::AppService,
-    store::composer::{ComposerAction, ComposerState, ComposerViewMode, Ticket, TicketChange},
+    service::{AppService, ComposerSourceTicket},
+    store::composer::{ComposerAction, ComposerState, ComposerViewMode, TicketChange},
 };
 
 #[derive(Clone, PartialEq, Eq)]
@@ -16,8 +16,12 @@ enum SourceRequest {
 }
 
 enum SourceResponse {
-    Selected(u64, String, String, Result<Ticket, String>),
-    Refresh(u64, String, Vec<(String, Result<Ticket, String>)>),
+    Selected(u64, String, String, Result<ComposerSourceTicket, String>),
+    Refresh(
+        u64,
+        String,
+        Vec<(String, Result<ComposerSourceTicket, String>)>,
+    ),
 }
 
 pub(super) struct SourceController {
@@ -99,11 +103,17 @@ impl SourceController {
         if let Err(error) = std::thread::Builder::new()
             .name(format!("finery-jira-source-{generation}"))
             .spawn(move || {
+                let result = (|| {
+                    let mut sources = service.fetch_jira_for_composer(&[key.clone()])?;
+                    sources
+                        .remove(&key)
+                        .ok_or_else(|| format!("Jira did not return requested ticket: {key}"))
+                })();
                 let _ = sender.send(SourceResponse::Selected(
                     generation,
                     change_set_id,
                     id,
-                    service.fetch_jira(&key),
+                    result,
                 ));
             })
         {
@@ -143,10 +153,25 @@ impl SourceController {
         if let Err(error) = std::thread::Builder::new()
             .name(format!("finery-jira-source-refresh-{generation}"))
             .spawn(move || {
-                let results = targets
-                    .into_iter()
-                    .map(|(id, key)| (id, service.fetch_jira(&key)))
-                    .collect();
+                let keys = targets
+                    .iter()
+                    .map(|(_, key)| key.clone())
+                    .collect::<Vec<_>>();
+                let results = match service.fetch_jira_for_composer(&keys) {
+                    Ok(mut sources) => targets
+                        .into_iter()
+                        .map(|(id, key)| {
+                            let source = sources.remove(&key).ok_or_else(|| {
+                                format!("Jira did not return requested ticket: {key}")
+                            });
+                            (id, source)
+                        })
+                        .collect(),
+                    Err(error) => targets
+                        .into_iter()
+                        .map(|(id, _)| (id, Err(error.clone())))
+                        .collect(),
+                };
                 let _ = sender.send(SourceResponse::Refresh(generation, change_set_id, results));
             })
         {
@@ -196,14 +221,22 @@ impl SourceController {
                 .collect::<Vec<_>>();
             if failures.is_empty() {
                 for (id, result) in responses {
-                    let Ok(ticket) = result else {
+                    let Ok(source) = result else {
                         unreachable!();
                     };
                     let _ = self.state.borrow_mut().dispatch(ComposerAction::SetSource {
                         change_set_id: change_set_id.clone(),
-                        id,
-                        ticket,
+                        id: id.clone(),
+                        ticket: source.ticket,
                     });
+                    let _ = self
+                        .state
+                        .borrow_mut()
+                        .dispatch(ComposerAction::SetPresentation {
+                            change_set_id: change_set_id.clone(),
+                            id,
+                            presentation: source.presentation,
+                        });
                 }
                 if refreshing && let Some(set) = self.state.borrow().active_set().cloned() {
                     self.service.save_change_set(set);

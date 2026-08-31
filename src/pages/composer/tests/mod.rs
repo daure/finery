@@ -25,8 +25,9 @@ use crate::{
     service::{AppService, composer_service::ChangeSetPatchOperation},
     store::composer::{
         ComposerAction, ComposerState, ComposerViewMode, PlacementTarget, SubmissionSnapshot,
-        TicketKind,
+        TicketKind, TicketPresentation,
     },
+    store::work_items::{SubtaskProgress, WorkItem},
 };
 
 use super::title_guidance::{TitleLevel, evaluate_title, format_title};
@@ -1145,6 +1146,62 @@ fn refreshed_source_updates_ticket_row_title_issue_type_and_title_field() {
 }
 
 #[test]
+fn composer_rows_show_shared_work_item_details_from_presentation_cache() {
+    tuicore::init();
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    state
+        .dispatch(ComposerAction::SetPresentation {
+            change_set_id: "CS-1".into(),
+            id: "FIN-142".into(),
+            presentation: TicketPresentation {
+                work_item: WorkItem {
+                    key: "FIN-142".into(),
+                    title: "Keep checkout state across retries".into(),
+                    kind: "Story".into(),
+                    status: "In Progress".into(),
+                    done: false,
+                    priority: "High".into(),
+                    assignee: "Ada".into(),
+                    parent_key: None,
+                    parent_title: None,
+                    has_children: true,
+                    subtask_progress: Some(SubtaskProgress {
+                        completed: 1,
+                        total: 2,
+                    }),
+                    fix_versions: vec!["2026.9".into()],
+                    epic_name: Some("Checkout reliability".into()),
+                    story_points: Some(8.0),
+                },
+                story_points_configured: true,
+                assumed_story_points: 3.0,
+            },
+        })
+        .unwrap();
+    let mut tickets = ticket_data_view(&state);
+    let area = Rect::new(0, 0, 120, 8);
+    TuiNode::<()>::layout(&mut tickets, area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            tickets.render(frame, area);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..area.height)
+        .flat_map(|y| {
+            (0..area.width).map(move |x| buffer.cell((x, y)).unwrap().symbol().to_owned())
+        })
+        .collect::<String>();
+
+    assert!(text.contains("8"), "rendered: {text:?}");
+    assert!(text.contains("1/2"), "rendered: {text:?}");
+    assert!(text.contains("2026.9"), "rendered: {text:?}");
+    assert!(text.contains("Checkout reliability"), "rendered: {text:?}");
+}
+
+#[test]
 fn composer_page_reloads_an_externally_changed_catalog() {
     tuicore::init();
     let service = AppService::for_tests();
@@ -1867,7 +1924,8 @@ fn added_subtask_uses_project_draft_key_until_submission() {
         }
     }
 
-    assert!(text.contains("A • FIN-DRAFT • @-- • To Do"));
+    assert!(text.contains("FIN-DRAFT"));
+    assert!(text.contains("A • @-- • To Do"));
     assert!(!text.contains("Root -> NEW-1"));
 
     let mut submitted = state.selected_changes().unwrap().clone();
@@ -1896,7 +1954,8 @@ fn added_subtask_uses_project_draft_key_until_submission() {
         }
     }
 
-    assert!(text.contains("A • FIN-200 • @-- • To Do"));
+    assert!(text.contains("FIN-200"));
+    assert!(text.contains("A • @-- • To Do"));
 }
 
 #[test]

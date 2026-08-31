@@ -1,5 +1,6 @@
 use super::{recent_ticket_row, recent_ticket_text};
-use crate::store::work_items::WorkItem;
+use crate::{service::AppService, store::work_items::WorkItem};
+use tuicore::{EventCtx, FocusId, FocusRequest};
 
 #[test]
 fn unestimated_tasks_and_stories_use_the_assumed_story_points() {
@@ -39,6 +40,19 @@ fn ticket_releases_render_as_highlight_chips() {
             .add_modifier
             .contains(ratatui::style::Modifier::BOLD)
     );
+}
+
+#[test]
+fn opening_requests_focus_for_the_search_input() {
+    let mut menu = super::RecentTicketsMenu::new(AppService::for_tests());
+    let mut ctx = EventCtx::default();
+
+    menu.open(&mut ctx);
+
+    assert!(matches!(
+        ctx.focus_request(),
+        Some(FocusRequest::Target(id)) if id == &FocusId::new("input")
+    ));
 }
 
 fn work_item(kind: &str) -> WorkItem {

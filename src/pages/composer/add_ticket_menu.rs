@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use ratatui::{Frame, layout::Rect};
+use ratatui::{Frame, layout::Rect, text::Text};
 use tuicore::{
     AnimationSettings, Dropdown, DropdownCommitMode, DropdownLabelPosition, DropdownSearchMode,
     DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget, LayoutCtx,
@@ -14,14 +14,17 @@ use tuicore::{
 };
 
 use crate::{
+    components::work_item_rows::{
+        TICKET_MENU_WIDTH, TicketRowDetails, WorkItemKind, WorkItemRow, ticket_summary_text,
+    },
     jira::JiraProject,
-    service::AppService,
-    store::composer::{PlacementTarget, Ticket, TicketKind},
+    service::{AppService, ComposerSearchTicket},
+    store::composer::{PlacementTarget, TicketKind},
 };
 
 const CHOICE_HOST_WIDTH: u16 = 52;
 const CHOICE_FIELD_WIDTH: u16 = 46;
-const EXISTING_WIDTH: u16 = 120;
+const EXISTING_WIDTH: u16 = TICKET_MENU_WIDTH;
 const MENU_HOST_HEIGHT: u16 = 12;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -38,7 +41,7 @@ enum AddItemId {
 enum AddItem {
     New,
     Existing,
-    Ticket(Ticket),
+    Ticket(ComposerSearchTicket),
     Project(JiraProject),
 }
 
@@ -47,7 +50,7 @@ impl AddItem {
         match self {
             Self::New => AddItemId::New,
             Self::Existing => AddItemId::Existing,
-            Self::Ticket(ticket) => AddItemId::Ticket(ticket.key.clone()),
+            Self::Ticket(ticket) => AddItemId::Ticket(ticket.ticket.key.clone()),
             Self::Project(project) => AddItemId::Project(project.key.clone()),
         }
     }
@@ -56,7 +59,7 @@ impl AddItem {
         match self {
             Self::New => "Add new".into(),
             Self::Existing => "Add existing".into(),
-            Self::Ticket(ticket) => format!("{} · {}", ticket.key, ticket.title),
+            Self::Ticket(ticket) => format!("{} · {}", ticket.ticket.key, ticket.ticket.title),
             Self::Project(project) => format!("{} · {}", project.key, project.name),
         }
     }
@@ -69,7 +72,7 @@ pub(super) enum AddTicketEvent {
         placement: PlacementTarget,
     },
     Include {
-        ticket: Ticket,
+        ticket: ComposerSearchTicket,
         placement: PlacementTarget,
     },
     Closed,
@@ -86,14 +89,14 @@ pub(super) struct AddTicketMenu {
     service: AppService,
     dropdown: Dropdown<AddItem, AddItemId>,
     selected: Rc<RefCell<Vec<AddItemId>>>,
-    tickets: Vec<Ticket>,
+    tickets: Vec<ComposerSearchTicket>,
     events: Vec<AddTicketEvent>,
     mode: AddMenuMode,
     last_query: String,
     pending_search: Option<Duration>,
     generation: u64,
-    sender: Sender<(u64, Result<Vec<Ticket>, String>)>,
-    receiver: Receiver<(u64, Result<Vec<Ticket>, String>)>,
+    sender: Sender<(u64, Result<Vec<ComposerSearchTicket>, String>)>,
+    receiver: Receiver<(u64, Result<Vec<ComposerSearchTicket>, String>)>,
     project_sender: Sender<(u64, Result<Vec<JiraProject>, String>)>,
     project_receiver: Receiver<(u64, Result<Vec<JiraProject>, String>)>,
     project_hint: Option<String>,
@@ -106,23 +109,24 @@ impl AddTicketMenu {
     pub(super) fn new(service: AppService) -> Self {
         let selected = Rc::new(RefCell::new(Vec::new()));
         let selected_sink = Rc::clone(&selected);
-        let dropdown = Dropdown::single(choice_items(), AddItem::id, AddItem::label)
-            .variant(DropdownVariant::Filled)
-            .label("Add ticket")
-            .label_position(DropdownLabelPosition::Inline)
-            .search_mode(DropdownSearchMode::Fuzzy)
-            .external_loading_message("Searching Jira")
-            .commit_mode(DropdownCommitMode::Explicit)
-            .centered(true)
-            .show_field_when_open(false)
-            .backdrop_amount(0.0)
-            .tab_stop(false)
-            .max_popup_height(10)
-            .on_select(move |ids| {
-                if let Some(id) = ids.first() {
-                    selected_sink.borrow_mut().push(id.clone());
-                }
-            });
+        let dropdown =
+            Dropdown::single_rich(choice_items(), AddItem::id, AddItem::label, add_item_text)
+                .variant(DropdownVariant::Filled)
+                .label("Add ticket")
+                .label_position(DropdownLabelPosition::Inline)
+                .search_mode(DropdownSearchMode::Fuzzy)
+                .external_loading_message("Searching Jira")
+                .commit_mode(DropdownCommitMode::Explicit)
+                .centered(true)
+                .show_field_when_open(false)
+                .backdrop_amount(0.0)
+                .tab_stop(false)
+                .max_popup_height(10)
+                .on_select(move |ids| {
+                    if let Some(id) = ids.first() {
+                        selected_sink.borrow_mut().push(id.clone());
+                    }
+                });
         let (sender, receiver) = mpsc::channel();
         let (project_sender, project_receiver) = mpsc::channel();
         Self {
@@ -173,6 +177,8 @@ impl AddTicketMenu {
     pub(super) fn open_projects(&mut self, ctx: &mut EventCtx<()>) {
         self.mode = AddMenuMode::Projects;
         self.dropdown.set_search_mode(DropdownSearchMode::Fuzzy);
+        self.dropdown.set_row_height(1);
+        self.dropdown.set_wrap_cells(false);
         self.dropdown.set_rows([]);
         self.dropdown.clear_selection();
         self.dropdown.set_search_query("");
@@ -202,6 +208,8 @@ impl AddTicketMenu {
         self.mode = AddMenuMode::Existing;
         self.pending_search = None;
         self.dropdown.set_search_mode(DropdownSearchMode::External);
+        self.dropdown.set_row_height(2);
+        self.dropdown.set_wrap_cells(true);
         self.tickets.clear();
         self.dropdown.set_rows([]);
         self.dropdown.clear_selection();
@@ -221,7 +229,7 @@ impl AddTicketMenu {
         if let Err(error) = std::thread::Builder::new()
             .name(format!("finery-jira-search-{generation}"))
             .spawn(move || {
-                let result = service.search_jira(&query);
+                let result = service.search_jira_for_composer(&query);
                 let _ = sender.send((generation, result));
             })
         {
@@ -231,13 +239,13 @@ impl AddTicketMenu {
         }
     }
 
-    fn apply_search_result(&mut self, result: Result<Vec<Ticket>, String>) {
+    fn apply_search_result(&mut self, result: Result<Vec<ComposerSearchTicket>, String>) {
         self.dropdown.set_external_loading(false);
         match result {
             Ok(tickets) => {
                 let tickets = tickets
                     .into_iter()
-                    .filter(|ticket| self.legal_kinds.contains(&ticket.kind))
+                    .filter(|ticket| self.legal_kinds.contains(&ticket.ticket.kind))
                     .collect::<Vec<_>>();
                 self.tickets = tickets.clone();
                 self.dropdown
@@ -318,7 +326,8 @@ impl AddTicketMenu {
                 }
                 AddItemId::Existing => self.open_existing_search(ctx),
                 AddItemId::Ticket(id) => {
-                    if let Some(ticket) = self.tickets.iter().find(|ticket| ticket.key == id) {
+                    if let Some(ticket) = self.tickets.iter().find(|ticket| ticket.ticket.key == id)
+                    {
                         self.events.push(AddTicketEvent::Include {
                             ticket: ticket.clone(),
                             placement: self.placement.clone(),
@@ -356,6 +365,56 @@ impl AddTicketMenu {
 
 fn choice_items() -> [AddItem; 2] {
     [AddItem::New, AddItem::Existing]
+}
+
+fn add_item_text(item: &AddItem, query: &str, _mode: DropdownSearchMode) -> Text<'static> {
+    let AddItem::Ticket(ticket) = item else {
+        return Text::raw(item.label());
+    };
+    let estimated_story_points = matches!(ticket.ticket.kind, TicketKind::Story | TicketKind::Task)
+        .then_some(ticket.assumed_story_points);
+    let row = WorkItemRow {
+        id: ticket.work_item.key.clone(),
+        key: ticket.work_item.key.clone(),
+        title: ticket.work_item.title.clone(),
+        kind: ticket_kind(ticket.ticket.kind),
+        priority: ticket.work_item.priority.clone(),
+        status: ticket.work_item.status.clone(),
+        done: ticket.work_item.done,
+        assignee: ticket.work_item.assignee.clone(),
+        story_points: ticket.work_item.story_points.or(estimated_story_points),
+        show_story_points: ticket.story_points_configured,
+        story_points_estimated: ticket.work_item.story_points.is_none()
+            && estimated_story_points.is_some(),
+        story_points_from_average: false,
+        change_badge: None,
+        submitted: false,
+    };
+    ticket_summary_text(
+        &row,
+        None,
+        (!query.is_empty()).then_some(query),
+        TicketRowDetails {
+            subtask_progress: ticket
+                .work_item
+                .subtask_progress
+                .as_ref()
+                .map(|progress| (progress.completed, progress.total)),
+            fix_versions: &ticket.work_item.fix_versions,
+            epic_name: ticket.work_item.epic_name.as_deref(),
+            annotation: None,
+        },
+    )
+}
+
+fn ticket_kind(kind: TicketKind) -> WorkItemKind {
+    match kind {
+        TicketKind::Epic => WorkItemKind::Epic,
+        TicketKind::Story => WorkItemKind::Story,
+        TicketKind::Task => WorkItemKind::Task,
+        TicketKind::Bug => WorkItemKind::Bug,
+        TicketKind::Subtask => WorkItemKind::Subtask,
+    }
 }
 
 impl TuiNode for AddTicketMenu {

@@ -4,6 +4,8 @@ use ratatui::{
 };
 use tuicore::{Chip, ChipColorRole, MatchSpan, SearchMode, search_match};
 
+pub(crate) const TICKET_MENU_WIDTH: u16 = 84;
+
 #[derive(Clone)]
 pub(crate) struct WorkItemRow {
     pub id: String,
@@ -40,48 +42,65 @@ pub(crate) enum ChangeBadge {
     Synced,
 }
 
-pub(crate) fn work_item_text(row: &WorkItemRow, number_query: Option<&str>) -> Text<'static> {
+pub(crate) struct TicketRowDetails<'a> {
+    pub subtask_progress: Option<(usize, usize)>,
+    pub fix_versions: &'a [String],
+    pub epic_name: Option<&'a str>,
+    pub annotation: Option<&'a str>,
+}
+
+pub(crate) fn ticket_summary_text(
+    row: &WorkItemRow,
+    number_query: Option<&str>,
+    text_query: Option<&str>,
+    details: TicketRowDetails<'_>,
+) -> Text<'static> {
     let theme = tuicore::theme();
-    let (kind_icon, mut kind_color) = ticket_icon(row.kind);
-    let (priority_icon, mut priority_color) = priority_icon(&row.priority);
-    let (badge, mut badge_color) = row
-        .change_badge
-        .map(change_badge)
-        .unwrap_or(("", theme.text_fg()));
-    let text_color = if row.submitted {
-        kind_color = theme.muted_fg();
-        priority_color = theme.muted_fg();
-        badge_color = theme.muted_fg();
+    let text_style = Style::default().fg(if row.submitted {
         theme.muted_fg()
     } else {
         theme.text_fg()
-    };
-    let key_style = ticket_key_style(row, Style::default().fg(text_color));
-    let mut metadata = ticket_key_spans(&row.key, number_query, key_style);
-    metadata.extend([
-        Span::styled(" • ", Style::default().fg(text_color)),
-        crate::components::avatar::bubble_span(&row.assignee),
-    ]);
+    });
+    let muted_style = Style::default().fg(theme.muted_fg());
+    let mut metadata = Vec::new();
+    if let Some(change) = row.change_badge {
+        let (badge, color) = change_badge(change);
+        metadata.push(Span::styled(
+            badge,
+            Style::default()
+                .fg(if row.submitted {
+                    theme.muted_fg()
+                } else {
+                    color
+                })
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     if row.show_story_points {
-        metadata.extend([
-            Span::styled(" • ", Style::default().fg(text_color)),
-            Span::styled(
-                story_points_label(row),
-                Style::default().fg(
-                    if row.story_points.is_some() && !row.story_points_estimated {
-                        text_color
-                    } else {
-                        theme.muted_fg()
-                    },
-                ),
-            ),
-        ]);
+        let style = (row.story_points.is_some() && !row.story_points_estimated)
+            .then_some(text_style)
+            .unwrap_or(muted_style);
+        append_metadata(&mut metadata, Span::styled(story_points_label(row), style));
+    }
+    append_metadata(
+        &mut metadata,
+        crate::components::avatar::bubble_span(&row.assignee),
+    );
+    if let Some((completed, total)) = details.subtask_progress {
+        append_metadata(
+            &mut metadata,
+            Span::styled(format!("{completed}/{total} "), text_style),
+        );
     }
     if !row.status.is_empty() {
-        metadata.extend([
-            Span::styled(" • ", Style::default().fg(text_color)),
-            Span::styled(row.status.clone(), Style::default().fg(text_color)),
-        ]);
+        append_metadata(&mut metadata, Span::styled(row.status.clone(), text_style));
+    }
+    append_release_chip(&mut metadata, details.fix_versions);
+    if let Some(epic_name) = details.epic_name {
+        append_metadata(
+            &mut metadata,
+            Span::styled(epic_name.to_owned(), Style::default().fg(theme.accent_fg())),
+        );
     }
     if row.submitted {
         metadata.push(Span::styled(
@@ -89,35 +108,16 @@ pub(crate) fn work_item_text(row: &WorkItemRow, number_query: Option<&str>) -> T
             Style::default().fg(theme.muted_fg()),
         ));
     }
-    let first_line = vec![
-        Span::styled(format!("{kind_icon} "), Style::default().fg(kind_color)),
-        Span::styled(
-            format!("{priority_icon} "),
-            Style::default().fg(priority_color),
-        ),
-        Span::styled(row.title.clone(), Style::default().fg(text_color)),
-    ];
-    let mut second_line = Vec::new();
-    if row.change_badge.is_some() {
-        second_line.extend([
-            Span::styled(
-                format!("{badge} "),
-                Style::default()
-                    .fg(badge_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("• ", Style::default().fg(text_color)),
-        ]);
+    if let Some(annotation) = details.annotation {
+        append_metadata(
+            &mut metadata,
+            Span::styled(annotation.to_owned(), Style::default().fg(theme.muted_fg())),
+        );
     }
-    second_line.append(&mut metadata);
-    Text::from(vec![Line::from(first_line), Line::from(second_line)])
-}
-
-pub(crate) fn work_item_title_with_key_line(
-    row: &WorkItemRow,
-    number_query: Option<&str>,
-) -> Line<'static> {
-    work_item_title_with_key_line_with_match(row, number_query, None)
+    Text::from(vec![
+        work_item_title_with_key_line_with_match(row, number_query, text_query),
+        Line::from(metadata),
+    ])
 }
 
 pub(crate) fn work_item_title_with_key_line_with_match(
@@ -265,6 +265,13 @@ pub(crate) fn append_release_chip(metadata: &mut Vec<Span<'static>>, fix_version
             .line()
             .spans,
     );
+}
+
+fn append_metadata(metadata: &mut Vec<Span<'static>>, value: Span<'static>) {
+    if !metadata.is_empty() {
+        metadata.push(Span::raw(" • "));
+    }
+    metadata.push(value);
 }
 
 fn ticket_icon(kind: WorkItemKind) -> (&'static str, ratatui::style::Color) {

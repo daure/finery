@@ -23,11 +23,10 @@ use tuicore::{
 use crate::{
     app_settings::{BacklogFilter, BacklogFilterSettings},
     components::{
-        avatar::bubble_span,
         ticket_number_jump::{TicketNumberJump, exact_ticket_number_matches},
         work_item_rows::{
-            WorkItemKind, WorkItemRow, append_release_chip, story_points_label,
-            work_item_title_prefix_width, work_item_title_with_key_line,
+            TicketRowDetails, WorkItemKind, WorkItemRow, ticket_summary_text,
+            work_item_title_prefix_width,
         },
     },
     store::work_items::{
@@ -1253,52 +1252,20 @@ fn backlog_column(number_jump: Rc<RefCell<TicketNumberJump>>) -> Column<BacklogR
 }
 
 fn backlog_work_item_text(row: &BacklogWorkItem, number_query: Option<&str>) -> Text<'static> {
-    let theme = tuicore::theme();
-    let text_style = Style::default().fg(theme.text_fg());
-    let muted_style = Style::default().fg(theme.muted_fg());
-    let mut metadata = Vec::new();
-    if row.item.show_story_points {
-        let style = (row.item.story_points.is_some() && !row.item.story_points_estimated)
-            .then_some(text_style)
-            .unwrap_or(muted_style);
-        metadata.push(Span::styled(story_points_label(&row.item), style));
-    }
-    append_metadata(&mut metadata, bubble_span(&row.item.assignee));
-    if let Some(progress) = &row.subtask_progress {
-        append_metadata(
-            &mut metadata,
-            Span::styled(
-                format!("{}/{} ", progress.completed, progress.total),
-                text_style,
-            ),
-        );
-    }
-    if !row.item.status.is_empty() {
-        append_metadata(
-            &mut metadata,
-            Span::styled(row.item.status.clone(), text_style),
-        );
-    }
-    if !row.fix_versions.is_empty() {
-        append_release_chip(&mut metadata, &row.fix_versions);
-    }
-    if let Some(epic_name) = &row.epic_name {
-        append_metadata(
-            &mut metadata,
-            Span::styled(epic_name.clone(), Style::default().fg(theme.accent_fg())),
-        );
-    }
-    Text::from(vec![
-        work_item_title_with_key_line(&row.item, number_query),
-        Line::from(metadata),
-    ])
-}
-
-fn append_metadata(metadata: &mut Vec<Span<'static>>, value: Span<'static>) {
-    if !metadata.is_empty() {
-        metadata.push(Span::raw(" • "));
-    }
-    metadata.push(value);
+    ticket_summary_text(
+        &row.item,
+        number_query,
+        None,
+        TicketRowDetails {
+            subtask_progress: row
+                .subtask_progress
+                .as_ref()
+                .map(|progress| (progress.completed, progress.total)),
+            fix_versions: &row.fix_versions,
+            epic_name: row.epic_name.as_deref(),
+            annotation: None,
+        },
+    )
 }
 
 fn sprint_title(sprint: &Sprint) -> String {

@@ -21,9 +21,11 @@ use tuicore::{
 use crate::{
     app_settings::{AppSettings, ComposerKeyBinding, ComposerKeyBindings},
     components::ticket_number_jump::{TicketNumberJump, exact_ticket_number_matches},
-    service::AppService,
+    service::{AppService, ComposerSearchTicket},
     speed_reader_settings::SpeedReaderSettings,
-    store::composer::{ChangeKind, ComposerAction, ComposerState, PlacementTarget, TicketKind},
+    store::composer::{
+        ChangeKind, ComposerAction, ComposerState, PlacementTarget, TicketKind, TicketPresentation,
+    },
 };
 
 use super::{
@@ -1142,10 +1144,16 @@ impl TicketEditor {
 
     fn include_at(
         &mut self,
-        ticket: crate::store::composer::Ticket,
+        ticket: ComposerSearchTicket,
         placement: PlacementTarget,
         ctx: &mut EventCtx<()>,
     ) {
+        let presentation = TicketPresentation {
+            work_item: ticket.work_item.clone(),
+            story_points_configured: ticket.story_points_configured,
+            assumed_story_points: ticket.assumed_story_points,
+        };
+        let ticket = ticket.ticket;
         let existing = {
             let state = self.state.borrow();
             state
@@ -1163,7 +1171,7 @@ impl TicketEditor {
         {
             self.request_reparent_confirmation(
                 ComposerAction::ReparentTicket {
-                    id: ticket.key,
+                    id: ticket.key.clone(),
                     placement,
                 },
                 ctx,
@@ -1171,7 +1179,19 @@ impl TicketEditor {
         } else {
             self.pending
                 .borrow_mut()
-                .push(ComposerAction::IncludeTicketAt { ticket, placement });
+                .push(ComposerAction::IncludeTicketAt {
+                    ticket: ticket.clone(),
+                    placement,
+                });
+        }
+        if let Some(change_set_id) = self.state.borrow().active_change_set.clone() {
+            self.pending
+                .borrow_mut()
+                .push(ComposerAction::SetPresentation {
+                    change_set_id,
+                    id: ticket.key,
+                    presentation,
+                });
         }
         self.view
             .base_mut()

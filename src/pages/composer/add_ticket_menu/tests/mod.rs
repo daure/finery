@@ -3,8 +3,9 @@ use tuicore::{EventCtx, FocusCtx, FocusId, FocusRequest, LayoutCtx, RenderCtx, T
 
 use super::{AddTicketMenu, EXISTING_WIDTH};
 use crate::{
-    service::AppService,
+    service::{AppService, ComposerSearchTicket},
     store::composer::{PlacementTarget, Ticket, TicketKind},
+    store::work_items::WorkItem,
 };
 
 #[test]
@@ -29,7 +30,7 @@ fn existing_jira_search_uses_centered_dropdown_popup_without_trigger_field() {
     ));
     menu.dropdown.set_search_query("kan");
     menu.last_query = "kan".into();
-    menu.apply_search_result(Ok(vec![Ticket {
+    menu.apply_search_result(Ok(vec![search_ticket(Ticket {
         key: "KAN-28".into(),
         project_key: "KAN".into(),
         title: "Cart quantity updates preserve item".into(),
@@ -44,7 +45,7 @@ fn existing_jira_search_uses_centered_dropdown_popup_without_trigger_field() {
         parent_title: None,
         parent_kind: None,
         has_children: false,
-    }]));
+    })]));
     let mut open_layout = LayoutCtx::new();
     open_layout.with_overlay_bounds(area, |ctx| {
         menu.layout(area, ctx);
@@ -78,10 +79,12 @@ fn existing_jira_search_uses_centered_dropdown_popup_without_trigger_field() {
         }
     }
     assert!(text.contains("kan"), "rendered: {text:?}");
+    assert!(text.contains("KAN-28"), "rendered: {text:?}");
     assert!(
-        text.contains("KAN-28 · Cart quantity updates preserve item"),
+        text.contains("Cart quantity updates preserve item"),
         "rendered: {text:?}"
     );
+    assert!(text.contains("To Do"), "rendered: {text:?}");
     assert!(!text.contains("Select..."), "rendered: {text:?}");
     assert!(!text.contains("Search Jira"), "rendered: {text:?}");
     assert!(!text.contains("No results"), "rendered: {text:?}");
@@ -126,8 +129,32 @@ fn existing_search_keeps_legal_result_beyond_first_ten() {
         has_children: false,
     });
 
-    menu.apply_search_result(Ok(tickets));
+    menu.apply_search_result(Ok(tickets.into_iter().map(search_ticket).collect()));
 
     assert_eq!(menu.tickets.len(), 1);
-    assert_eq!(menu.tickets[0].key, "FIN-legal");
+    assert_eq!(menu.tickets[0].ticket.key, "FIN-legal");
+}
+
+fn search_ticket(ticket: Ticket) -> ComposerSearchTicket {
+    ComposerSearchTicket {
+        work_item: WorkItem {
+            key: ticket.key.clone(),
+            title: ticket.title.clone(),
+            kind: format!("{:?}", ticket.kind),
+            status: ticket.status.clone(),
+            done: false,
+            priority: ticket.priority.clone(),
+            assignee: ticket.assignee.clone(),
+            parent_key: ticket.parent_key.clone(),
+            parent_title: ticket.parent_title.clone(),
+            has_children: ticket.has_children,
+            subtask_progress: None,
+            fix_versions: Vec::new(),
+            epic_name: None,
+            story_points: None,
+        },
+        ticket,
+        story_points_configured: false,
+        assumed_story_points: 3.0,
+    }
 }

@@ -14,25 +14,22 @@ use ratatui::{
 };
 use tuicore::{
     AnimationSettings, AxisProposal, CellContext, ChildKey, Column, EventCtx, EventOutcome,
-    EventRoute, FocusCtx, FocusId, FocusTarget, Key, KeyEvent, KeyModifiers, KeySpec, LayoutCtx,
-    LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, ListControl,
-    ListControlKeyBindings, RenderCtx, SearchMode, TextInput, TickResult, TuiEvent, TuiNode,
-    search_match,
+    EventRoute, FocusCtx, FocusId, FocusRequest, FocusTarget, Key, KeyEvent, KeyModifiers, KeySpec,
+    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, ListControl,
+    ListControlKeyBindings, RenderCtx, SearchMode, Spinner, TextInput, TickResult, TuiEvent,
+    TuiNode, search_match,
 };
 
 use crate::{
-    components::{
-        avatar::bubble_span,
-        work_item_rows::{
-            WorkItemKind, WorkItemRow, append_release_chip, story_points_label,
-            work_item_title_prefix_width, work_item_title_with_key_line,
-        },
+    components::work_item_rows::{
+        TICKET_MENU_WIDTH, TicketRowDetails, WorkItemKind, WorkItemRow, ticket_summary_text,
+        work_item_title_prefix_width,
     },
     service::{AppService, RecentTickets},
     store::work_items::{SubtaskProgress, WorkItem},
 };
 
-const MENU_WIDTH: u16 = 84;
+const MENU_WIDTH: u16 = TICKET_MENU_WIDTH;
 const MAX_VISIBLE_ROWS: u16 = 10;
 
 enum RecentTicketsResult {
@@ -61,6 +58,7 @@ pub(crate) struct RecentTicketsMenu {
     receiver: Receiver<RecentTicketsResult>,
     generation: u64,
     loading: bool,
+    spinner: Spinner,
     input_area: Rect,
     list_area: Rect,
 }
@@ -89,6 +87,7 @@ impl RecentTicketsMenu {
             receiver,
             generation: 0,
             loading: false,
+            spinner: Spinner::new(),
             input_area: Rect::default(),
             list_area: Rect::default(),
         }
@@ -99,10 +98,13 @@ impl RecentTicketsMenu {
         self.loading = true;
         self.events.clear();
         self.input.set_value("");
+        self.input.set_insert_mode(true);
+        self.input.move_cursor_to_end();
         self.query.borrow_mut().take();
         self.list.set_rows(Vec::new());
         self.list.data_view_mut().set_search_query("");
         self.list.data_view_mut().set_focused(true);
+        ctx.focus(FocusRequest::Target(FocusId::new("input")));
         let generation = self.generation;
         let service = self.service.clone();
         let sender = self.sender.clone();
@@ -323,52 +325,20 @@ fn recent_ticket_column() -> Column<RecentTicketRow, String> {
 }
 
 fn recent_ticket_text(row: &RecentTicketRow) -> Text<'static> {
-    let theme = tuicore::theme();
-    let text_style = Style::default().fg(theme.text_fg());
-    let muted_style = Style::default().fg(theme.muted_fg());
-    let mut metadata = Vec::new();
-    if row.item.show_story_points {
-        let style = (row.item.story_points.is_some() && !row.item.story_points_estimated)
-            .then_some(text_style)
-            .unwrap_or(muted_style);
-        metadata.push(Span::styled(story_points_label(&row.item), style));
-    }
-    append_metadata(&mut metadata, bubble_span(&row.item.assignee));
-    if let Some(progress) = &row.subtask_progress {
-        append_metadata(
-            &mut metadata,
-            Span::styled(
-                format!("{}/{} ", progress.completed, progress.total),
-                text_style,
-            ),
-        );
-    }
-    if !row.item.status.is_empty() {
-        append_metadata(
-            &mut metadata,
-            Span::styled(row.item.status.clone(), text_style),
-        );
-    }
-    if !row.fix_versions.is_empty() {
-        append_release_chip(&mut metadata, &row.fix_versions);
-    }
-    if let Some(epic_name) = &row.epic_name {
-        append_metadata(
-            &mut metadata,
-            Span::styled(epic_name.clone(), Style::default().fg(theme.accent_fg())),
-        );
-    }
-    Text::from(vec![
-        work_item_title_with_key_line(&row.item, None),
-        Line::from(metadata),
-    ])
-}
-
-fn append_metadata(metadata: &mut Vec<Span<'static>>, value: Span<'static>) {
-    if !metadata.is_empty() {
-        metadata.push(Span::raw(" • "));
-    }
-    metadata.push(value);
+    ticket_summary_text(
+        &row.item,
+        None,
+        None,
+        TicketRowDetails {
+            subtask_progress: row
+                .subtask_progress
+                .as_ref()
+                .map(|progress| (progress.completed, progress.total)),
+            fix_versions: &row.fix_versions,
+            epic_name: row.epic_name.as_deref(),
+            annotation: None,
+        },
+    )
 }
 
 fn recent_ticket_row(
@@ -461,16 +431,23 @@ impl TuiNode for RecentTicketsMenu {
             Block::default().style(Style::default().bg(tuicore::theme().surface_bg())),
             area,
         );
+        self.input.render(frame, self.input_area);
         if self.loading {
+            let spinner_area = Rect::new(self.list_area.x, self.list_area.y, 1, 1);
+            self.spinner.render(frame, spinner_area);
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    "Loading...",
+                    "Loading recent tickets...",
                     Style::default().fg(tuicore::theme().text_fg()),
                 ))),
-                self.input_area,
+                Rect::new(
+                    self.list_area.x.saturating_add(2),
+                    self.list_area.y,
+                    self.list_area.width.saturating_sub(2),
+                    1,
+                ),
             );
         } else {
-            self.input.render(frame, self.input_area);
             self.list.render(frame, self.list_area, ctx);
         }
     }
@@ -539,6 +516,11 @@ impl TuiNode for RecentTicketsMenu {
         let result = self
             .input
             .tick(dt, settings)
+            .merge(<Spinner as TuiNode<()>>::tick(
+                &mut self.spinner,
+                dt,
+                settings,
+            ))
             .merge(self.list.tick(dt, settings));
         if self.drain_results() {
             result.merge(TickResult {
