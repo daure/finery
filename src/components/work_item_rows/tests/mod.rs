@@ -153,8 +153,8 @@ fn ticket_annotations_extend_composer_metadata_without_hiding_change_state() {
         None,
         TicketRowDetails {
             subtask_progress: None,
-            fix_versions: &[],
-            epic_name: None,
+            fix_versions: &["v0.5".into()],
+            epic_name: Some("Ticket metadata"),
             annotation: Some("FIN-100 → FIN-200"),
         },
     );
@@ -166,13 +166,14 @@ fn ticket_annotations_extend_composer_metadata_without_hiding_change_state() {
 
     assert!(metadata.contains("M"));
     assert!(metadata.contains("AB|CD|Refinery"));
-    assert!(metadata.find("AB|CD|Refinery") < metadata.find("In Progress"));
+    assert!(metadata.find("In Progress") < metadata.find("AB|CD|Refinery"));
+    assert!(metadata.find("Ticket metadata") < metadata.find("v0.5"));
     assert!(metadata.contains("submitted"));
     assert!(metadata.contains("FIN-100 → FIN-200"));
 }
 
 #[test]
-fn long_labels_use_a_tight_chip_with_an_overflow_count_before_status() {
+fn long_labels_use_a_tight_chip_with_an_overflow_count_after_status() {
     tuicore::init();
     let row = WorkItemRow {
         id: "FIN-123".into(),
@@ -215,5 +216,5 @@ fn long_labels_use_a_tight_chip_with_an_overflow_count_before_status() {
         .collect::<String>();
 
     assert!(metadata.contains("backlog-r…|+3"));
-    assert!(metadata.find("backlog-r…|+3") < metadata.find("To Do"));
+    assert!(metadata.find("To Do") < metadata.find("backlog-r…|+3"));
 }

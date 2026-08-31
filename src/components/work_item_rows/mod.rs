@@ -100,11 +100,10 @@ pub(crate) fn ticket_summary_text(
             Span::styled(format!("{completed}/{total} "), text_style),
         );
     }
-    append_labels_chip(&mut metadata, &row.labels);
     if !row.status.is_empty() {
         append_metadata(&mut metadata, Span::styled(row.status.clone(), text_style));
     }
-    append_release_text(&mut metadata, details.fix_versions);
+    append_labels_chip(&mut metadata, &row.labels);
     if let Some(epic_name) = details.epic_name {
         append_metadata(
             &mut metadata,
@@ -116,6 +115,7 @@ pub(crate) fn ticket_summary_text(
             ),
         );
     }
+    append_release_text(&mut metadata, details.fix_versions);
     if row.submitted {
         metadata.push(Span::styled(
             " · submitted",
