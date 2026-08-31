@@ -1037,8 +1037,8 @@ fn ancestors_match_filters(
 
 fn matches_filters(item: &WorkItem, filters: &BacklogFilterSettings) -> bool {
     filters.selected().iter().all(|filter| match filter {
-        BacklogFilter::Done => item.status.eq_ignore_ascii_case("done"),
-        BacklogFilter::Open => !item.status.eq_ignore_ascii_case("done"),
+        BacklogFilter::Done => crate::store::work_items::is_done_status(&item.status),
+        BacklogFilter::Open => !crate::store::work_items::is_done_status(&item.status),
         BacklogFilter::Pointed => !estimation_eligible(item) || item.story_points.is_some(),
         BacklogFilter::Unpointed => !estimation_eligible(item) || item.story_points.is_none(),
     })

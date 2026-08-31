@@ -651,7 +651,7 @@ fn backlog_items_include_subtask_progress_labels_releases_and_epic_names() {
             key: "FIN-1".into(),
             fields: json!({
                 "summary": "Parent",
-                "status": { "statusCategory": { "key": "done" } },
+                "status": { "name": "Done", "statusCategory": { "key": "done" } },
                 "parent": {
                     "key": "FIN-0",
                     "fields": {
@@ -660,7 +660,7 @@ fn backlog_items_include_subtask_progress_labels_releases_and_epic_names() {
                     }
                 },
                 "subtasks": [
-                    { "key": "FIN-2", "fields": { "status": { "statusCategory": { "key": "done" } } } },
+                    { "key": "FIN-2", "fields": { "status": { "name": "Done", "statusCategory": { "key": "done" } } } },
                     { "key": "FIN-3", "fields": { "status": { "statusCategory": { "key": "indeterminate" } } } }
                 ],
                 "labels": ["AB", "CD", "Refinery"],
@@ -680,6 +680,22 @@ fn backlog_items_include_subtask_progress_labels_releases_and_epic_names() {
     assert_eq!(work_item.labels, ["AB", "CD", "Refinery"]);
     assert_eq!(work_item.fix_versions, ["1.2.0"]);
     assert_eq!(work_item.epic_name.as_deref(), Some("Shopping cart"));
+}
+
+#[test]
+fn only_done_statuses_mark_a_work_item_complete() {
+    let work_item = to_work_item(
+        JiraIssue {
+            key: "FIN-2".into(),
+            fields: json!({
+                "summary": "Closed, but not done",
+                "status": { "name": "Closed", "statusCategory": { "key": "done" } }
+            }),
+        },
+        None,
+    );
+
+    assert!(!work_item.done);
 }
 
 #[test]

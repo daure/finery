@@ -5,7 +5,7 @@ use crate::store::{
         Ticket, TicketKind,
         jira_adf::{adf_is_safe_to_overwrite, adf_to_markdown},
     },
-    work_items::{BacklogSnapshot, SubtaskProgress, WorkItem},
+    work_items::{BacklogSnapshot, SubtaskProgress, WorkItem, is_done_status},
 };
 
 use super::JiraIssue;
@@ -97,10 +97,7 @@ fn to_work_item_fields(key: &str, fields: &Value, story_points_field_id: Option<
         title: field("summary").as_str().unwrap_or(key).into(),
         kind: named_field(field("issuetype")).unwrap_or_else(|| "Issue".into()),
         status: named_field(field("status")).unwrap_or_default(),
-        done: field("status")
-            .pointer("/statusCategory/key")
-            .and_then(Value::as_str)
-            .is_some_and(|category| category.eq_ignore_ascii_case("done")),
+        done: named_field(field("status")).is_some_and(|status| is_done_status(&status)),
         priority: named_field(field("priority")).unwrap_or_default(),
         assignee: field("assignee")
             .get("displayName")
@@ -129,9 +126,9 @@ fn subtask_progress(subtasks: &Value) -> Option<SubtaskProgress> {
             .iter()
             .filter(|subtask| {
                 subtask
-                    .pointer("/fields/status/statusCategory/key")
+                    .pointer("/fields/status/name")
                     .and_then(Value::as_str)
-                    .is_some_and(|category| category.eq_ignore_ascii_case("done"))
+                    .is_some_and(is_done_status)
             })
             .count(),
         total: subtasks.len(),

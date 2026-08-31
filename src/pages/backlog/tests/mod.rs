@@ -231,6 +231,45 @@ fn backlog_filters_show_matching_tickets_and_hide_runway_gutters() {
 }
 
 #[test]
+fn done_filter_matches_done_status_case_insensitively() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    snapshot.work_items = vec![
+        WorkItem {
+            status: "Done".into(),
+            ..work_item("FIN-8", "Uppercase done")
+        },
+        WorkItem {
+            status: "done".into(),
+            ..work_item("FIN-9", "Lowercase done")
+        },
+        WorkItem {
+            status: "Closed".into(),
+            ..work_item("FIN-10", "Closed ticket")
+        },
+    ];
+    let mut filters = BacklogFilterSettings::default();
+    filters.set_selected(vec![BacklogFilter::Done]);
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree_with_filters(&snapshot, sender, Default::default(), filters);
+    let area = Rect::new(0, 0, 100, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(text.contains("Uppercase done"));
+    assert!(text.contains("Lowercase done"));
+    assert!(!text.contains("Closed ticket"));
+}
+
+#[test]
 fn backlog_refresh_is_focusable_with_shift_r() {
     tuicore::init();
     let (sender, receiver) = mpsc::channel();

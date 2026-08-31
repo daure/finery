@@ -73,6 +73,37 @@ fn done_ticket_keys_are_struck_through_in_shared_ticket_rows() {
 }
 
 #[test]
+fn case_insensitive_done_statuses_strike_through_ticket_keys() {
+    tuicore::init();
+    let row = WorkItemRow {
+        id: "KAN-23".into(),
+        key: "KAN-23".into(),
+        title: "Lowercase done ticket".into(),
+        kind: WorkItemKind::Story,
+        priority: "Low".into(),
+        status: "done".into(),
+        done: crate::store::work_items::is_done_status("done"),
+        assignee: "Marlo".into(),
+        labels: Vec::new(),
+        story_points: None,
+        show_story_points: false,
+        story_points_estimated: false,
+        story_points_from_average: false,
+        change_badge: None,
+        submitted: false,
+    };
+
+    let line = work_item_title_with_key_line_with_match(&row, None, None);
+    let key = line
+        .spans
+        .iter()
+        .find(|span| span.content == "KAN-23")
+        .expect("the ticket key is rendered separately");
+
+    assert!(key.style.add_modifier.contains(Modifier::CROSSED_OUT));
+}
+
+#[test]
 fn average_derived_story_points_show_one_decimal_place() {
     let row = WorkItemRow {
         id: "KAN-22".into(),

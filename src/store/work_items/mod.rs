@@ -17,6 +17,10 @@ pub(crate) struct WorkItem {
     pub story_points: Option<f64>,
 }
 
+pub(crate) fn is_done_status(status: &str) -> bool {
+    status.eq_ignore_ascii_case("done")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SubtaskProgress {
     pub completed: usize,

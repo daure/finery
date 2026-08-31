@@ -14,7 +14,10 @@ use crate::{
             work_item_title_prefix_width,
         },
     },
-    store::composer::{ChangeKind, ComposerState, TicketChange, TicketKind},
+    store::{
+        composer::{ChangeKind, ComposerState, TicketChange, TicketKind},
+        work_items::is_done_status,
+    },
 };
 
 #[derive(Clone)]
@@ -160,10 +163,7 @@ fn ticket_row(state: &ComposerState, change: &TicketChange) -> Option<TicketRow>
             kind: ticket_kind(ticket.kind),
             priority: ticket.priority.clone(),
             status: ticket.status.clone(),
-            done: presentation
-                .filter(|presentation| presentation.work_item.status == ticket.status)
-                .is_some_and(|presentation| presentation.work_item.done)
-                || ticket.status.eq_ignore_ascii_case("done"),
+            done: is_done_status(&ticket.status),
             assignee: ticket.assignee.clone(),
             labels: presentation
                 .map(|presentation| presentation.work_item.labels.clone())
