@@ -7,12 +7,15 @@ use ratatui::{
     text::{Line, Text},
 };
 use tuicore::{
-    ActivationMode, AnimationSettings, CellContext, Column, EventCtx, EventOutcome, EventRoute,
-    FocusCtx, FocusId, FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
-    LifecycleCtx, ListControl, ListControlEvent, Panel, RenderCtx, TickResult, TuiEvent, TuiNode,
+    ActivationMode, AnimationSettings, Button, CellContext, ChildKey, Column, Dialog, DialogAction,
+    DialogBackdrop, DialogLayer, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId,
+    FocusRequest, FocusTarget, InputChrome, Key, KeyModifiers, KeySpec, LayoutCtx, LayoutProposal,
+    LayoutResult, LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent,
+    ListControlKeyBindings, RenderCtx, TextInput, TickResult, TuiEvent, TuiNode, keybindings,
 };
 
 use crate::{
+    app_settings::ComposerKeyBindings,
     service::AppService,
     store::composer::{ComposerAction, ComposerState},
 };
@@ -27,11 +30,254 @@ struct ChangeSetRow {
 pub(super) struct ChangeSetListView {
     state: Rc<RefCell<ComposerState>>,
     service: AppService,
-    control: ListControl<ChangeSetRow, String>,
+    view: ChangeSetView,
+    new_change_set_requested: Rc<RefCell<Option<String>>>,
+    dialog_close_requested: Rc<RefCell<bool>>,
+}
+
+type ChangeSetControl = ListControl<ChangeSetRow, String>;
+type ChangeSetDialog = tuicore::DialogHost<WideTextInput, ()>;
+type ChangeSetView = DialogLayer<ChangeSetContent, ChangeSetDialog>;
+
+const CHANGE_SET_DIALOG_WIDTH: u16 = 48;
+
+struct WideTextInput {
+    input: TextInput<()>,
+}
+
+impl WideTextInput {
+    fn new(input: TextInput<()>) -> Self {
+        Self { input }
+    }
+
+    fn current_value(&self) -> &str {
+        self.input.current_value()
+    }
+
+    fn reset(&mut self) {
+        self.input.set_value("");
+        self.input.set_insert_mode(true);
+    }
+}
+
+impl TuiNode for WideTextInput {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        let input = self.input.measure(proposal);
+        LayoutSizeHint::content(
+            input.preferred.width.max(CHANGE_SET_DIALOG_WIDTH),
+            input.preferred.height,
+        )
+        .normalized(proposal)
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.input.layout(area, ctx)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, _ctx: &mut RenderCtx<'a>) {
+        self.input.render(frame, area);
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        self.input.event(event, ctx)
+    }
+
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> EventOutcome {
+        self.input.dispatch_event(route, event, ctx)
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.input.tick(dt, settings)
+    }
+
+    fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.input.focus(target, focused, ctx)
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.input.dispatch_focus(target, focused, ctx)
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.init(ctx)
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.mount(ctx)
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.unmount(ctx)
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.destroy(ctx)
+    }
+}
+
+struct ChangeSetContent {
+    new_button: Button<()>,
+    control: ChangeSetControl,
+    button_area: Rect,
+    control_area: Rect,
+}
+
+impl ChangeSetContent {
+    fn new(new_button: Button<()>, control: ChangeSetControl) -> Self {
+        Self {
+            new_button,
+            control,
+            button_area: Rect::default(),
+            control_area: Rect::default(),
+        }
+    }
+}
+
+impl TuiNode for ChangeSetContent {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        let button = self.new_button.measure(proposal);
+        let control = self.control.measure(proposal);
+        LayoutSizeHint::content(
+            button.preferred.width.max(control.preferred.width),
+            button
+                .preferred
+                .height
+                .saturating_add(control.preferred.height),
+        )
+        .normalized(proposal)
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        let button_height = self
+            .new_button
+            .measure(LayoutProposal::unbounded())
+            .preferred
+            .height
+            .min(area.height);
+        self.button_area = Rect::new(area.x, area.y, area.width, button_height);
+        self.control_area = Rect::new(
+            area.x,
+            area.y.saturating_add(button_height),
+            area.width,
+            area.height.saturating_sub(button_height),
+        );
+        ctx.push_slot(ChildKey::new("change-sets"), self.control_area, |ctx| {
+            self.control.layout(self.control_area, ctx);
+        });
+        ctx.push_slot(ChildKey::new("new-change-set"), self.button_area, |ctx| {
+            self.new_button.layout(self.button_area, ctx);
+        });
+        LayoutResult::new(area)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, _area: Rect, ctx: &mut RenderCtx<'a>) {
+        self.new_button.render(frame, self.button_area);
+        self.control.render(frame, self.control_area, ctx);
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        let outcome = self.new_button.event(event, ctx);
+        if outcome == EventOutcome::Handled {
+            outcome
+        } else {
+            self.control.event(event, ctx)
+        }
+    }
+
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> EventOutcome {
+        if let Some(path) = route
+            .path
+            .without_first_if(&ChildKey::new("new-change-set"))
+        {
+            let outcome = self
+                .new_button
+                .dispatch_event(&EventRoute::new(path), event, ctx);
+            if outcome == EventOutcome::Ignored
+                && matches!(event, TuiEvent::Key(key) if keybindings().focus().unfocus_matches(*key))
+            {
+                ctx.focus(FocusRequest::Target(FocusId::new("data-view")));
+                ctx.stop_propagation();
+                return EventOutcome::Handled;
+            }
+            return outcome;
+        }
+        if let Some(path) = route.path.without_first_if(&ChildKey::new("change-sets")) {
+            if path.keys().len() == 1
+                && !self.control.data_view().is_searching()
+                && matches!(event, TuiEvent::Key(key) if keybindings().focus().unfocus_matches(*key))
+            {
+                ctx.stop_propagation();
+                return EventOutcome::Handled;
+            }
+            let outcome = self
+                .control
+                .dispatch_event(&EventRoute::new(path), event, ctx);
+            return if outcome == EventOutcome::Ignored {
+                self.new_button.event(event, ctx)
+            } else {
+                outcome
+            };
+        }
+        EventOutcome::Ignored
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.new_button
+            .tick(dt, settings)
+            .merge(self.control.tick(dt, settings))
+    }
+
+    fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.new_button.focus(target, focused, ctx);
+        self.control.focus(target, focused, ctx);
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        if let Some(target) = target.for_child(&ChildKey::new("new-change-set")) {
+            self.new_button.dispatch_focus(&target, focused, ctx);
+        }
+        if let Some(target) = target.for_child(&ChildKey::new("change-sets")) {
+            self.control.dispatch_focus(&target, focused, ctx);
+        }
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.new_button.init(ctx);
+        self.control.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.new_button.mount(ctx);
+        self.control.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.new_button.unmount(ctx);
+        self.control.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.new_button.destroy(ctx);
+        self.control.destroy(ctx);
+    }
 }
 
 impl ChangeSetListView {
-    pub(super) fn new(state: Rc<RefCell<ComposerState>>, service: AppService) -> Self {
+    pub(super) fn new(
+        state: Rc<RefCell<ComposerState>>,
+        service: AppService,
+        keys: ComposerKeyBindings,
+    ) -> Self {
         let rows = rows(&state.borrow());
         let control = ListControl::new(
             rows,
@@ -52,8 +298,13 @@ impl ChangeSetListView {
         )
         .column(change_set_column())
         .row_height(2)
-        .title("Change sets")
-        .panel(Panel::new().top_left("Change sets").one_row(true))
+        .panel_visible(false)
+        .action_bar(true)
+        .filter_controls(false)
+        .keybindings(ListControlKeyBindings {
+            add: Vec::new(),
+            ..ListControlKeyBindings::default()
+        })
         .activation_mode(ActivationMode::OnActivateKey)
         .confirm_remove("Delete change set?", |row| {
             format!(
@@ -61,49 +312,131 @@ impl ChangeSetListView {
                 row.id, row.name
             )
         });
+        let new_change_set_requested = Rc::new(RefCell::new(None));
+        let request_new_change_set = Rc::clone(&new_change_set_requested);
+        let dialog_close_requested = Rc::new(RefCell::new(false));
+        let cancel_dialog = Rc::clone(&dialog_close_requested);
+        let close_dialog = Rc::clone(&dialog_close_requested);
+        let input_value = Rc::new(RefCell::new(String::new()));
+        let reset_input_value = Rc::clone(&input_value);
+        let submit_value = Rc::clone(&input_value);
+        let submit_new_change_set = Rc::clone(&new_change_set_requested);
+        let dialog = Dialog::new()
+            .top_left("New change set")
+            .actions([
+                DialogAction::new("OK")
+                    .hotkey(keys.create_confirm.spec())
+                    .on_trigger(move || {
+                        *submit_new_change_set.borrow_mut() =
+                            Some(submit_value.borrow().trim().into())
+                    }),
+                DialogAction::new("Cancel")
+                    .hotkey(keys.dialog_cancel.spec())
+                    .on_trigger(move || *cancel_dialog.borrow_mut() = true),
+            ])
+            .close_on_unfocus_from_descendants(true)
+            .on_close(move |_| *close_dialog.borrow_mut() = true)
+            .host(WideTextInput::new(
+                TextInput::new()
+                    .style(InputChrome::plain())
+                    .placeholder("Change set title")
+                    .focused(true)
+                    .on_change(move |value| *input_value.borrow_mut() = value),
+            ));
+        let view = DialogLayer::new(
+            ChangeSetContent::new(
+                Button::new("New change set")
+                    .hotkey(keys.new_change_set.sequence())
+                    .on_press(move || {
+                        *reset_input_value.borrow_mut() = String::new();
+                        *request_new_change_set.borrow_mut() = Some(String::new());
+                    }),
+                control,
+            ),
+            dialog,
+        )
+        .active(false)
+        .fit_content()
+        .child_overlays_use_base_bounds(true)
+        .backdrop(DialogBackdrop::dim().amount(0.55));
         Self {
             state,
             service,
-            control,
+            view,
+            new_change_set_requested,
+            dialog_close_requested,
         }
     }
 
     pub(super) fn sync(&mut self) {
-        self.control
+        self.view
+            .base_mut()
+            .control
             .data_view_mut()
             .set_rows(rows(&self.state.borrow()));
     }
 
+    fn create_change_set(&mut self, name: String, ctx: &mut EventCtx<()>) {
+        if name.is_empty() {
+            return;
+        }
+        let next = self
+            .state
+            .borrow()
+            .change_sets
+            .iter()
+            .filter_map(|set| set.id.strip_prefix("CS-")?.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let id = format!("CS-{next}");
+        let _ = self
+            .state
+            .borrow_mut()
+            .dispatch(ComposerAction::CreateChangeSet {
+                id: id.clone(),
+                name,
+            });
+        if let Some(set) = self
+            .state
+            .borrow()
+            .change_sets
+            .iter()
+            .find(|set| set.id == id)
+            .cloned()
+        {
+            self.service.save_change_set(set);
+        }
+        self.sync();
+        self.view
+            .base_mut()
+            .control
+            .data_view_mut()
+            .highlight_id(&id);
+        let _ = self
+            .state
+            .borrow_mut()
+            .dispatch(ComposerAction::OpenChangeSet(id));
+        ctx.request_layout();
+        ctx.request_redraw();
+    }
+
     fn drain_events(&mut self, ctx: &mut EventCtx<()>) {
-        for event in self.control.take_events() {
+        let new_change_set = self.new_change_set_requested.borrow_mut().take();
+        if let Some(name) = new_change_set {
+            if name.is_empty() {
+                self.view.layer_mut().child_mut().reset();
+                self.view.set_active_with_context(true, ctx);
+            } else {
+                self.view.set_active_with_context(false, ctx);
+                self.create_change_set(name, ctx);
+            }
+        }
+        if self.dialog_close_requested.replace(false) {
+            self.view.set_active_with_context(false, ctx);
+        }
+        for event in self.view.base_mut().control.take_events() {
             match event {
-                ListControlEvent::Added { row_id } => {
-                    if let Some(row) = self.control.items().iter().find(|row| row.id == row_id) {
-                        let _ = self
-                            .state
-                            .borrow_mut()
-                            .dispatch(ComposerAction::CreateChangeSet {
-                                id: row.id.clone(),
-                                name: row.name.clone(),
-                            });
-                        if let Some(set) = self
-                            .state
-                            .borrow()
-                            .change_sets
-                            .iter()
-                            .find(|set| set.id == row.id)
-                            .cloned()
-                        {
-                            self.service.save_change_set(set);
-                        }
-                        let _ = self
-                            .state
-                            .borrow_mut()
-                            .dispatch(ComposerAction::OpenChangeSet(row_id.clone()));
-                        ctx.request_layout();
-                        ctx.request_redraw();
-                    }
-                }
                 ListControlEvent::Removed { row_id } => {
                     if self.state.borrow().change_set_is_submitting(&row_id) {
                         self.service
@@ -125,7 +458,7 @@ impl ChangeSetListView {
                 _ => {}
             }
         }
-        for event in self.control.data_view_mut().drain_events() {
+        for event in self.view.base_mut().control.data_view_mut().drain_events() {
             if let tuicore::DataViewTypedEvent::Activated { row_id } = event {
                 let _ = self
                     .state
@@ -135,6 +468,24 @@ impl ChangeSetListView {
                 ctx.request_redraw();
             }
         }
+    }
+
+    fn submit_on_ctrl_enter(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        if !self.view.is_active()
+            || !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Enter, KeyModifiers::CONTROL).matches(*key))
+        {
+            return false;
+        }
+        let name = self.view.layer().child().current_value().trim().into();
+        *self.new_change_set_requested.borrow_mut() = Some(name);
+        self.drain_events(ctx);
+        ctx.stop_propagation();
+        true
+    }
+
+    #[cfg(test)]
+    pub(super) fn highlighted_change_set(&self) -> Option<String> {
+        self.view.base().control.data_view().highlighted_id()
     }
 }
 
@@ -174,20 +525,24 @@ fn change_set_column() -> Column<ChangeSetRow, String> {
             ])
         },
     )
+    .search_key(|row| format!("{} {}", row.id, row.name))
 }
 
 impl TuiNode for ChangeSetListView {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
-        self.control.measure(proposal)
+        self.view.measure(proposal)
     }
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        self.control.layout(area, ctx)
+        self.view.layout(area, ctx)
     }
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
-        self.control.render(frame, area, ctx);
+        self.view.render(frame, area, ctx);
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        let outcome = self.control.event(event, ctx);
+        if self.submit_on_ctrl_enter(event, ctx) {
+            return EventOutcome::Handled;
+        }
+        let outcome = self.view.event(event, ctx);
         self.drain_events(ctx);
         outcome
     }
@@ -197,29 +552,32 @@ impl TuiNode for ChangeSetListView {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        let outcome = self.control.dispatch_event(route, event, ctx);
+        if self.submit_on_ctrl_enter(event, ctx) {
+            return EventOutcome::Handled;
+        }
+        let outcome = self.view.dispatch_event(route, event, ctx);
         self.drain_events(ctx);
         outcome
     }
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        self.control.tick(dt, settings)
+        self.view.tick(dt, settings)
     }
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
-        self.control.focus(target, focused, ctx);
+        self.view.focus(target, focused, ctx);
     }
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
-        self.control.dispatch_focus(target, focused, ctx);
+        self.view.dispatch_focus(target, focused, ctx);
     }
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
-        self.control.init(ctx);
+        self.view.init(ctx);
     }
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
-        self.control.mount(ctx);
+        self.view.mount(ctx);
     }
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
-        self.control.unmount(ctx);
+        self.view.unmount(ctx);
     }
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
-        self.control.destroy(ctx);
+        self.view.destroy(ctx);
     }
 }

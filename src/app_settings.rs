@@ -29,6 +29,7 @@ pub(crate) const SPEED_READER_BLOCK_DELAY_SETTING: &str = "reader.markdown_block
 pub(crate) const RECENT_TICKETS_LIMIT_SETTING: &str = "recent_tickets.limit";
 pub(crate) const COMPOSER_ADD_SIBLING_KEY_SETTING: &str = "composer.add_sibling_key";
 pub(crate) const COMPOSER_ADD_CHILD_KEY_SETTING: &str = "composer.add_child_key";
+pub(crate) const COMPOSER_NEW_CHANGE_SET_KEY_SETTING: &str = "composer.new_change_set_key";
 pub(crate) const COMPOSER_COMMIT_KEY_SETTING: &str = "composer.commit_key";
 pub(crate) const COMPOSER_REFRESH_KEY_SETTING: &str = "composer.refresh_key";
 pub(crate) const COMPOSER_VIEW_KEY_SETTING: &str = "composer.view_key";
@@ -126,6 +127,7 @@ impl ComposerSequenceBinding {
 pub(crate) struct ComposerKeyBindings {
     pub(crate) add_sibling: ComposerKeyBinding,
     pub(crate) add_child: ComposerKeyBinding,
+    pub(crate) new_change_set: ComposerKeyBinding,
     pub(crate) commit: ComposerKeyBinding,
     pub(crate) refresh: ComposerKeyBinding,
     pub(crate) view: ComposerKeyBinding,
@@ -180,8 +182,9 @@ impl ComposerKeyBindings {
             )
         };
         let bindings = Self {
-            add_sibling: binding(COMPOSER_ADD_SIBLING_KEY_SETTING, "shift+s")?,
+            add_sibling: binding(COMPOSER_ADD_SIBLING_KEY_SETTING, "shift+a")?,
             add_child: binding(COMPOSER_ADD_CHILD_KEY_SETTING, "shift+c")?,
+            new_change_set: binding(COMPOSER_NEW_CHANGE_SET_KEY_SETTING, "shift+n")?,
             commit: binding(COMPOSER_COMMIT_KEY_SETTING, "shift+m")?,
             refresh: binding(COMPOSER_REFRESH_KEY_SETTING, "shift+r")?,
             view: binding(COMPOSER_VIEW_KEY_SETTING, "shift+v")?,
@@ -211,6 +214,7 @@ impl ComposerKeyBindings {
         ensure_unambiguous(&[
             bindings.add_sibling.sequence(),
             bindings.add_child.sequence(),
+            bindings.new_change_set.sequence(),
             bindings.commit.sequence(),
             bindings.refresh.sequence(),
             bindings.view.sequence(),
@@ -574,6 +578,10 @@ impl AppSettings {
             (
                 COMPOSER_ADD_CHILD_KEY_SETTING,
                 self.composer_keys.add_child.sequence.clone(),
+            ),
+            (
+                COMPOSER_NEW_CHANGE_SET_KEY_SETTING,
+                self.composer_keys.new_change_set.sequence.clone(),
             ),
             (
                 COMPOSER_COMMIT_KEY_SETTING,

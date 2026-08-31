@@ -7,7 +7,7 @@ use std::{
 
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Rect},
+    layout::{Constraint, Rect},
     style::Style,
     text::{Line, Span, Text},
     widgets::{Block, Clear, Paragraph},
@@ -31,7 +31,7 @@ use crate::{
     store::work_items::{SubtaskProgress, WorkItem},
 };
 
-const MENU_WIDTH: u16 = 56;
+const MENU_WIDTH: u16 = 84;
 const MAX_VISIBLE_ROWS: u16 = 10;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -453,17 +453,16 @@ impl TuiNode for JiraSearchMenu {
             Block::default().style(Style::default().bg(tuicore::theme().surface_bg())),
             area,
         );
-        self.input.render(frame, self.input_area);
         if self.loading {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    "Searching Jira…",
-                    Style::default().fg(tuicore::theme().muted_fg()),
-                )))
-                .alignment(Alignment::Right),
+                    "Loading...",
+                    Style::default().fg(tuicore::theme().text_fg()),
+                ))),
                 self.input_area,
             );
         } else {
+            self.input.render(frame, self.input_area);
             self.list.render(frame, self.list_area, ctx);
         }
     }

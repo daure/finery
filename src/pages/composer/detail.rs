@@ -65,6 +65,8 @@ impl DetailPane {
             Rc::clone(&state),
             Rc::clone(&pending),
             Rc::clone(&description_edit_request),
+            &keys,
+            Rc::clone(&description_actions),
         );
         let tabs = Tabs::new(vec![
             Tab::new("Description", narrow_description).hotkey(keys.description_tab.sequence()),
@@ -107,7 +109,6 @@ impl DetailPane {
         .bordered(true);
         let wide_description = Panel::new()
             .top_left("Description")
-            .hotkey(keys.description_tab.sequence())
             .action_hotkey(
                 keys.description_focus.sequence(),
                 panel_description_action(
@@ -136,6 +137,8 @@ impl DetailPane {
                 Rc::clone(&state),
                 Rc::clone(&pending),
                 Rc::clone(&description_edit_request),
+                &keys,
+                Rc::clone(&description_actions),
             ));
         let wide_properties = Panel::new()
             .top_left("Properties")
@@ -168,7 +171,7 @@ impl DetailPane {
             service,
             detail: Split::vertical(mode, fields)
                 .constraints(Constraint::Length(1), Constraint::Fill(1)),
-            empty: SeasonalEmptyState::new("No issue selected"),
+            empty: SeasonalEmptyState::new("No tickets added"),
         }
     }
 
@@ -488,7 +491,18 @@ impl TuiNode for DetailPane {
     }
 
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
-        self.active().render(frame, area, ctx);
+        if self.state.borrow().selected_ticket.is_none() {
+            let offset = area.height / 6;
+            let shifted = Rect::new(
+                area.x,
+                area.y.saturating_sub(offset),
+                area.width,
+                area.height,
+            );
+            <SeasonalEmptyState as TuiNode<()>>::render(&self.empty, frame, shifted, ctx);
+        } else {
+            self.detail.render(frame, area, ctx);
+        }
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {

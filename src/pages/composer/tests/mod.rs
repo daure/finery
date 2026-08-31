@@ -10,9 +10,9 @@ use std::{
 
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use tuicore::{
-    AnimationSettings, EventCtx, EventOutcome, EventRoute, ExternalEditorResponse, FocusCtx,
-    FocusId, FocusRequest, HotkeyEvent, Key, KeyEvent, KeyModifiers, LayoutCtx, RenderCtx,
-    TabsBodyBorderStyle, TuiEvent, TuiNode,
+    AnimationSettings, CheckState, EventCtx, EventOutcome, EventRoute, ExternalEditorResponse,
+    FocusCtx, FocusId, FocusRequest, HotkeyEvent, Key, KeyEvent, KeyModifiers, LayoutCtx,
+    RenderCtx, TabsBodyBorderStyle, TuiEvent, TuiNode,
 };
 
 use super::page::ComposerPage;
@@ -62,10 +62,27 @@ fn render_text_at(page: &mut ComposerPage, width: u16) -> String {
         .collect()
 }
 
+fn render_property_dropdown(dropdown: &mut BoundPropertyDropdown) -> String {
+    let area = Rect::new(0, 0, 32, 3);
+    dropdown.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            dropdown.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..area.height)
+        .flat_map(|y| {
+            (0..area.width).map(move |x| buffer.cell((x, y)).unwrap().symbol().to_owned())
+        })
+        .collect()
+}
+
 fn open_change_set(page: &mut ComposerPage, index: usize) -> EventCtx<()> {
-    let mut layout = LayoutCtx::new();
-    page.layout(Rect::new(0, 0, TEST_WIDTH, 40), &mut layout);
-    let target = layout.focus_targets().first().unwrap().clone();
+    let target = target(page, "data-view");
     page.dispatch_focus(&target, true, &mut FocusCtx::default());
     page.dispatch_event(
         &EventRoute::new(target.path.clone()),
@@ -98,8 +115,12 @@ fn focus(page: &mut ComposerPage, id: &str) -> tuicore::FocusTarget {
 }
 
 fn target(page: &mut ComposerPage, id: &str) -> tuicore::FocusTarget {
+    target_at(page, id, TEST_WIDTH)
+}
+
+fn target_at(page: &mut ComposerPage, id: &str, width: u16) -> tuicore::FocusTarget {
     let mut layout = LayoutCtx::new();
-    page.layout(Rect::new(0, 0, TEST_WIDTH, 40), &mut layout);
+    page.layout(Rect::new(0, 0, width, 40), &mut layout);
     layout
         .focus_targets()
         .iter()
@@ -135,8 +156,8 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     open_change_set(&mut page, 1);
     let text = render_text(&mut page);
 
-    assert!(text.contains("Change sets > Checkout reliability"));
-    assert!(text.contains("Add sibling"));
+    assert!(text.contains("Checkout reliability"));
+    assert!(text.contains("Add (A)"));
     assert!(text.contains("Add child"));
     assert!(text.contains("Commit"));
     assert!(text.contains("Refresh"));
@@ -158,7 +179,7 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
         vec!["shift+d", "shift+p", "dd", "do", "ds"]
     );
     let description_hotkeys = target(&mut page, "textarea");
-    assert!(description_hotkeys.hotkey_sequences.is_empty());
+    assert_eq!(description_hotkeys.hotkey_sequences, ["do", "dd", "ds"]);
 
     let source = page.selected_changes();
     page.set_selected_source(source);
@@ -336,7 +357,7 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
         &mut EventCtx::default(),
     );
     open_change_set(&mut page, 0);
-    assert!(render_text(&mut page).contains("No issue selected"));
+    assert!(render_text(&mut page).contains("No tickets added"));
 
     page.create_ticket("New checkout note");
     let target = focus(&mut page, "data-view");
@@ -360,6 +381,46 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
 }
 
 #[test]
+fn desktop_description_shortcuts_open_the_editor_and_speed_reader() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 1);
+
+    let description = target_at(&mut page, "textarea", 120);
+    assert_eq!(description.hotkey_sequences, ["do", "dd", "ds"]);
+    let desktop = render_text_at(&mut page, 120);
+    assert!(desktop.contains("dd·do·ds"));
+    assert!(!desktop.contains("shift+d"));
+    page.dispatch_focus(&description, true, &mut FocusCtx::default());
+
+    let mut editor = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(description.path.clone()),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("do".into())),
+        &mut editor,
+    );
+    assert!(editor.external_editor_request().is_some());
+
+    page.dispatch_event(
+        &EventRoute::new(description.path.clone()),
+        &TuiEvent::ExternalEditor(ExternalEditorResponse {
+            value: "## Desktop editor result".into(),
+            line: 1,
+            col: 1,
+        }),
+        &mut EventCtx::default(),
+    );
+    assert!(render_text_at(&mut page, 120).contains("Desktop editor result"));
+
+    page.dispatch_event(
+        &EventRoute::new(description.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("ds".into())),
+        &mut EventCtx::default(),
+    );
+    assert!(render_text_at(&mut page, 120).contains("600 WPM"));
+}
+
+#[test]
 fn new_ticket_dialog_shows_title_guidance() {
     tuicore::init();
     let mut page = composer_page();
@@ -376,6 +437,152 @@ fn new_ticket_dialog_shows_title_guidance() {
     assert!(text.contains("3-8 words for quick scanning"));
     assert!(text.contains("OK"));
     assert!(text.contains("Cancel"));
+}
+
+#[test]
+fn change_set_list_is_borderless_and_opens_the_new_change_set_dialog() {
+    tuicore::init();
+    let mut page = composer_page();
+
+    let mut layout = LayoutCtx::new();
+    page.layout(Rect::new(0, 0, TEST_WIDTH, 40), &mut layout);
+    assert_eq!(
+        layout.focus_targets().first().unwrap().id,
+        FocusId::new("data-view")
+    );
+
+    let list = render_text(&mut page);
+    assert!(list.contains("New change set"));
+    assert!(list.contains("Search..."));
+    assert!(!list.contains("Change sets"));
+
+    let new_change_set = last_target(&mut page, "button");
+    page.dispatch_focus(&new_change_set, true, &mut FocusCtx::default());
+    let mut escape = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(new_change_set.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Esc)),
+        &mut escape,
+    );
+    assert_eq!(
+        escape.focus_request(),
+        Some(&FocusRequest::Target(FocusId::new("data-view")))
+    );
+    page.dispatch_focus(&new_change_set, true, &mut FocusCtx::default());
+    let mut control_bracket = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(new_change_set.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('['),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut control_bracket,
+    );
+    assert_eq!(
+        control_bracket.focus_request(),
+        Some(&FocusRequest::Target(FocusId::new("data-view")))
+    );
+
+    let data_view = focus(&mut page, "data-view");
+    for event in [
+        TuiEvent::Key(KeyEvent::from(Key::Esc)),
+        TuiEvent::Key(KeyEvent {
+            code: Key::Char('['),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+    ] {
+        let mut ctx = EventCtx::default();
+        let outcome =
+            page.dispatch_event(&EventRoute::new(data_view.path.clone()), &event, &mut ctx);
+        assert_eq!(outcome, EventOutcome::Handled);
+        assert_eq!(ctx.focus_request(), None);
+    }
+
+    let data_view = target(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(data_view.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("shift+n".into())),
+        &mut EventCtx::default(),
+    );
+    let dialog = render_text(&mut page);
+    assert!(dialog.contains("New change set"));
+    let title = last_target(&mut page, "input");
+    assert!(title.area.width >= 48);
+    assert_eq!(title.area.height, 1);
+    assert!(!dialog.contains("Issue type"));
+    assert!(!dialog.contains("Starts with a verb"));
+    page.dispatch_focus(&title, true, &mut FocusCtx::default());
+
+    page.dispatch_event(
+        &EventRoute::new(title.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('r'))),
+        &mut EventCtx::default(),
+    );
+    page.dispatch_event(
+        &EventRoute::new(title.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Enter,
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+    assert_eq!(page.active_change_set_name().as_deref(), Some("r"));
+
+    page.tick(Duration::from_millis(100), AnimationSettings::default());
+    let tickets = focus(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Esc)),
+        &mut EventCtx::default(),
+    );
+    assert_eq!(page.active_change_set_name(), None);
+    assert_eq!(
+        page.overview_highlighted_change_set().as_deref(),
+        Some("CS-3")
+    );
+}
+
+#[test]
+fn change_set_search_matches_keys_and_titles() {
+    tuicore::init();
+    let mut page = composer_page();
+    let data_view = focus(&mut page, "data-view");
+
+    page.dispatch_event(
+        &EventRoute::new(data_view.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('/'))),
+        &mut EventCtx::default(),
+    );
+    for key in ['c', 's', '2'] {
+        page.dispatch_event(
+            &EventRoute::new(data_view.path.clone()),
+            &TuiEvent::Key(KeyEvent::from(Key::Char(key))),
+            &mut EventCtx::default(),
+        );
+    }
+    let key_match = render_text(&mut page);
+    assert!(key_match.contains("CS-2"));
+    assert!(!key_match.contains("CS-1"));
+
+    page.dispatch_event(
+        &EventRoute::new(data_view.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Esc)),
+        &mut EventCtx::default(),
+    );
+    page.dispatch_event(
+        &EventRoute::new(data_view.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('/'))),
+        &mut EventCtx::default(),
+    );
+    for key in ['c', 'o', 'r'] {
+        page.dispatch_event(
+            &EventRoute::new(data_view.path.clone()),
+            &TuiEvent::Key(KeyEvent::from(Key::Char(key))),
+            &mut EventCtx::default(),
+        );
+    }
+    let title_match = render_text(&mut page);
+    assert!(title_match.contains("Checkout reliability"));
 }
 
 #[test]
@@ -991,7 +1198,7 @@ fn toolbar_hotkeys_run_without_focusing_their_buttons() {
         target
             .hotkey_sequences
             .iter()
-            .any(|hotkey| hotkey == "shift+s")
+            .any(|hotkey| hotkey == "shift+a")
     }));
     let mut refresh_ctx = EventCtx::default();
     page.dispatch_event(
@@ -1212,6 +1419,67 @@ fn local_issue_type_change_updates_ticket_row() {
     page.update_selected_kind(TicketKind::Bug);
 
     assert!(render_text(&mut page).contains(""));
+}
+
+#[test]
+fn diff_property_dropdowns_show_previous_values() {
+    tuicore::init();
+    let priorities = vec![
+        JiraOption {
+            id: "High".into(),
+            label: "High".into(),
+        },
+        JiraOption {
+            id: "Low".into(),
+            label: "Low".into(),
+        },
+        JiraOption {
+            id: "Medium".into(),
+            label: "Medium".into(),
+        },
+    ];
+
+    let mut unchanged = ComposerState::demo();
+    unchanged.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    unchanged.selected_ticket = Some("FIN-142".into());
+    unchanged.dispatch(ComposerAction::SetViewMode(ComposerViewMode::Diff));
+    let mut unchanged = BoundPropertyDropdown::priority_for_test(
+        Rc::new(RefCell::new(unchanged)),
+        Rc::new(RefCell::new(Vec::new())),
+        AppService::for_tests(),
+        priorities.clone(),
+    );
+    assert!(render_property_dropdown(&mut unchanged).contains("(unchanged)"));
+
+    let mut changed = ComposerState::demo();
+    changed.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    changed.selected_ticket = Some("FIN-142".into());
+    changed.dispatch(ComposerAction::UpdatePriority("Low".into()));
+    changed.dispatch(ComposerAction::SetViewMode(ComposerViewMode::Diff));
+    let mut changed = BoundPropertyDropdown::priority_for_test(
+        Rc::new(RefCell::new(changed)),
+        Rc::new(RefCell::new(Vec::new())),
+        AppService::for_tests(),
+        priorities.clone(),
+    );
+    let changed_text = render_property_dropdown(&mut changed);
+    assert!(changed_text.contains("Low"));
+    assert!(changed_text.contains("High"));
+
+    let mut added = ComposerState::demo();
+    added.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    added.dispatch(ComposerAction::CreateTicket {
+        title: "New local ticket".into(),
+        project_key: "FIN".into(),
+    });
+    added.dispatch(ComposerAction::SetViewMode(ComposerViewMode::Diff));
+    let mut added = BoundPropertyDropdown::priority_for_test(
+        Rc::new(RefCell::new(added)),
+        Rc::new(RefCell::new(Vec::new())),
+        AppService::for_tests(),
+        priorities,
+    );
+    assert!(render_property_dropdown(&mut added).contains("(none)"));
 }
 
 #[test]
@@ -1479,7 +1747,6 @@ fn deleted_ticket_hotkeys_and_escape_return_to_change_sets() {
 
     let text = render_text(&mut page);
     assert!(text.contains("Customer notifications"));
-    assert!(!text.contains("Change sets > Checkout reliability"));
 }
 
 #[test]
@@ -1504,20 +1771,18 @@ fn submitting_tickets_keeps_user_in_change_set() {
     tuicore::init();
     let mut page = composer_page();
     open_change_set(&mut page, 1);
-    assert!(render_text(&mut page).contains("Change sets > Checkout reliability"));
+    assert!(render_text(&mut page).contains("Checkout reliability"));
 
     page.submit_selected_locally();
     let text = render_text(&mut page);
-    assert!(text.contains("Change sets > Checkout reliability"));
+    assert!(text.contains("Checkout reliability"));
 }
 
 #[test]
 fn opening_change_set_with_remote_tickets_shows_loader_before_content() {
     tuicore::init();
     let mut page = composer_page();
-    let mut layout = LayoutCtx::new();
-    page.layout(Rect::new(0, 0, TEST_WIDTH, 40), &mut layout);
-    let target = layout.focus_targets().first().unwrap().clone();
+    let target = target(&mut page, "data-view");
     page.dispatch_focus(&target, true, &mut FocusCtx::default());
     page.dispatch_event(
         &EventRoute::new(target.path.clone()),
@@ -1541,7 +1806,7 @@ fn opening_change_set_with_remote_tickets_shows_loader_before_content() {
     std::thread::sleep(Duration::from_millis(20));
     page.tick(Duration::from_millis(100), AnimationSettings::default());
     let content_text = render_text(&mut page);
-    assert!(content_text.contains("Change sets > Checkout reliability"));
+    assert!(content_text.contains("Checkout reliability"));
 }
 
 #[test]
@@ -1632,6 +1897,48 @@ fn added_subtask_uses_project_draft_key_until_submission() {
     }
 
     assert!(text.contains("A • FIN-200 • @-- • To Do"));
+}
+
+#[test]
+fn selecting_a_parent_ticket_selects_descendants_and_marks_partial_parents() {
+    tuicore::init();
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    state
+        .dispatch(ComposerAction::CreateTicketAt {
+            title: "Parent task".into(),
+            project_key: "FIN".into(),
+            kind: TicketKind::Task,
+            placement: PlacementTarget::Root,
+        })
+        .unwrap();
+    state
+        .dispatch(ComposerAction::CreateTicketAt {
+            title: "First child".into(),
+            project_key: "FIN".into(),
+            kind: TicketKind::Subtask,
+            placement: PlacementTarget::ChildOf("NEW-1".into()),
+        })
+        .unwrap();
+    state
+        .dispatch(ComposerAction::CreateTicketAt {
+            title: "Second child".into(),
+            project_key: "FIN".into(),
+            kind: TicketKind::Subtask,
+            placement: PlacementTarget::ChildOf("NEW-1".into()),
+        })
+        .unwrap();
+    state.dispatch(ComposerAction::SetSelectedTickets(Vec::new()));
+
+    let mut tickets = ticket_data_view(&state);
+    assert!(tickets.toggle_selected("NEW-1".into()));
+    assert_eq!(tickets.selected_ids(), ["NEW-1", "NEW-2", "NEW-3"]);
+
+    tickets.toggle_selected("NEW-2".into());
+    assert_eq!(
+        tickets.check_state(&"NEW-1".into()),
+        CheckState::Indeterminate
+    );
 }
 
 #[test]

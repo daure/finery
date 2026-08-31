@@ -202,6 +202,7 @@ pub(super) struct BoundPropertyDropdown {
     pending_search: Option<Duration>,
     synced_rows: Vec<JiraOption>,
     synced_selected_value: Option<String>,
+    synced_previous_value: Option<String>,
 }
 
 impl BoundPropertyDropdown {
@@ -273,6 +274,7 @@ impl BoundPropertyDropdown {
             pending_search: None,
             synced_rows: Vec::new(),
             synced_selected_value: None,
+            synced_previous_value: None,
         }
     }
 
@@ -358,7 +360,7 @@ impl BoundPropertyDropdown {
     }
 
     fn sync(&mut self) -> bool {
-        let (value, disabled) = {
+        let (value, disabled, previous) = {
             let state = self.state.borrow();
             let displayed = state.selected_ticket();
             let value = if self.kind == PropertyKind::Parent {
@@ -370,11 +372,21 @@ impl BoundPropertyDropdown {
             } else {
                 displayed.map_or_else(String::new, |ticket| self.kind.value(ticket))
             };
-            (value, !state.selected_is_editable())
+            let previous = self.previous_value(&state, &value);
+            (value, !state.selected_is_editable(), previous)
         };
         let mut changed = false;
         if self.control.is_disabled() != disabled {
             self.control.set_disabled(disabled);
+            changed = true;
+        }
+        if self.synced_previous_value != previous {
+            if let Some(previous) = &previous {
+                self.control.set_bottom_left(previous.clone());
+            } else {
+                self.control.clear_bottom_left();
+            }
+            self.synced_previous_value = previous;
             changed = true;
         }
         if self.kind != PropertyKind::Assignee {
@@ -394,6 +406,21 @@ impl BoundPropertyDropdown {
             changed |= self.set_options(self.synced_rows.clone(), &value);
         }
         changed
+    }
+
+    fn previous_value(&self, state: &ComposerState, current: &str) -> Option<String> {
+        if state.view_mode != crate::store::composer::ComposerViewMode::Diff {
+            return None;
+        }
+        let previous = state
+            .selected_change()
+            .and_then(|change| change.original.as_ref())
+            .and_then(|ticket| self.kind.previous_value(ticket));
+        match previous {
+            Some((value, _)) if value == current => Some("(unchanged)".into()),
+            Some((_, label)) => Some(label),
+            None => Some("(none)".into()),
+        }
     }
 
     fn options(&self) -> Vec<JiraOption> {
@@ -650,6 +677,21 @@ impl PropertyKind {
             Self::Status => ticket.status.clone(),
             Self::Priority => ticket.priority.clone(),
             Self::Assignee => ticket.assignee.clone(),
+        }
+    }
+
+    fn previous_value(self, ticket: &Ticket) -> Option<(String, String)> {
+        match self {
+            Self::IssueType | Self::Status | Self::Priority => {
+                let value = self.value(ticket);
+                (!value.is_empty()).then(|| (value.clone(), value))
+            }
+            Self::Parent => ticket
+                .parent_key
+                .as_ref()
+                .map(|parent| (parent.clone(), parent.clone())),
+            Self::Assignee => (!ticket.assignee_account_id.is_empty())
+                .then(|| (ticket.assignee_account_id.clone(), ticket.assignee.clone())),
         }
     }
 

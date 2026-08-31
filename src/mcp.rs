@@ -17,14 +17,15 @@ use crate::{
     service::{
         AppService,
         composer_service::{
-            ChangeSetCatalogView, ChangeSetPatchOperation, ChangeSetPatchResponse, ChangeSetView,
-            ComposerService, RecoveredCreate, ServiceError, SubmitChangeSetResponse, Versioned,
+            ChangeSetCatalogView, ChangeSetMutationResponse, ChangeSetPatchOperation,
+            ChangeSetPatchResponse, ChangeSetView, ComposerService, DeleteChangeSetResponse,
+            RecoveredCreate, ServiceError, SubmitChangeSetResponse, Versioned,
         },
     },
     store::work_items::{BacklogSnapshot, RankPlan, RunwayCapacitySource, WorkItem, rank_plan},
 };
 
-const MCP_INSTRUCTIONS: &str = "Read Composer change sets and Jira backlog order. Before mutating a change set, reread it and send its current revision as expected_revision. Before Jira reordering, state the exact move and get explicit user confirmation; reread the workspace afterward. apply_change_set_patch persists local edits only. submit_change_set is the only Composer Jira submission path, requires explicit ticket IDs, and submitted tickets cannot be changed or resubmitted. Recover marked draft creates only with confirmed Jira keys; never retry ambiguous creates.";
+const MCP_INSTRUCTIONS: &str = "Read Composer change sets and Jira backlog order. Before mutating an existing change set, reread it and send its current revision as expected_revision. create_change_set, apply_change_set_patch, and delete_change_set persist local edits only; delete_change_set never deletes Jira tickets. Before Jira reordering, state the exact move and get explicit user confirmation; reread the workspace afterward. submit_change_set is the only Composer Jira submission path, requires explicit ticket IDs, and submitted tickets cannot be changed or resubmitted. Recover marked draft creates only with confirmed Jira keys; never retry ambiguous creates.";
 const WORKSPACE_UNPLANNED_TICKET_LIMIT: usize = 50;
 const WORKSPACE_VELOCITY_SPRINT_LIMIT: usize = 10;
 
@@ -50,6 +51,18 @@ impl McpServer {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ChangeSetId {
     change_set_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CreateChangeSet {
+    change_set_id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DeleteChangeSet {
+    change_set_id: String,
+    expected_revision: i64,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -244,6 +257,9 @@ fn mcp_error(error: ServiceError) -> String {
         ServiceError::Storage { .. } => "storage_error: local persistence failed".into(),
         ServiceError::Submission { .. } => {
             "jira_submission_failed: Jira returned incomplete results".into()
+        }
+        ServiceError::AlreadyExists { resource, id } => {
+            format!("already_exists: {resource} '{id}' already exists")
         }
     }
 }
@@ -764,6 +780,34 @@ impl McpServer {
     ) -> Result<Json<Versioned<ChangeSetView>>, String> {
         run_composer(self.service.composer_service(), move |service| {
             service.change_set(&input.change_set_id)
+        })
+        .await
+        .map(Json)
+    }
+
+    #[tool(
+        description = "Create an empty open Composer change set locally. Supply a unique stable change_set_id; this never writes to Jira."
+    )]
+    async fn create_change_set(
+        &self,
+        Parameters(input): Parameters<CreateChangeSet>,
+    ) -> Result<Json<ChangeSetMutationResponse>, String> {
+        run_composer(self.service.composer_service(), move |service| {
+            service.create_change_set(input.change_set_id, input.name)
+        })
+        .await
+        .map(Json)
+    }
+
+    #[tool(
+        description = "Delete one Composer change set and all of its local ticket snapshots. This never deletes Jira tickets. Reread the change set and send its current revision as expected_revision. Change sets with an unresolved submission attempt cannot be deleted."
+    )]
+    async fn delete_change_set(
+        &self,
+        Parameters(input): Parameters<DeleteChangeSet>,
+    ) -> Result<Json<DeleteChangeSetResponse>, String> {
+        run_composer(self.service.composer_service(), move |service| {
+            service.delete_change_set(&input.change_set_id, input.expected_revision)
         })
         .await
         .map(Json)

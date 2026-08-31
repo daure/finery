@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 
 use crate::{
-    storage::{ConditionalSaveChangeSetOutcome, Storage, VersionedChangeSet},
+    storage::{
+        ConditionalDeleteChangeSetOutcome, ConditionalSaveChangeSetOutcome, Storage,
+        VersionedChangeSet,
+    },
     store::composer::{
         ChangeKind, ChangeSet, ComposerAction, ComposerState, PlacementError, PlacementTarget,
         SubmissionAttemptPhase, SubmissionSnapshot, Ticket, TicketChange, TicketKind,
@@ -148,6 +151,18 @@ pub struct ChangeSetPatchResponse {
     pub applied: Vec<AppliedOperation>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ChangeSetMutationResponse {
+    pub change_set: Versioned<ChangeSetView>,
+    pub catalog_revision: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeleteChangeSetResponse {
+    pub change_set_id: String,
+    pub catalog_revision: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RecoveredCreate {
     pub ticket_id: String,
@@ -195,6 +210,7 @@ pub enum ServiceError {
     JiraLookup { jira_key: String, message: String },
     Storage { message: String },
     Submission { message: String },
+    AlreadyExists { resource: String, id: String },
 }
 
 impl fmt::Display for ServiceError {
@@ -219,6 +235,9 @@ impl fmt::Display for ServiceError {
             }
             Self::Storage { message } => formatter.write_str(message),
             Self::Submission { message } => formatter.write_str(message),
+            Self::AlreadyExists { resource, id } => {
+                write!(formatter, "{resource} already exists: {id}")
+            }
         }
     }
 }
@@ -297,6 +316,83 @@ impl ComposerService {
     ) -> Result<Versioned<ChangeSetView>, ServiceError> {
         let change_set = self.load_change_set(change_set_id)?;
         Ok(versioned_change_set_view(change_set))
+    }
+
+    pub fn create_change_set(
+        &self,
+        change_set_id: String,
+        name: String,
+    ) -> Result<ChangeSetMutationResponse, ServiceError> {
+        if change_set_id.trim().is_empty() {
+            return Err(invalid("change set ID must not be empty"));
+        }
+        if name.trim().is_empty() {
+            return Err(invalid("change set name must not be empty"));
+        }
+        let change_set = ChangeSet {
+            id: change_set_id.clone(),
+            name,
+            tickets: Vec::new(),
+            selected_ticket_ids: Vec::new(),
+            closed: false,
+            submission_attempt: None,
+        };
+        match self
+            .runtime
+            .block_on(self.storage.save_change_set_if_revision(&change_set, None))
+            .map_err(storage_error)?
+        {
+            ConditionalSaveChangeSetOutcome::Saved {
+                change_set_revision,
+                catalog_revision,
+            } => Ok(ChangeSetMutationResponse {
+                change_set: Versioned {
+                    revision: change_set_revision,
+                    value: change_set_view(change_set),
+                },
+                catalog_revision,
+            }),
+            ConditionalSaveChangeSetOutcome::Conflict => Err(ServiceError::AlreadyExists {
+                resource: "change set".into(),
+                id: change_set_id,
+            }),
+        }
+    }
+
+    pub fn delete_change_set(
+        &self,
+        change_set_id: &str,
+        expected_revision: i64,
+    ) -> Result<DeleteChangeSetResponse, ServiceError> {
+        let change_set = self.load_change_set(change_set_id)?;
+        if change_set.revision != expected_revision {
+            return Err(ServiceError::StaleRevision {
+                change_set_id: change_set_id.into(),
+            });
+        }
+        if let Some(ticket_id) = change_set.change_set.submission_attempt_ticket_id() {
+            return Err(ServiceError::SubmissionClaimed {
+                ticket_id: ticket_id.into(),
+            });
+        }
+        match self
+            .runtime
+            .block_on(
+                self.storage
+                    .delete_change_set_if_revision(change_set_id, expected_revision),
+            )
+            .map_err(storage_error)?
+        {
+            ConditionalDeleteChangeSetOutcome::Deleted { catalog_revision } => {
+                Ok(DeleteChangeSetResponse {
+                    change_set_id: change_set_id.into(),
+                    catalog_revision,
+                })
+            }
+            ConditionalDeleteChangeSetOutcome::Conflict => Err(ServiceError::StaleRevision {
+                change_set_id: change_set_id.into(),
+            }),
+        }
     }
 
     pub fn open_change_set_jira_ticket_keys(&self) -> Result<Vec<String>, ServiceError> {

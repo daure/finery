@@ -25,6 +25,8 @@ type SettingsLayer = DialogLayer<Flex<()>, SettingsHost>;
 type RecentTicketsLayer = DialogLayer<SettingsLayer, RecentTicketsMenu>;
 type AppView = DialogLayer<RecentTicketsLayer, JiraSearchMenu>;
 
+const TICKET_MENU_MAX_WIDTH: u16 = 84;
+
 pub(crate) struct App {
     view: AppView,
     open_settings: Rc<Cell<bool>>,
@@ -71,13 +73,13 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
         DialogLayer::new(settings_view, RecentTicketsMenu::new(service.clone()))
             .active(false)
             .fit_content()
-            .fit_content_max(56, u16::MAX)
+            .fit_content_max(TICKET_MENU_MAX_WIDTH, u16::MAX)
             .base_overlays_visible(true)
             .backdrop(DialogBackdrop::dim().amount(0.55));
     let view = DialogLayer::new(recent_tickets_view, JiraSearchMenu::new(service.clone()))
         .active(false)
         .fit_content()
-        .fit_content_max(56, u16::MAX)
+        .fit_content_max(TICKET_MENU_MAX_WIDTH, u16::MAX)
         .base_overlays_visible(true)
         .backdrop(DialogBackdrop::dim().amount(0.55));
     App {

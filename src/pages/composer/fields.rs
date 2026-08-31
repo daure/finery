@@ -13,7 +13,7 @@ use tuicore::{
 };
 
 use crate::{
-    app_settings::ComposerKeyBinding,
+    app_settings::{ComposerKeyBinding, ComposerKeyBindings},
     store::composer::{ComposerAction, ComposerState, ComposerViewMode},
 };
 
@@ -262,10 +262,28 @@ impl BoundDescription {
         state: Rc<RefCell<ComposerState>>,
         pending: PendingActions,
         edit_request: DescriptionEditRequest,
+        keys: &ComposerKeyBindings,
+        description_actions: PendingDescriptionActions,
     ) -> Self {
         let sink = Rc::clone(&pending);
+        let focus_actions = Rc::clone(&description_actions);
+        let reader_actions = Rc::clone(&description_actions);
         let input = TextareaInput::new()
             .language(Language::Markdown)
+            .external_editor_file_extension("md")
+            .editor_hotkey(keys.description_editor.sequence())
+            .action_hotkey(keys.description_focus.sequence(), move |_| {
+                focus_actions.borrow_mut().extend([
+                    DescriptionAction::ShowChanges,
+                    DescriptionAction::Focus { edit: true },
+                ]);
+            })
+            .action_hotkey(keys.description_reader.sequence(), move |description| {
+                reader_actions.borrow_mut().extend([
+                    DescriptionAction::ShowChanges,
+                    DescriptionAction::OpenSpeedReader(description),
+                ]);
+            })
             .on_edit_end(move |value| {
                 sink.borrow_mut()
                     .push(ComposerAction::UpdateDescription(value));

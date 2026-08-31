@@ -53,7 +53,7 @@ pub(super) fn toolbar(
     keys: ComposerKeyBindings,
 ) -> Flex<()> {
     let sibling = ToolbarMenu::new(
-        "Add sibling",
+        "Add",
         &keys.add_sibling,
         Rc::clone(&events),
         ToolbarEvent::OpenSibling,

@@ -571,10 +571,9 @@ impl TicketEditor {
     pub(super) fn sync(&mut self) {
         let (breadcrumb, rows, selected, selected_for_submission, is_open) = {
             let state = self.state.borrow();
-            let breadcrumb = state.active_set().map_or_else(
-                || "Change sets".into(),
-                |set| format!("Change sets > {}", set.name),
-            );
+            let breadcrumb = state
+                .active_set()
+                .map_or_else(|| "Change sets".into(), |set| set.name.clone());
             let selected_for_submission = state
                 .active_set()
                 .into_iter()

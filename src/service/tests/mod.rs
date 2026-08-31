@@ -92,6 +92,66 @@ fn service() -> ComposerService {
 }
 
 #[test]
+fn create_change_set_persists_an_empty_open_set() {
+    let service = service();
+
+    let created = service
+        .create_change_set("CS-2".into(), "Second plan".into())
+        .unwrap();
+
+    assert_eq!(created.change_set.revision, 1);
+    assert_eq!(created.change_set.value.id, "CS-2");
+    assert_eq!(created.change_set.value.name, "Second plan");
+    assert!(!created.change_set.value.closed);
+    assert!(created.change_set.value.tickets.is_empty());
+    assert_eq!(created.catalog_revision, 3);
+    assert!(matches!(
+        service.create_change_set("CS-2".into(), "Duplicate".into()),
+        Err(ServiceError::AlreadyExists { .. })
+    ));
+}
+
+#[test]
+fn delete_change_set_removes_only_local_composer_data() {
+    let service = service();
+
+    let deleted = service.delete_change_set("CS-1", 1).unwrap();
+
+    assert_eq!(deleted.change_set_id, "CS-1");
+    assert_eq!(deleted.catalog_revision, 3);
+    assert!(matches!(
+        service.change_set("CS-1"),
+        Err(ServiceError::NotFound { .. })
+    ));
+}
+
+#[test]
+fn delete_change_set_rejects_stale_or_submitting_change_sets() {
+    let service = service();
+
+    assert!(matches!(
+        service.delete_change_set("CS-1", 2),
+        Err(ServiceError::StaleRevision { .. })
+    ));
+
+    let mut set = change_set();
+    set.submission_attempt = Some(SubmissionAttempt {
+        owner_id: "attempt-owner".into(),
+        ticket_ids: vec!["FIN-1".into()],
+        phase: SubmissionAttemptPhase::Claimed,
+    });
+    let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    let storage = runtime.block_on(Storage::connect_for_tests()).unwrap();
+    runtime.block_on(storage.save_change_set(&set)).unwrap();
+    let submitting = test_service(storage, runtime, Arc::new(|key: &str| Ok(ticket(key))));
+
+    assert!(matches!(
+        submitting.delete_change_set("CS-1", 1),
+        Err(ServiceError::SubmissionClaimed { .. })
+    ));
+}
+
+#[test]
 fn recovery_clears_claimed_attempt_after_process_loss() {
     let mut abandoned = change_set();
     let mut state = ComposerState::from_change_sets(vec![abandoned.clone()]);

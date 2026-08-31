@@ -3,7 +3,7 @@ use std::{cell::RefCell, rc::Rc};
 use ratatui::{layout::Constraint, style::Style, text::Line};
 use tuicore::{
     ActivationMode, CellContext, Column, DataView, SelectionGlyphs, SelectionMode,
-    SelectionTrigger, TreeAdapter, theme,
+    SelectionPropagation, SelectionTrigger, TreeAdapter, theme,
 };
 
 use crate::{
@@ -37,6 +37,7 @@ pub(super) fn ticket_data_view_with_number_jump(
         .row_height(2)
         .activation_mode(ActivationMode::OnNavigate)
         .selection_mode(SelectionMode::Multi)
+        .selection_propagation(SelectionPropagation::CascadeDescendants)
         .selection_trigger(SelectionTrigger::OnActivate)
         .selection_glyphs(SelectionGlyphs::NERD_FONT)
         .selection_disabled_by(|row| row.item.submitted)

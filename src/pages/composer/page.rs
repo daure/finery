@@ -46,8 +46,13 @@ impl ComposerPage {
     ) -> Self {
         let composer_state = ComposerState::from_change_sets(change_sets);
         let state = Rc::new(RefCell::new(composer_state));
+        let composer_keys = settings
+            .read()
+            .expect("settings lock poisoned")
+            .composer_keys
+            .clone();
         Self {
-            change_sets: ChangeSetListView::new(Rc::clone(&state), service.clone()),
+            change_sets: ChangeSetListView::new(Rc::clone(&state), service.clone(), composer_keys),
             editor: TicketEditor::new(Rc::clone(&state), settings, service.clone()),
             state,
             catalog_revision: service.composer_catalog_revision(),
@@ -312,6 +317,16 @@ impl ComposerPage {
     #[cfg(test)]
     pub(super) fn create_dialog_is_open(&self) -> bool {
         self.editor.create_dialog_is_open()
+    }
+
+    #[cfg(test)]
+    pub(super) fn active_change_set_name(&self) -> Option<String> {
+        self.state.borrow().active_set().map(|set| set.name.clone())
+    }
+
+    #[cfg(test)]
+    pub(super) fn overview_highlighted_change_set(&self) -> Option<String> {
+        self.change_sets.highlighted_change_set()
     }
 }
 
