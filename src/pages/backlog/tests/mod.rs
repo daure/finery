@@ -703,7 +703,7 @@ fn backlog_story_rows_show_identity_then_subtask_release_and_epic_metadata() {
     let text = lines.concat();
 
     assert!(text.contains("FIN-8 Plan next sprint"));
-    assert!(text.contains("3 • @MV • 0/2  • AB|CD|Refinery • To Do • 1.4.0 • Shopping cart"));
+    assert!(text.contains("3 • @MV • 0/2  • To Do • AB|CD|Refinery • Shopping cart • 1.4.0"));
     let (ticket_y, ticket_line) = lines
         .iter()
         .enumerate()

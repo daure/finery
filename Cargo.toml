@@ -1,11 +1,14 @@
 [package]
 name = "finery"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 default-run = "finery"
 description = "Keyboard-first Jira backlog and Composer with optional MCP access"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
+documentation = "https://docs.rs/finery"
+homepage = "https://github.com/daure/finery"
+repository = "https://github.com/daure/finery"
 keywords = ["jira", "tui", "terminal", "productivity", "mcp"]
 categories = ["command-line-utilities"]
 include = [
