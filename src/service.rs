@@ -602,6 +602,10 @@ impl AppService {
     }
 
     pub(crate) fn jira_backlog(&self) -> Result<BacklogSnapshot, String> {
+        self.with_jira_reorder(|service| service.jira_backlog_while_reorder_locked())
+    }
+
+    pub(crate) fn jira_backlog_while_reorder_locked(&self) -> Result<BacklogSnapshot, String> {
         let settings = self
             .settings
             .read()

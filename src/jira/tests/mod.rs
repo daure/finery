@@ -2,7 +2,7 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use serde_json::json;
@@ -10,16 +10,16 @@ use serde_json::json;
 use super::{
     AgileBoard, AgileIssuePage, BACKLOG_FIELDS, BACKLOG_JQL, COMPOSER_FIELDS, ISSUE_FIELDS,
     JiraIssue, JiraSprint, MAX_VELOCITY_GOAL_LOOKUPS, SubmitBatchOutcome, ambiguous_create_failure,
-    backlog_page_complete, board_backlog, board_backlog_query, board_sprints, board_velocity,
-    commit_order, composer_fields, create_available_statuses_from_value, create_issue_fields,
-    create_issue_type, create_issue_types_from_value, create_response_failure,
-    created_issue_failure, discover_story_points, fetch_composer_issues, is_ticket_number_query,
-    issue_fields, issue_key_jql, move_payload, options_from_values, rank_payload,
-    same_jira_content, search_composer_issues, search_jql, select_backlog_board,
-    should_discover_story_points, sprint_issues, story_points_field_for_load,
-    story_points_field_id, story_points_warning, submit_failure, submit_ordered_changes, to_ticket,
-    to_ticket_and_work_item, to_work_item, to_work_item_with_subtasks, update_payload,
-    velocity_average, velocity_report,
+    backlog_page_complete, board_backlog, board_backlog_query, board_sprints, commit_order,
+    composer_fields, create_available_statuses_from_value, create_issue_fields, create_issue_type,
+    create_issue_types_from_value, create_response_failure, created_issue_failure,
+    discover_story_points, fetch_composer_issues, is_ticket_number_query, issue_fields,
+    issue_key_jql, move_payload, options_from_values, rank_payload, same_jira_content,
+    search_composer_issues, search_jql, select_backlog_board, should_discover_story_points,
+    sprint_issues, story_points_field_for_load, story_points_field_id, story_points_warning,
+    submit_failure, submit_ordered_changes, to_ticket, to_ticket_and_work_item, to_work_item,
+    to_work_item_with_subtasks, update_payload, velocity_average, velocity_report,
+    velocity_sprint_goals,
 };
 use crate::{
     app_settings::AppSettings,
@@ -956,148 +956,64 @@ fn sprint_goal_normalization_trims_text_and_discards_blank_values() {
 }
 
 #[test]
-fn velocity_loading_enriches_only_configured_sprints_with_best_effort_goals() {
+fn velocity_goal_loading_uses_one_closed_sprint_list_request() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
-        let responses = [
-            (
-                "200 OK",
-                json!({
-                    "sprints": [
-                        { "id": 103, "name": "Sprint 3" },
-                        { "id": 102, "name": "Sprint 2" },
-                        { "id": 101, "name": "Sprint 1" }
-                    ],
-                    "velocityStatEntries": {
-                        "101": { "completed": { "value": 16.0 } },
-                        "102": { "completed": { "value": 24.0 } },
-                        "103": { "completed": { "value": 20.0 } }
-                    }
-                })
-                .to_string(),
-            ),
-            (
-                "200 OK",
-                json!({
-                    "id": 103,
-                    "name": "Sprint 3",
-                    "state": "closed",
-                    "goal": "Ship velocity enrichment"
-                })
-                .to_string(),
-            ),
-            ("500 Internal Server Error", "goal lookup failed".into()),
-        ];
-        let mut requests = Vec::new();
-        for (status, body) in responses {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0; 4096];
-            let size = stream.read(&mut request).unwrap();
-            requests.push(String::from_utf8_lossy(&request[..size]).into_owned());
-            write!(
-                stream,
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len(),
-            )
-            .unwrap();
-        }
-        requests
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        let size = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..size]).into_owned();
+        let body = json!({
+            "values": [
+                { "id": 103, "name": "Sprint 3", "state": "closed", "goal": "Ship velocity enrichment" },
+                { "id": 102, "name": "Sprint 2", "state": "closed", "goal": "Stabilize planning" }
+            ],
+            "isLast": true,
+            "startAt": 0,
+            "maxResults": 50
+        })
+        .to_string();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len(),
+        )
+        .unwrap();
+        request
     });
 
-    let report = board_velocity(
+    let goals = velocity_sprint_goals(
         &reqwest::blocking::Client::new(),
         &base_url,
         "user@example.com",
         "token",
         42,
-        2,
-    )
-    .unwrap();
-    let requests = server.join().unwrap();
-
-    assert_eq!(
-        report.sprints[0].goal.as_deref(),
-        Some("Ship velocity enrichment")
+        &std::collections::HashSet::from([103, 102, 101]),
     );
-    assert_eq!(report.sprints[1].goal, None);
-    assert_eq!(report.sprints[2].goal, None);
-    assert!(requests[0].contains("/rest/greenhopper/1.0/rapid/charts/velocity.json"));
-    assert!(requests[1].contains("/rest/agile/1.0/sprint/103"));
-    assert!(requests[2].contains("/rest/agile/1.0/sprint/102"));
+    let request = server.join().unwrap();
+
+    assert_eq!(goals[&103], "Ship velocity enrichment");
+    assert_eq!(goals[&102], "Stabilize planning");
+    assert!(!goals.contains_key(&101));
+    assert!(request.contains("/rest/agile/1.0/board/42/sprint"));
+    assert!(request.contains("state=closed"));
 }
 
 #[test]
-fn velocity_goal_loading_is_bounded_when_configured_history_is_huge() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base_url = format!("http://{}", listener.local_addr().unwrap());
-    let server = thread::spawn(move || {
-        let chart = json!({
-            "sprints": (1..=MAX_VELOCITY_GOAL_LOOKUPS + 1)
-                .map(|id| json!({ "id": id, "name": format!("Sprint {id}") }))
-                .collect::<Vec<_>>(),
-            "velocityStatEntries": (1..=MAX_VELOCITY_GOAL_LOOKUPS + 1)
-                .map(|id| json!({ "id": id, "completed": { "value": id as f64 } }))
-                .collect::<Vec<_>>(),
-        })
-        .to_string();
-        let mut requests = Vec::new();
-        for index in 0..=MAX_VELOCITY_GOAL_LOOKUPS {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0; 4096];
-            let size = stream.read(&mut request).unwrap();
-            requests.push(String::from_utf8_lossy(&request[..size]).into_owned());
-            let body = if index == 0 {
-                chart.clone()
-            } else {
-                json!({ "id": index, "name": "Sprint", "state": "closed" }).to_string()
-            };
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len(),
-            )
-            .unwrap();
-        }
-        listener.set_nonblocking(true).unwrap();
-        let deadline = Instant::now() + Duration::from_millis(100);
-        while Instant::now() < deadline {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let mut request = [0; 4096];
-                    let size = stream.read(&mut request).unwrap();
-                    requests.push(String::from_utf8_lossy(&request[..size]).into_owned());
-                    break;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(1));
-                }
-                Err(error) => panic!("server accept failed: {error}"),
-            }
-        }
-        requests
+fn velocity_report_retains_configured_history_limit() {
+    let chart = json!({
+        "sprints": (1..=MAX_VELOCITY_GOAL_LOOKUPS + 1)
+            .map(|id| json!({ "id": id, "name": format!("Sprint {id}") }))
+            .collect::<Vec<_>>(),
+        "velocityStatEntries": (1..=MAX_VELOCITY_GOAL_LOOKUPS + 1)
+            .map(|id| json!({ "id": id, "completed": { "value": id as f64 } }))
+            .collect::<Vec<_>>(),
     });
-
-    let report = board_velocity(
-        &reqwest::blocking::Client::new(),
-        &base_url,
-        "user@example.com",
-        "token",
-        42,
-        usize::MAX,
-    )
-    .unwrap();
-    let requests = server.join().unwrap();
+    let report = velocity_report(chart, usize::MAX).unwrap();
 
     assert_eq!(report.sprints.len(), MAX_VELOCITY_GOAL_LOOKUPS + 1);
-    assert_eq!(requests.len(), MAX_VELOCITY_GOAL_LOOKUPS + 1);
-    assert!(requests[1].contains("/rest/agile/1.0/sprint/11"));
-    assert!(
-        requests
-            .last()
-            .unwrap()
-            .contains("/rest/agile/1.0/sprint/2")
-    );
+    assert_eq!(report.configured_sprints, usize::MAX);
 }
 
 #[test]
@@ -1136,6 +1052,7 @@ fn active_and_future_sprint_loading_parses_goals() {
         "user@example.com",
         "token",
         7,
+        "active,future",
     )
     .unwrap();
     let request = server.join().unwrap();

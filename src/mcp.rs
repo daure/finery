@@ -283,10 +283,23 @@ async fn run_workspace(service: AppService) -> Result<WorkspaceView, String> {
         let jira_ticket_keys = composer
             .open_change_set_jira_ticket_keys()
             .map_err(mcp_error)?;
-        let backlog = service
-            .with_jira_reorder(|service| service.jira_backlog())
-            .map_err(|error| format!("jira_backlog_failed: {error}"))?;
-        let refreshed_tickets = service.fetch_jira_tickets(&jira_ticket_keys)?;
+        let (backlog, refreshed_tickets) = std::thread::scope(|scope| -> Result<_, String> {
+            let backlog_service = service.clone();
+            let backlog = scope.spawn(move || {
+                backlog_service
+                    .with_jira_reorder(|service| service.jira_backlog_while_reorder_locked())
+                    .map_err(|error| format!("jira_backlog_failed: {error}"))
+            });
+            let refreshed_tickets = scope.spawn(|| service.fetch_jira_tickets(&jira_ticket_keys));
+            Ok((
+                backlog
+                    .join()
+                    .map_err(|_| "jira_backlog_failed: background task panicked".to_string())??,
+                refreshed_tickets.join().map_err(|_| {
+                    "jira_ticket_refresh_failed: background task panicked".to_string()
+                })??,
+            ))
+        })?;
         let change_sets = composer
             .refresh_open_change_set_baselines(&refreshed_tickets)
             .map_err(mcp_error)?;
@@ -453,7 +466,7 @@ fn place_jira_items(
     input: PlaceJiraItems,
 ) -> Result<BacklogSnapshot, String> {
     let destination = input.destination.section();
-    let snapshot = service.jira_backlog()?;
+    let snapshot = service.jira_backlog_while_reorder_locked()?;
     let sections = issue_sections(&snapshot);
     validate_issue_keys(&input.issue_keys, &sections)?;
     let destination_order = section_order(&snapshot, destination)?;
@@ -474,20 +487,20 @@ fn place_jira_items(
             }
         }
     }
-    let snapshot = service.jira_backlog()?;
+    let snapshot = service.jira_backlog_while_reorder_locked()?;
     let destination_order = section_order(&snapshot, destination)?;
     let final_order = final_order(&destination_order, &input.issue_keys, &input.position)?;
     if let Some(plan) = placement_rank_plan(&input.issue_keys, &final_order)? {
         service.jira_rank_while_reorder_locked(&plan)?;
     }
-    service.jira_backlog()
+    service.jira_backlog_while_reorder_locked()
 }
 
 fn swap_jira_items(service: &AppService, input: SwapJiraItems) -> Result<BacklogSnapshot, String> {
     if input.first_issue_key == input.second_issue_key {
         return Err("Swap requires two distinct issue keys".into());
     }
-    let snapshot = service.jira_backlog()?;
+    let snapshot = service.jira_backlog_while_reorder_locked()?;
     let sections = issue_sections(&snapshot);
     validate_issue_keys(
         &[
@@ -536,7 +549,7 @@ fn swap_jira_items(service: &AppService, input: SwapJiraItems) -> Result<Backlog
             rank_after_issue: Some(order[later_index - 1].clone()),
         })?;
     }
-    service.jira_backlog()
+    service.jira_backlog_while_reorder_locked()
 }
 
 fn workspace_view(

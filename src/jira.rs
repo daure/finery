@@ -62,6 +62,7 @@ const COMPOSER_FIELDS: [&str; 11] = [
 ];
 const BACKLOG_JQL: &str = "issuetype not in subTaskIssueTypes() AND issuetype != Epic";
 const MAX_VELOCITY_GOAL_LOOKUPS: usize = 10;
+const MAX_PARALLEL_SPRINT_LOADS: usize = 6;
 
 pub(crate) struct BacklogLoad {
     pub snapshot: BacklogSnapshot,
@@ -388,90 +389,165 @@ pub(crate) fn fetch_composer_issues(
 pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
     let (client, base_url, email, token) = configured_client(settings)?;
     let board = backlog_board(&client, &base_url, &email, &token, settings)?;
-    let (discovered_story_points, discovery_warning) =
-        if should_discover_story_points(settings, board.id) {
-            discover_story_points(
-                settings,
-                board.id,
-                board_story_points_field(&client, &base_url, &email, &token, board.id),
-            )
-        } else {
-            (None, None)
-        };
+    let ((discovered_story_points, discovery_warning), velocity, sprints) =
+        std::thread::scope(|scope| -> Result<_, String> {
+            let discovery = scope.spawn(|| {
+                if should_discover_story_points(settings, board.id) {
+                    discover_story_points(
+                        settings,
+                        board.id,
+                        board_story_points_field(&client, &base_url, &email, &token, board.id),
+                    )
+                } else {
+                    (None, None)
+                }
+            });
+            let velocity = scope.spawn(|| {
+                board_velocity(
+                    &client,
+                    &base_url,
+                    &email,
+                    &token,
+                    board.id,
+                    settings.backlog_runway.jira_velocity_sprints,
+                )
+            });
+            let sprints = scope.spawn(|| {
+                board_sprints(
+                    &client,
+                    &base_url,
+                    &email,
+                    &token,
+                    board.id,
+                    "active,future",
+                )
+            });
+            Ok((
+                discovery
+                    .join()
+                    .expect("Jira story point discovery request panicked"),
+                velocity.join().expect("Jira velocity request panicked"),
+                sprints
+                    .join()
+                    .map_err(|_| "Jira sprint list request panicked".to_string())??,
+            ))
+        })?;
     let story_points_field_id =
         story_points_field_for_load(settings, discovered_story_points.as_ref());
-    let velocity = board_velocity(
-        &client,
-        &base_url,
-        &email,
-        &token,
-        board.id,
-        settings.backlog_runway.jira_velocity_sprints,
-    );
-    let sprints = board_sprints(&client, &base_url, &email, &token, board.id)?;
-    let (sprints, work_items) = std::thread::scope(|scope| -> Result<_, String> {
-        let backlog_client = client.clone();
-        let backlog_base_url = base_url.clone();
-        let backlog_email = email.clone();
-        let backlog_token = token.clone();
-        let board_id = board.id;
-        let story_points_field_id = story_points_field_id.map(str::to_owned);
-        let backlog_story_points_field_id = story_points_field_id.clone();
-        let backlog = scope.spawn(move || {
-            board_backlog(
-                &backlog_client,
-                &backlog_base_url,
-                &backlog_email,
-                &backlog_token,
-                board_id,
-                backlog_story_points_field_id.as_deref(),
-            )
-        });
-        let sprint_requests = sprints
-            .iter()
-            .map(|sprint| {
-                let sprint_id = sprint.id;
-                let client = client.clone();
-                let base_url = base_url.clone();
-                let email = email.clone();
-                let token = token.clone();
-                let story_points_field_id = story_points_field_id.clone();
-                scope.spawn(move || {
-                    sprint_issues(
-                        &client,
-                        &base_url,
-                        &email,
-                        &token,
-                        sprint_id,
-                        story_points_field_id.as_deref(),
-                    )
+    let mut velocity_sprint_ids = velocity
+        .as_ref()
+        .map(|report| {
+            report
+                .sprints
+                .iter()
+                .take(report.configured_sprints.min(MAX_VELOCITY_GOAL_LOOKUPS))
+                .map(|sprint| sprint.id)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let mut active_velocity_goals = sprints
+        .iter()
+        .filter(|sprint| velocity_sprint_ids.contains(&sprint.id))
+        .filter_map(|sprint| sprint.goal.clone().map(|goal| (sprint.id, goal)))
+        .collect::<HashMap<_, _>>();
+    velocity_sprint_ids.retain(|sprint_id| !active_velocity_goals.contains_key(sprint_id));
+    let (sprints, work_items, closed_velocity_goals) =
+        std::thread::scope(|scope| -> Result<_, String> {
+            let backlog_client = client.clone();
+            let backlog_base_url = base_url.clone();
+            let backlog_email = email.clone();
+            let backlog_token = token.clone();
+            let board_id = board.id;
+            let story_points_field_id = story_points_field_id.map(str::to_owned);
+            let backlog_story_points_field_id = story_points_field_id.clone();
+            let backlog = scope.spawn(move || {
+                board_backlog(
+                    &backlog_client,
+                    &backlog_base_url,
+                    &backlog_email,
+                    &backlog_token,
+                    board_id,
+                    backlog_story_points_field_id.as_deref(),
+                )
+            });
+            let velocity_client = client.clone();
+            let velocity_base_url = base_url.clone();
+            let velocity_email = email.clone();
+            let velocity_token = token.clone();
+            let velocity_goals = scope.spawn(move || {
+                velocity_sprint_goals(
+                    &velocity_client,
+                    &velocity_base_url,
+                    &velocity_email,
+                    &velocity_token,
+                    board.id,
+                    &velocity_sprint_ids,
+                )
+            });
+            let mut sprint_work_items = Vec::with_capacity(sprints.len());
+            for sprint_batch in sprints.chunks(MAX_PARALLEL_SPRINT_LOADS) {
+                let sprint_requests = sprint_batch
+                    .iter()
+                    .map(|sprint| {
+                        let sprint_id = sprint.id;
+                        let client = client.clone();
+                        let base_url = base_url.clone();
+                        let email = email.clone();
+                        let token = token.clone();
+                        let story_points_field_id = story_points_field_id.clone();
+                        scope.spawn(move || {
+                            sprint_issues(
+                                &client,
+                                &base_url,
+                                &email,
+                                &token,
+                                sprint_id,
+                                story_points_field_id.as_deref(),
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                for request in sprint_requests {
+                    sprint_work_items.push(
+                        request
+                            .join()
+                            .map_err(|_| "Jira sprint request panicked".to_string())??,
+                    );
+                }
+            }
+            let work_items = backlog
+                .join()
+                .map_err(|_| "Jira backlog request panicked".to_string())??;
+            let velocity_goals = velocity_goals
+                .join()
+                .map_err(|_| "Jira velocity sprint goal request panicked".to_string())?;
+            let sprints = sprints
+                .into_iter()
+                .zip(sprint_work_items)
+                .map(|(sprint, work_items)| {
+                    Ok(Sprint {
+                        id: sprint.id,
+                        name: sprint.name,
+                        state: sprint.state,
+                        goal: sprint.goal,
+                        start_date: sprint.start_date,
+                        end_date: sprint.end_date,
+                        work_items,
+                        capacity: None,
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
-        let work_items = backlog
-            .join()
-            .map_err(|_| "Jira backlog request panicked".to_string())??;
-        let sprints = sprints
-            .into_iter()
-            .zip(sprint_requests)
-            .map(|(sprint, request)| {
-                let work_items = request
-                    .join()
-                    .map_err(|_| "Jira sprint request panicked".to_string())??;
-                Ok(Sprint {
-                    id: sprint.id,
-                    name: sprint.name,
-                    state: sprint.state,
-                    goal: sprint.goal,
-                    start_date: sprint.start_date,
-                    end_date: sprint.end_date,
-                    work_items,
-                    capacity: None,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        Ok((sprints, work_items))
-    })?;
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok((sprints, work_items, velocity_goals))
+        })?;
+    active_velocity_goals.extend(closed_velocity_goals);
+    let velocity = velocity.map(|mut report| {
+        for sprint in &mut report.sprints {
+            if let Some(goal) = active_velocity_goals.get(&sprint.id) {
+                sprint.goal = Some(goal.clone());
+            }
+        }
+        report
+    });
     let mut snapshot = BacklogSnapshot {
         board_name: board.name,
         story_points_configured: story_points_field_id.is_some(),
@@ -665,6 +741,7 @@ fn board_sprints(
     email: &str,
     token: &str,
     board_id: u64,
+    state: &str,
 ) -> Result<Vec<JiraSprint>, String> {
     let mut start_at = 0;
     let mut sprints = Vec::new();
@@ -675,7 +752,7 @@ fn board_sprints(
             .query(&[
                 ("startAt", start_at.to_string()),
                 ("maxResults", "50".into()),
-                ("state", "active,future".into()),
+                ("state", state.into()),
             ])
             .send()
             .map_err(|error| error.to_string())?;
@@ -704,33 +781,52 @@ fn board_velocity(
         .query(&[("rapidViewId", board_id.to_string())])
         .send()
         .map_err(|error| error.to_string())?;
-    let mut report =
-        response_json::<Value>(response).and_then(|chart| velocity_report(chart, sprint_count))?;
-    for sprint in report
-        .sprints
-        .iter_mut()
-        .take(report.configured_sprints.min(MAX_VELOCITY_GOAL_LOOKUPS))
-    {
-        sprint.goal = sprint_goal(client, base_url, email, token, sprint.id)
-            .ok()
-            .flatten();
-    }
-    Ok(report)
+    response_json::<Value>(response).and_then(|chart| velocity_report(chart, sprint_count))
 }
 
-fn sprint_goal(
+fn velocity_sprint_goals(
     client: &Client,
     base_url: &str,
     email: &str,
     token: &str,
-    sprint_id: u64,
-) -> Result<Option<String>, String> {
-    let response = client
-        .get(format!("{base_url}/rest/agile/1.0/sprint/{sprint_id}"))
-        .basic_auth(email, Some(token))
-        .send()
-        .map_err(|error| error.to_string())?;
-    Ok(response_json::<JiraSprint>(response)?.goal)
+    board_id: u64,
+    sprint_ids: &HashSet<u64>,
+) -> HashMap<u64, String> {
+    let mut start_at = 0;
+    let mut goals = HashMap::new();
+    let mut found_sprint_ids = HashSet::new();
+    while found_sprint_ids.len() < sprint_ids.len() {
+        let response = match client
+            .get(format!("{base_url}/rest/agile/1.0/board/{board_id}/sprint"))
+            .basic_auth(email, Some(token))
+            .query(&[
+                ("startAt", start_at.to_string()),
+                ("maxResults", "50".into()),
+                ("state", "closed".into()),
+            ])
+            .send()
+        {
+            Ok(response) => response,
+            Err(_) => break,
+        };
+        let page = match response_json::<SprintPage>(response) {
+            Ok(page) => page,
+            Err(_) => break,
+        };
+        for sprint in page.values {
+            if sprint_ids.contains(&sprint.id) {
+                found_sprint_ids.insert(sprint.id);
+                if let Some(goal) = sprint.goal {
+                    goals.insert(sprint.id, goal);
+                }
+            }
+        }
+        if page.is_last || page.max_results == 0 {
+            break;
+        }
+        start_at = page.start_at.saturating_add(page.max_results);
+    }
+    goals
 }
 
 fn velocity_report(chart: Value, sprint_count: usize) -> Result<VelocityReport, String> {
