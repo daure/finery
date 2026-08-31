@@ -640,9 +640,10 @@ fn board_backlog_query_excludes_subtasks_and_epics_hidden_by_the_web_backlog_lis
 }
 
 #[test]
-fn backlog_items_include_subtask_progress_releases_and_epic_names() {
+fn backlog_items_include_subtask_progress_labels_releases_and_epic_names() {
     assert!(BACKLOG_FIELDS.contains(&"parent"));
     assert!(BACKLOG_FIELDS.contains(&"subtasks"));
+    assert!(BACKLOG_FIELDS.contains(&"labels"));
     assert!(BACKLOG_FIELDS.contains(&"fixVersions"));
 
     let work_item = to_work_item(
@@ -662,6 +663,7 @@ fn backlog_items_include_subtask_progress_releases_and_epic_names() {
                     { "key": "FIN-2", "fields": { "status": { "statusCategory": { "key": "done" } } } },
                     { "key": "FIN-3", "fields": { "status": { "statusCategory": { "key": "indeterminate" } } } }
                 ],
+                "labels": ["AB", "CD", "Refinery"],
                 "fixVersions": [{ "name": "1.2.0" }]
             }),
         },
@@ -675,6 +677,7 @@ fn backlog_items_include_subtask_progress_releases_and_epic_names() {
     let progress = work_item.subtask_progress.as_ref().unwrap();
     assert_eq!(progress.completed, 1);
     assert_eq!(progress.total, 2);
+    assert_eq!(work_item.labels, ["AB", "CD", "Refinery"]);
     assert_eq!(work_item.fix_versions, ["1.2.0"]);
     assert_eq!(work_item.epic_name.as_deref(), Some("Shopping cart"));
 }

@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Rect},
     style::{Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Paragraph as RatatuiParagraph, Wrap},
 };
 use tuicore::{
@@ -39,6 +39,12 @@ use super::components::{
 type BacklogQuickMenuLayer = DialogLayer<BacklogTree, BacklogQuickMenu>;
 type VelocityDialog = DialogHost<Flex<()>, ()>;
 type BacklogView = DialogLayer<BacklogQuickMenuLayer, VelocityDialog>;
+
+#[derive(Clone)]
+struct VelocityRow {
+    sprint: VelocitySprint,
+    alternate_background: bool,
+}
 
 enum BacklogResult {
     Loaded {
@@ -1368,11 +1374,11 @@ fn backlog_view(
     )
     .active(false)
     .fit_content()
-    .fit_content_max(96, 18)
+    .fit_content_max(96, 26)
     .backdrop(DialogBackdrop::dim().amount(0.55))
 }
 
-fn velocity_dialog(
+pub(super) fn velocity_dialog(
     report: Option<&VelocityReport>,
     settings: &BacklogRunwaySettings,
     dynamic_ticket_size: Option<f64>,
@@ -1391,25 +1397,42 @@ fn velocity_dialog(
         latest_sprints,
         dynamic_ticket_size,
     );
-    let rows = report.map_or_else(Vec::new, |report| report.sprints.clone());
-    let table = DataView::new(rows, |sprint: &VelocitySprint| sprint.id)
+    let rows = report.map_or_else(Vec::new, |report| {
+        report
+            .sprints
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, sprint)| VelocityRow {
+                sprint,
+                alternate_background: index % 2 == 0,
+            })
+            .collect()
+    });
+    let mut table = DataView::new(rows, |row: &VelocityRow| row.sprint.id)
         .columns(vec![
-            Column::text(
+            Column::multiline(
                 "sprint",
                 "Sprint",
                 Constraint::Percentage(75),
-                |sprint: &VelocitySprint| sprint.name.clone(),
-            ),
+                |row: &VelocityRow, _| velocity_sprint_text(row),
+            )
+            .constrained(),
             Column::text(
                 "completed",
                 "Completed",
                 Constraint::Percentage(25),
-                |sprint: &VelocitySprint| format!("{:.1}", sprint.completed),
+                |row: &VelocityRow| format!("{:.1}", row.sprint.completed),
             ),
         ])
         .headers(true)
-        .row_height(1)
+        .row_height(2)
+        .wrap_cells()
         .focused(true);
+    table.set_row_style_by(|row| {
+        row.alternate_background
+            .then(|| Style::default().bg(tuicore::theme().background_bg()))
+    });
     let content = Flex::column()
         .child(
             "status",
@@ -1417,11 +1440,30 @@ fn velocity_dialog(
             FlexItem::fit_content(),
         )
         .child("padding", Paragraph::new(""), FlexItem::fixed(1))
-        .child("table", table, FlexItem::fixed(9));
+        .child("table", table, FlexItem::fixed(17));
     Dialog::new()
         .top_left("Velocity")
         .on_close(move |_| close_requested.set(true))
         .host(content)
+}
+
+fn velocity_sprint_text(row: &VelocityRow) -> Text<'static> {
+    let theme = tuicore::theme();
+    Text::from(vec![
+        Line::from(Span::styled(
+            row.sprint.name.clone(),
+            Style::default()
+                .fg(theme.text_fg())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            row.sprint
+                .goal
+                .clone()
+                .unwrap_or_else(|| "(no sprint goal)".into()),
+            Style::default().fg(theme.muted_fg()),
+        )),
+    ])
 }
 
 fn velocity_status(

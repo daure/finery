@@ -467,6 +467,7 @@ impl TicketEditor {
             .active(false)
             .fit_content()
             .fit_content_max(120, 12)
+            .child_overlays_use_base_bounds(true)
             .backdrop(DialogBackdrop::dim().amount(0.55));
         let ticket_dialog_close_requested = Rc::new(Cell::new(false));
         let submit_confirmation_requested = Rc::new(Cell::new(false));
@@ -702,6 +703,9 @@ impl TicketEditor {
                 }
                 DescriptionAction::Focus { edit } => {
                     self.detail_mut().focus_description(edit, ctx);
+                }
+                DescriptionAction::FocusDiff => {
+                    self.detail_mut().focus_diff(ctx);
                 }
                 DescriptionAction::OpenSpeedReader(description) => {
                     self.view.replace_layer(

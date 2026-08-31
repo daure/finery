@@ -15,7 +15,8 @@ use tuicore::{
 
 use crate::{
     components::work_item_rows::{
-        TICKET_MENU_WIDTH, TicketRowDetails, WorkItemKind, WorkItemRow, ticket_summary_text,
+        TICKET_MENU_WIDTH, TicketRowDetails, WorkItemKind, WorkItemRow, ticket_menu_max_height,
+        ticket_summary_text, work_item_title_prefix_width_for,
     },
     jira::JiraProject,
     service::{AppService, ComposerSearchTicket},
@@ -109,7 +110,7 @@ impl AddTicketMenu {
     pub(super) fn new(service: AppService) -> Self {
         let selected = Rc::new(RefCell::new(Vec::new()));
         let selected_sink = Rc::clone(&selected);
-        let dropdown =
+        let mut dropdown =
             Dropdown::single_rich(choice_items(), AddItem::id, AddItem::label, add_item_text)
                 .variant(DropdownVariant::Filled)
                 .label("Add ticket")
@@ -121,12 +122,13 @@ impl AddTicketMenu {
                 .show_field_when_open(false)
                 .backdrop_amount(0.0)
                 .tab_stop(false)
-                .max_popup_height(10)
                 .on_select(move |ids| {
                     if let Some(id) = ids.first() {
                         selected_sink.borrow_mut().push(id.clone());
                     }
                 });
+        dropdown.set_wrap_cells(true);
+        let dropdown = dropdown.wrap_continuation_indent_by(add_item_title_prefix_width);
         let (sender, receiver) = mpsc::channel();
         let (project_sender, project_receiver) = mpsc::channel();
         Self {
@@ -363,6 +365,17 @@ impl AddTicketMenu {
     }
 }
 
+fn add_item_title_prefix_width(item: &AddItem) -> usize {
+    let AddItem::Ticket(ticket) = item else {
+        return 0;
+    };
+    work_item_title_prefix_width_for(
+        ticket_kind(ticket.ticket.kind),
+        &ticket.work_item.priority,
+        &ticket.work_item.key,
+    )
+}
+
 fn choice_items() -> [AddItem; 2] {
     [AddItem::New, AddItem::Existing]
 }
@@ -382,6 +395,7 @@ fn add_item_text(item: &AddItem, query: &str, _mode: DropdownSearchMode) -> Text
         status: ticket.work_item.status.clone(),
         done: ticket.work_item.done,
         assignee: ticket.work_item.assignee.clone(),
+        labels: ticket.work_item.labels.clone(),
         story_points: ticket.work_item.story_points.or(estimated_story_points),
         show_story_points: ticket.story_points_configured,
         story_points_estimated: ticket.work_item.story_points.is_none()
@@ -428,6 +442,14 @@ impl TuiNode for AddTicketMenu {
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        let overlay_bounds = ctx.overlay_bounds();
+        let viewport_height = if overlay_bounds.is_empty() {
+            area.height
+        } else {
+            overlay_bounds.height
+        };
+        self.dropdown
+            .set_max_popup_height(ticket_menu_max_height(viewport_height));
         let requested_width = match self.mode {
             AddMenuMode::Choice => CHOICE_FIELD_WIDTH,
             AddMenuMode::Existing => EXISTING_WIDTH,

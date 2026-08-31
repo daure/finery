@@ -49,6 +49,7 @@ fn work_item(index: usize) -> WorkItem {
         parent_title: None,
         has_children: false,
         subtask_progress: None,
+        labels: Vec::new(),
         fix_versions: Vec::new(),
         epic_name: None,
         story_points: Some(index as f64),

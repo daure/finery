@@ -12,7 +12,7 @@ use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use tuicore::{
     AnimationSettings, CheckState, EventCtx, EventOutcome, EventRoute, ExternalEditorResponse,
     FocusCtx, FocusId, FocusRequest, HotkeyEvent, Key, KeyEvent, KeyModifiers, LayoutCtx,
-    RenderCtx, TabsBodyBorderStyle, TuiEvent, TuiNode,
+    RenderCtx, TabsBodyBorderStyle, TuiEvent, TuiNode, theme,
 };
 
 use super::page::ComposerPage;
@@ -180,7 +180,7 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
         vec!["shift+d", "shift+p", "dd", "do", "ds"]
     );
     let description_hotkeys = target(&mut page, "textarea");
-    assert_eq!(description_hotkeys.hotkey_sequences, ["do", "dd", "ds"]);
+    assert!(description_hotkeys.hotkey_sequences.is_empty());
 
     let source = page.selected_changes();
     page.set_selected_source(source);
@@ -388,7 +388,7 @@ fn desktop_description_shortcuts_open_the_editor_and_speed_reader() {
     open_change_set(&mut page, 1);
 
     let description = target_at(&mut page, "textarea", 120);
-    assert_eq!(description.hotkey_sequences, ["do", "dd", "ds"]);
+    assert_eq!(description.hotkey_sequences, ["dd", "do", "ds"]);
     let desktop = render_text_at(&mut page, 120);
     assert!(desktop.contains("dd·do·ds"));
     assert!(!desktop.contains("shift+d"));
@@ -419,6 +419,60 @@ fn desktop_description_shortcuts_open_the_editor_and_speed_reader() {
         &mut EventCtx::default(),
     );
     assert!(render_text_at(&mut page, 120).contains("600 WPM"));
+}
+
+#[test]
+fn description_hotkeys_follow_the_active_view() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 1);
+
+    page.set_view_mode(ComposerViewMode::Source);
+    let source = render_text_at(&mut page, 120);
+    assert!(source.contains("dd·ds"));
+    assert!(!source.contains("dd·do"));
+    let source_description = target_at(&mut page, "textarea", 120);
+    assert_eq!(source_description.hotkey_sequences, ["dd", "ds"]);
+
+    let mut source_focus = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(source_description.path.clone()),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("dd".into())),
+        &mut source_focus,
+    );
+    assert_eq!(
+        source_focus.focus_request(),
+        Some(&FocusRequest::Target(FocusId::new("textarea")))
+    );
+
+    page.dispatch_event(
+        &EventRoute::new(source_description.path.clone()),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("ds".into())),
+        &mut EventCtx::default(),
+    );
+    assert!(render_text_at(&mut page, 120).contains("600 WPM"));
+    let reader = target_at(&mut page, "speed-reader", 120);
+    page.dispatch_event(
+        &EventRoute::new(reader.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Esc)),
+        &mut EventCtx::default(),
+    );
+
+    page.set_view_mode(ComposerViewMode::Diff);
+    let diff = render_text_at(&mut page, 120);
+    assert!(diff.contains("dd"));
+    assert!(!diff.contains("dd·do"));
+    assert!(!diff.contains("dd·ds"));
+    let diff_panel = target_at(&mut page, "diff-viewer", 120);
+    assert_eq!(diff_panel.hotkey_sequences, ["dd"]);
+
+    let mut diff_focus = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(diff_panel.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("dd".into())),
+        &mut diff_focus,
+    );
+    assert!(diff_focus.focus_request().is_none());
 }
 
 #[test]
@@ -1170,6 +1224,7 @@ fn composer_rows_show_shared_work_item_details_from_presentation_cache() {
                         completed: 1,
                         total: 2,
                     }),
+                    labels: Vec::new(),
                     fix_versions: vec!["2026.9".into()],
                     epic_name: Some("Checkout reliability".into()),
                     story_points: Some(8.0),
@@ -1540,6 +1595,50 @@ fn diff_property_dropdowns_show_previous_values() {
 }
 
 #[test]
+fn changed_diff_property_values_use_diff_colors() {
+    tuicore::init();
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    state.selected_ticket = Some("FIN-142".into());
+    state.dispatch(ComposerAction::UpdatePriority("Low".into()));
+    state.dispatch(ComposerAction::SetViewMode(ComposerViewMode::Diff));
+    let mut dropdown = BoundPropertyDropdown::priority_for_test(
+        Rc::new(RefCell::new(state)),
+        Rc::new(RefCell::new(Vec::new())),
+        AppService::for_tests(),
+        vec![
+            JiraOption {
+                id: "High".into(),
+                label: "High".into(),
+            },
+            JiraOption {
+                id: "Low".into(),
+                label: "Low".into(),
+            },
+        ],
+    );
+    let area = Rect::new(0, 0, 32, 3);
+    dropdown.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            dropdown.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let theme = theme();
+    let current = buffer.cell((1, 1)).unwrap();
+    assert_eq!(current.fg, theme.diff_added_fg());
+    assert_eq!(current.bg, theme.diff_added_bg());
+    let previous = buffer.cell((3, 2)).unwrap();
+    assert_eq!(previous.fg, theme.diff_removed_fg());
+    assert_eq!(previous.bg, theme.diff_removed_bg());
+}
+
+#[test]
 fn property_dropdown_navigation_survives_tick_before_commit() {
     tuicore::init();
     let mut state = ComposerState::demo();
@@ -1726,7 +1825,7 @@ fn responsive_details_use_tabs_when_narrow_and_seventy_thirty_panels_when_wide()
 }
 
 #[test]
-fn mode_control_is_compact_and_source_uses_dashed_narrow_border() {
+fn mode_controls_are_compact_and_source_uses_dashed_narrow_border() {
     tuicore::init();
     let mut page = composer_page();
     open_change_set(&mut page, 1);
@@ -1740,6 +1839,7 @@ fn mode_control_is_compact_and_source_uses_dashed_narrow_border() {
         .find(|target| target.hotkey_sequences == ["shift+v"])
         .unwrap();
     assert!(mode.area.width < TEST_WIDTH / 2);
+    assert!(render_text(&mut page).contains("Side-by-side diff"));
     assert_eq!(page.narrow_border_style(), TabsBodyBorderStyle::Dashed);
     assert_eq!(page.ticket_detail_areas().0.height, 9);
 }
@@ -1768,6 +1868,36 @@ fn parent_dropdown_uses_change_ids_not_decorated_parent_labels() {
     dropdown.sync_for_test();
 
     assert_eq!(dropdown.selected_for_test().as_deref(), Some("NEW-1"));
+}
+
+#[test]
+fn unchanged_parent_with_a_local_change_id_is_not_shown_as_a_diff() {
+    tuicore::init();
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    let changes = &mut state.change_sets[0].tickets;
+    changes
+        .iter_mut()
+        .find(|change| change.id == "FIN-157")
+        .unwrap()
+        .id = "local-parent-id".into();
+    changes
+        .iter_mut()
+        .find(|change| change.id == "FIN-142")
+        .unwrap()
+        .original
+        .as_mut()
+        .unwrap()
+        .parent_key = Some("FIN-157".into());
+    state.selected_ticket = Some("FIN-142".into());
+    state.dispatch(ComposerAction::SetViewMode(ComposerViewMode::Diff));
+    let mut dropdown = BoundPropertyDropdown::parent_for_test(
+        Rc::new(RefCell::new(state)),
+        Rc::new(RefCell::new(Vec::new())),
+        AppService::for_tests(),
+    );
+
+    assert!(render_property_dropdown(&mut dropdown).contains("(unchanged)"));
 }
 
 #[test]

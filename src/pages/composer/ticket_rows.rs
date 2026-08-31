@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use ratatui::{layout::Constraint, style::Style};
 use tuicore::{
@@ -11,6 +11,7 @@ use crate::{
         ticket_number_jump::TicketNumberJump,
         work_item_rows::{
             ChangeBadge, TicketRowDetails, WorkItemKind, WorkItemRow, ticket_summary_text,
+            work_item_title_prefix_width,
         },
     },
     store::composer::{ChangeKind, ComposerState, TicketChange, TicketKind},
@@ -20,6 +21,7 @@ use crate::{
 pub(super) struct TicketRow {
     pub(super) item: WorkItemRow,
     parent_id: Option<String>,
+    depth: usize,
     parent_delta: Option<String>,
     subtask_progress: Option<(usize, usize)>,
     fix_versions: Vec<String>,
@@ -85,11 +87,32 @@ pub(super) fn set_active_ticket_style(
 }
 
 pub(super) fn ticket_rows(state: &ComposerState) -> Vec<TicketRow> {
-    state
+    let mut rows = state
         .ordered_changes()
         .into_iter()
         .filter_map(|change| ticket_row(state, change))
-        .collect()
+        .collect::<Vec<_>>();
+    let parents = rows
+        .iter()
+        .map(|row| (row.item.id.clone(), row.parent_id.clone()))
+        .collect::<HashMap<_, _>>();
+    for row in &mut rows {
+        row.depth = ticket_row_depth(&row.parent_id, &parents);
+    }
+    rows
+}
+
+fn ticket_row_depth(
+    ticket_id: &Option<String>,
+    parents: &HashMap<String, Option<String>>,
+) -> usize {
+    let mut depth = 0;
+    let mut parent_id = ticket_id.as_deref();
+    while let Some(id) = parent_id {
+        depth += 1;
+        parent_id = parents.get(id).and_then(Option::as_deref);
+    }
+    depth
 }
 
 fn ticket_row(state: &ComposerState, change: &TicketChange) -> Option<TicketRow> {
@@ -142,6 +165,9 @@ fn ticket_row(state: &ComposerState, change: &TicketChange) -> Option<TicketRow>
                 .is_some_and(|presentation| presentation.work_item.done)
                 || ticket.status.eq_ignore_ascii_case("done"),
             assignee: ticket.assignee.clone(),
+            labels: presentation
+                .map(|presentation| presentation.work_item.labels.clone())
+                .unwrap_or_default(),
             story_points: presentation
                 .and_then(|presentation| presentation.work_item.story_points)
                 .or(estimated_story_points),
@@ -155,6 +181,7 @@ fn ticket_row(state: &ComposerState, change: &TicketChange) -> Option<TicketRow>
             submitted: change.is_submitted(),
         },
         parent_id,
+        depth: 0,
         parent_delta,
         subtask_progress: presentation.and_then(|presentation| {
             presentation
@@ -199,7 +226,15 @@ fn ticket_columns(number_jump: Rc<RefCell<TicketNumberJump>>) -> Vec<Column<Tick
                 )
             },
         )
-        .constrained(),
+        .constrained()
+        .wrap_continuation_indent_by(|row| {
+            tuicore::preset()
+                .data_view()
+                .tree_indent_width()
+                .saturating_mul(row.depth.saturating_add(1))
+                .saturating_add(2)
+                .saturating_add(work_item_title_prefix_width(&row.item))
+        }),
     ]
 }
 

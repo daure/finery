@@ -1,4 +1,4 @@
-use std::sync::mpsc;
+use std::{cell::Cell, rc::Rc, sync::mpsc};
 
 use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Modifier};
 use tuicore::{
@@ -13,13 +13,13 @@ use super::{
         PendingTransfer, PendingTransferReconciliation, move_work_items_to_edge,
         recalculate_capacity, reconcile_pending_rank, reconcile_pending_transfer, should_poll,
         source_transfer_highlight, source_transfer_highlight_key, transfer_destinations,
-        transfer_reconciliation_highlight,
+        transfer_reconciliation_highlight, velocity_dialog,
     },
 };
 use crate::app_settings::{BacklogFilter, BacklogFilterSettings, BacklogRunwaySettings};
 use crate::store::work_items::{
-    BacklogSnapshot, RunwayCapacitySource, Sprint, SubtaskProgress, WorkItem, apply_capacity,
-    rank_plan,
+    BacklogSnapshot, RunwayCapacitySource, Sprint, SubtaskProgress, VelocityReport, VelocitySprint,
+    WorkItem, apply_capacity, rank_plan,
 };
 
 fn work_item(key: &str, title: &str) -> WorkItem {
@@ -35,6 +35,7 @@ fn work_item(key: &str, title: &str) -> WorkItem {
         parent_title: None,
         has_children: false,
         subtask_progress: None,
+        labels: Vec::new(),
         fix_versions: Vec::new(),
         epic_name: None,
         story_points: None,
@@ -645,6 +646,7 @@ fn backlog_story_rows_show_identity_then_subtask_release_and_epic_metadata() {
         completed: 0,
         total: 2,
     });
+    story.labels = vec!["AB".into(), "CD".into(), "Refinery".into()];
     story.fix_versions = vec!["1.4.0".into()];
     story.epic_name = Some("Shopping cart".into());
     let mut view = backlog_tree(&snapshot, sender, Default::default());
@@ -662,7 +664,7 @@ fn backlog_story_rows_show_identity_then_subtask_release_and_epic_metadata() {
     let text = lines.concat();
 
     assert!(text.contains("FIN-8 Plan next sprint"));
-    assert!(text.contains("3 • @MV • 0/2  • To Do • 1.4.0 • Shopping cart"));
+    assert!(text.contains("3 • @MV • 0/2  • AB|CD|Refinery • To Do • 1.4.0 • Shopping cart"));
     let (ticket_y, ticket_line) = lines
         .iter()
         .enumerate()
@@ -710,7 +712,7 @@ fn backlog_story_rows_show_identity_then_subtask_release_and_epic_metadata() {
         .cell((version_x, metadata_y as u16))
         .unwrap();
     assert!(metadata_cell.modifier.contains(Modifier::BOLD));
-    assert_eq!(metadata_cell.bg, tuicore::theme().highlight_bg());
+    assert_eq!(metadata_cell.fg, tuicore::theme().accent_fg());
     assert_eq!(
         terminal
             .backend()
@@ -718,7 +720,7 @@ fn backlog_story_rows_show_identity_then_subtask_release_and_epic_metadata() {
             .cell((epic_x, metadata_y as u16))
             .unwrap()
             .fg,
-        tuicore::theme().accent_fg()
+        tuicore::theme().warning_fg()
     );
 }
 
@@ -1169,6 +1171,172 @@ fn rendered_lines(terminal: &Terminal<TestBackend>, area: Rect) -> Vec<String> {
                 .collect()
         })
         .collect()
+}
+
+#[test]
+fn velocity_dialog_shows_goals_in_alternating_two_line_rows() {
+    tuicore::init();
+    let report = VelocityReport {
+        sprints: vec![
+            VelocitySprint {
+                id: 1,
+                name: "Sprint one".into(),
+                completed: 22.0,
+                goal: Some("Ship release".into()),
+            },
+            VelocitySprint {
+                id: 2,
+                name: "Sprint two".into(),
+                completed: 20.0,
+                goal: None,
+            },
+            VelocitySprint {
+                id: 3,
+                name: "Sprint three".into(),
+                completed: 18.0,
+                goal: Some("Finish migration".into()),
+            },
+        ],
+        dynamic_capacity: Some(21.0),
+        configured_sprints: 2,
+    };
+    let mut dialog = velocity_dialog(
+        Some(&report),
+        &BacklogRunwaySettings::default(),
+        None,
+        Rc::new(Cell::new(false)),
+    );
+    let area = Rect::new(0, 0, 80, 24);
+    dialog.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            dialog.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let lines = rendered_lines(&terminal, area);
+    let sprint_one_y = lines
+        .iter()
+        .position(|line| line.contains("Sprint one"))
+        .unwrap() as u16;
+    let release_y = lines
+        .iter()
+        .position(|line| line.contains("Ship release"))
+        .unwrap() as u16;
+    let sprint_two_y = lines
+        .iter()
+        .position(|line| line.contains("Sprint two"))
+        .unwrap() as u16;
+    let missing_goal_y = lines
+        .iter()
+        .position(|line| line.contains("(no sprint goal)"))
+        .unwrap() as u16;
+    let migration_y = lines
+        .iter()
+        .position(|line| line.contains("Finish migration"))
+        .unwrap() as u16;
+    let sprint_one_x =
+        cell_position(&lines[usize::from(sprint_one_y)], "Sprint one").unwrap() as u16;
+    let sprint_two_x =
+        cell_position(&lines[usize::from(sprint_two_y)], "Sprint two").unwrap() as u16;
+    let missing_goal_x =
+        cell_position(&lines[usize::from(missing_goal_y)], "(no sprint goal)").unwrap() as u16;
+    let migration_x =
+        cell_position(&lines[usize::from(migration_y)], "Finish migration").unwrap() as u16;
+
+    assert_eq!(release_y, sprint_one_y + 1);
+    assert_eq!(missing_goal_y, sprint_two_y + 1);
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((sprint_one_x, sprint_one_y))
+            .unwrap()
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((sprint_two_x, sprint_two_y))
+            .unwrap()
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    assert!(
+        !terminal
+            .backend()
+            .buffer()
+            .cell((missing_goal_x, missing_goal_y))
+            .unwrap()
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    assert_eq!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((migration_x, migration_y))
+            .unwrap()
+            .bg,
+        tuicore::theme().background_bg()
+    );
+    assert_eq!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((missing_goal_x, missing_goal_y))
+            .unwrap()
+            .fg,
+        tuicore::theme().muted_fg()
+    );
+}
+
+#[test]
+fn velocity_dialog_wraps_long_sprint_goals() {
+    tuicore::init();
+    let report = VelocityReport {
+        sprints: vec![VelocitySprint {
+            id: 1,
+            name: "Sprint one".into(),
+            completed: 22.0,
+            goal: Some("Deliver the migration with reliable error handling".into()),
+        }],
+        dynamic_capacity: Some(22.0),
+        configured_sprints: 1,
+    };
+    let mut dialog = velocity_dialog(
+        Some(&report),
+        &BacklogRunwaySettings::default(),
+        None,
+        Rc::new(Cell::new(false)),
+    );
+    let area = Rect::new(0, 0, 46, 24);
+    dialog.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            dialog.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let lines = rendered_lines(&terminal, area);
+    let goal_start = lines
+        .iter()
+        .position(|line| line.contains("Deliver the"))
+        .unwrap();
+    let goal_end = lines
+        .iter()
+        .position(|line| line.contains("handling"))
+        .unwrap();
+
+    assert!(goal_end > goal_start);
 }
 
 #[test]

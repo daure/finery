@@ -91,6 +91,18 @@ fn existing_jira_search_uses_centered_dropdown_popup_without_trigger_field() {
 }
 
 #[test]
+fn existing_search_caps_its_popup_against_the_overlay_height() {
+    let mut menu = AddTicketMenu::new(AppService::for_tests());
+    let host = Rect::new(0, 44, EXISTING_WIDTH, 12);
+    let overlay = Rect::new(0, 0, EXISTING_WIDTH, 100);
+    let mut layout = LayoutCtx::new();
+
+    layout.with_overlay_bounds(overlay, |ctx| menu.layout(host, ctx));
+
+    assert_eq!(menu.dropdown.configured_max_popup_height(), Some(60));
+}
+
+#[test]
 fn existing_search_keeps_legal_result_beyond_first_ten() {
     let mut menu = AddTicketMenu::new(AppService::for_tests());
     menu.legal_kinds = vec![TicketKind::Story];
@@ -149,6 +161,7 @@ fn search_ticket(ticket: Ticket) -> ComposerSearchTicket {
             parent_title: ticket.parent_title.clone(),
             has_children: ticket.has_children,
             subtask_progress: None,
+            labels: Vec::new(),
             fix_versions: Vec::new(),
             epic_name: None,
             story_points: None,

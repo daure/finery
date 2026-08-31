@@ -21,7 +21,7 @@ fn unestimated_non_estimated_ticket_types_keep_the_dash_placeholder() {
 }
 
 #[test]
-fn ticket_releases_render_as_highlight_chips() {
+fn ticket_releases_render_as_bold_accent_text() {
     tuicore::init();
     let mut ticket = work_item("Story");
     ticket.fix_versions = vec!["1.4.0".into()];
@@ -33,7 +33,7 @@ fn ticket_releases_render_as_highlight_chips() {
         .find(|span| span.content == "1.4.0")
         .unwrap();
 
-    assert_eq!(release.style.bg, Some(tuicore::theme().highlight_bg()));
+    assert_eq!(release.style.fg, Some(tuicore::theme().accent_fg()));
     assert!(
         release
             .style
@@ -68,6 +68,7 @@ fn work_item(kind: &str) -> WorkItem {
         parent_title: None,
         has_children: false,
         subtask_progress: None,
+        labels: Vec::new(),
         fix_versions: Vec::new(),
         epic_name: None,
         story_points: None,

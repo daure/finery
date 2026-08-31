@@ -8,8 +8,9 @@ use ratatui::{Frame, layout::Rect};
 use tuicore::{
     AnimationSettings, BorderKind, DiffStyle, DiffViewer, Dropdown, DropdownLabelPosition,
     DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget,
-    InputChrome, Language, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    Panel, PanelHost, RenderCtx, TextInput, TextareaInput, TickResult, TuiEvent, TuiNode,
+    HotkeyEvent, InputChrome, Language, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
+    LifecycleCtx, Panel, PanelHost, RenderCtx, TextInput, TextareaInput, TickResult, Toggle,
+    TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -25,6 +26,7 @@ pub(super) type DescriptionEditRequest = Rc<Cell<bool>>;
 pub(super) enum DescriptionAction {
     ShowChanges,
     Focus { edit: bool },
+    FocusDiff,
     OpenExternalEditor(String),
     OpenSpeedReader(String),
     CloseSpeedReader,
@@ -253,6 +255,10 @@ impl TuiNode for BoundTextField {
 pub(super) struct BoundDescription {
     state: Rc<RefCell<ComposerState>>,
     edit_request: DescriptionEditRequest,
+    description_actions: PendingDescriptionActions,
+    focus_hotkey: String,
+    editor_hotkey: String,
+    reader_hotkey: String,
     input: TextareaInput,
     diff: DiffViewer,
 }
@@ -266,24 +272,9 @@ impl BoundDescription {
         description_actions: PendingDescriptionActions,
     ) -> Self {
         let sink = Rc::clone(&pending);
-        let focus_actions = Rc::clone(&description_actions);
-        let reader_actions = Rc::clone(&description_actions);
         let input = TextareaInput::new()
             .language(Language::Markdown)
             .external_editor_file_extension("md")
-            .editor_hotkey(keys.description_editor.sequence())
-            .action_hotkey(keys.description_focus.sequence(), move |_| {
-                focus_actions.borrow_mut().extend([
-                    DescriptionAction::ShowChanges,
-                    DescriptionAction::Focus { edit: true },
-                ]);
-            })
-            .action_hotkey(keys.description_reader.sequence(), move |description| {
-                reader_actions.borrow_mut().extend([
-                    DescriptionAction::ShowChanges,
-                    DescriptionAction::OpenSpeedReader(description),
-                ]);
-            })
             .on_edit_end(move |value| {
                 sink.borrow_mut()
                     .push(ComposerAction::UpdateDescription(value));
@@ -291,6 +282,10 @@ impl BoundDescription {
         let mut bound = Self {
             state,
             edit_request,
+            description_actions,
+            focus_hotkey: keys.description_focus.sequence().into(),
+            editor_hotkey: keys.description_editor.sequence().into(),
+            reader_hotkey: keys.description_reader.sequence().into(),
             input,
             diff: DiffViewer::new("", "")
                 .labels("Source", "Changes")
@@ -330,6 +325,11 @@ impl BoundDescription {
                 )
             }
         });
+        self.diff.set_style(if state.description_diff_side_by_side {
+            DiffStyle::SideBySide
+        } else {
+            DiffStyle::Word
+        });
         self.diff.set_texts(source, changes);
         let editable = state.selected_is_editable();
         let value_changed =
@@ -340,6 +340,42 @@ impl BoundDescription {
         }
         self.input.set_disabled(!editable);
         changed
+    }
+
+    fn handle_description_hotkey(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        let TuiEvent::Hotkey(HotkeyEvent::Commit(sequence)) = event else {
+            return false;
+        };
+        let view_mode = self.state.borrow().view_mode;
+        let action = if sequence == &self.focus_hotkey {
+            match view_mode {
+                ComposerViewMode::Changes => vec![
+                    DescriptionAction::ShowChanges,
+                    DescriptionAction::Focus { edit: true },
+                ],
+                ComposerViewMode::Source => vec![DescriptionAction::Focus { edit: false }],
+                ComposerViewMode::Diff => vec![DescriptionAction::FocusDiff],
+            }
+        } else if sequence == &self.editor_hotkey
+            && view_mode == ComposerViewMode::Changes
+            && self.state.borrow().selected_is_editable()
+        {
+            vec![DescriptionAction::OpenExternalEditor(
+                self.input.current_value().into(),
+            )]
+        } else if sequence == &self.reader_hotkey && view_mode != ComposerViewMode::Diff {
+            let reader = DescriptionAction::OpenSpeedReader(self.input.current_value().into());
+            if view_mode == ComposerViewMode::Changes {
+                vec![DescriptionAction::ShowChanges, reader]
+            } else {
+                vec![reader]
+            }
+        } else {
+            return false;
+        };
+        self.description_actions.borrow_mut().extend(action);
+        ctx.stop_propagation();
+        true
     }
 }
 
@@ -371,6 +407,9 @@ impl TuiNode for BoundDescription {
         }
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        if self.handle_description_hotkey(event, ctx) {
+            return EventOutcome::Handled;
+        }
         if self.state.borrow().view_mode == ComposerViewMode::Diff {
             self.diff.event(event, ctx)
         } else {
@@ -383,6 +422,9 @@ impl TuiNode for BoundDescription {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
+        if self.handle_description_hotkey(event, ctx) {
+            return EventOutcome::Handled;
+        }
         if self.state.borrow().view_mode == ComposerViewMode::Diff {
             self.diff.dispatch_event(route, event, ctx)
         } else {
@@ -425,6 +467,82 @@ impl TuiNode for BoundDescription {
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.diff.destroy(ctx);
         self.input.destroy(ctx);
+    }
+}
+
+pub(super) struct BoundDescriptionDiffStyle {
+    state: Rc<RefCell<ComposerState>>,
+    toggle: Toggle,
+}
+
+impl BoundDescriptionDiffStyle {
+    pub(super) fn new(state: Rc<RefCell<ComposerState>>, pending: PendingActions) -> Self {
+        let sink = Rc::clone(&pending);
+        let toggle = Toggle::new("Side-by-side diff").on_change(move |value| {
+            sink.borrow_mut()
+                .push(ComposerAction::SetDescriptionDiffSideBySide(value));
+        });
+        let mut bound = Self { state, toggle };
+        bound.sync();
+        bound
+    }
+
+    fn sync(&mut self) -> bool {
+        let value = self.state.borrow().description_diff_side_by_side;
+        let changed = self.toggle.is_checked() != value;
+        if changed {
+            self.toggle.set_value(value);
+        }
+        changed
+    }
+}
+
+impl TuiNode for BoundDescriptionDiffStyle {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        self.toggle.measure(proposal)
+    }
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.sync();
+        self.toggle.layout(area, ctx)
+    }
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, _ctx: &mut RenderCtx<'a>) {
+        self.toggle.render(frame, area);
+    }
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        self.toggle.event(event, ctx)
+    }
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> EventOutcome {
+        self.toggle.dispatch_event(route, event, ctx)
+    }
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.toggle.tick(dt, settings).merge(if self.sync() {
+            TickResult::CHANGED
+        } else {
+            TickResult::IDLE
+        })
+    }
+    fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.toggle.focus(target, focused, ctx);
+    }
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.toggle.dispatch_focus(target, focused, ctx);
+    }
+    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.toggle.init(ctx);
+    }
+    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.toggle.mount(ctx);
+    }
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.toggle.unmount(ctx);
+    }
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.toggle.destroy(ctx);
     }
 }
 

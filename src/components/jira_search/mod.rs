@@ -21,15 +21,14 @@ use tuicore::{
 
 use crate::{
     components::work_item_rows::{
-        TICKET_MENU_WIDTH, TicketRowDetails, WorkItemKind, WorkItemRow, ticket_summary_text,
-        work_item_title_prefix_width,
+        TICKET_MENU_WIDTH, TicketRowDetails, WorkItemKind, WorkItemRow, ticket_menu_max_height,
+        ticket_summary_text, work_item_title_prefix_width,
     },
     service::{AppService, RecentTickets},
     store::work_items::{SubtaskProgress, WorkItem},
 };
 
 const MENU_WIDTH: u16 = TICKET_MENU_WIDTH;
-const MAX_VISIBLE_ROWS: u16 = 10;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -351,6 +350,7 @@ fn jira_search_row(
             status: ticket.status,
             done: ticket.done,
             assignee: ticket.assignee,
+            labels: ticket.labels,
             story_points: ticket.story_points.or(estimated_story_points),
             show_story_points: story_points_configured,
             story_points_estimated: missing_estimate && estimated_story_points.is_some(),
@@ -386,14 +386,13 @@ impl TuiNode for JiraSearchMenu {
                 .list
                 .items()
                 .iter()
-                .take(MAX_VISIBLE_ROWS.into())
                 .map(jira_search_row_height)
-                .sum::<u16>()
+                .fold(0, u16::saturating_add)
                 .max(1)
         };
         let max_height = match proposal.height {
             AxisProposal::AtMost(height) | AxisProposal::Exact(height) => {
-                height.saturating_mul(4) / 5
+                ticket_menu_max_height(height)
             }
             AxisProposal::Unbounded => preferred_height,
         };

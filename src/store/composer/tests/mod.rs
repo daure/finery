@@ -414,6 +414,17 @@ fn source_changes_and_diff_modes_use_their_expected_ticket_values() {
 }
 
 #[test]
+fn description_diff_style_defaults_to_word_and_can_switch_to_side_by_side() {
+    let mut state = ComposerState::demo();
+
+    assert!(!state.description_diff_side_by_side);
+
+    state.dispatch(ComposerAction::SetDescriptionDiffSideBySide(true));
+
+    assert!(state.description_diff_side_by_side);
+}
+
+#[test]
 fn closed_change_sets_use_submission_snapshots_and_forbid_remote_queries() {
     let mut state = ComposerState::demo();
     let change = &mut state.change_sets[0].tickets[0];

@@ -5,6 +5,13 @@ use ratatui::{
 use tuicore::{Chip, ChipColorRole, MatchSpan, SearchMode, search_match};
 
 pub(crate) const TICKET_MENU_WIDTH: u16 = 84;
+pub(crate) const TICKET_MENU_MAX_HEIGHT_PERCENT: u16 = 60;
+const LABEL_CHIP_TEXT_MAX_WIDTH: usize = 16;
+const LABEL_TEXT_MAX_WIDTH: usize = 10;
+
+pub(crate) fn ticket_menu_max_height(viewport_height: u16) -> u16 {
+    viewport_height.saturating_mul(TICKET_MENU_MAX_HEIGHT_PERCENT) / 100
+}
 
 #[derive(Clone)]
 pub(crate) struct WorkItemRow {
@@ -16,6 +23,7 @@ pub(crate) struct WorkItemRow {
     pub status: String,
     pub done: bool,
     pub assignee: String,
+    pub labels: Vec<String>,
     pub story_points: Option<f64>,
     pub show_story_points: bool,
     pub story_points_estimated: bool,
@@ -92,14 +100,20 @@ pub(crate) fn ticket_summary_text(
             Span::styled(format!("{completed}/{total} "), text_style),
         );
     }
+    append_labels_chip(&mut metadata, &row.labels);
     if !row.status.is_empty() {
         append_metadata(&mut metadata, Span::styled(row.status.clone(), text_style));
     }
-    append_release_chip(&mut metadata, details.fix_versions);
+    append_release_text(&mut metadata, details.fix_versions);
     if let Some(epic_name) = details.epic_name {
         append_metadata(
             &mut metadata,
-            Span::styled(epic_name.to_owned(), Style::default().fg(theme.accent_fg())),
+            Span::styled(
+                epic_name.to_owned(),
+                Style::default()
+                    .fg(theme.warning_fg())
+                    .add_modifier(Modifier::BOLD),
+            ),
         );
     }
     if row.submitted {
@@ -234,9 +248,17 @@ fn ticket_key_spans(key: &str, number_query: Option<&str>, style: Style) -> Vec<
 }
 
 pub(crate) fn work_item_title_prefix_width(row: &WorkItemRow) -> usize {
-    let (kind_icon, _) = ticket_icon(row.kind);
-    let (priority_icon, _) = priority_icon(&row.priority);
-    Line::from(format!("{kind_icon} {priority_icon} {} ", row.key)).width()
+    work_item_title_prefix_width_for(row.kind, &row.priority, &row.key)
+}
+
+pub(crate) fn work_item_title_prefix_width_for(
+    kind: WorkItemKind,
+    priority: &str,
+    key: &str,
+) -> usize {
+    let (kind_icon, _) = ticket_icon(kind);
+    let (priority_icon, _) = priority_icon(priority);
+    Line::from(format!("{kind_icon} {priority_icon} {key} ")).width()
 }
 
 pub(crate) fn story_points_label(row: &WorkItemRow) -> String {
@@ -252,19 +274,78 @@ pub(crate) fn story_points_label(row: &WorkItemRow) -> String {
     format!("{prefix}{points}")
 }
 
-pub(crate) fn append_release_chip(metadata: &mut Vec<Span<'static>>, fix_versions: &[String]) {
+pub(crate) fn append_release_text(metadata: &mut Vec<Span<'static>>, fix_versions: &[String]) {
     if fix_versions.is_empty() {
         return;
     }
     if !metadata.is_empty() {
         metadata.push(Span::raw(" • "));
     }
+    metadata.push(Span::styled(
+        fix_versions.join(", "),
+        Style::default()
+            .fg(tuicore::theme().accent_fg())
+            .add_modifier(Modifier::BOLD),
+    ));
+}
+
+fn append_labels_chip(metadata: &mut Vec<Span<'static>>, labels: &[String]) {
+    if labels.is_empty() {
+        return;
+    }
+    if !metadata.is_empty() {
+        metadata.push(Span::raw(" • "));
+    }
     metadata.extend(
-        Chip::new(fix_versions.join(", "))
+        Chip::new(compact_labels_text(labels))
             .color_role(ChipColorRole::Highlight)
             .line()
             .spans,
     );
+}
+
+fn compact_labels_text(labels: &[String]) -> String {
+    let mut displayed = Vec::new();
+    for (index, label) in labels.iter().enumerate() {
+        let label = truncate_label(label);
+        let candidate = displayed
+            .iter()
+            .chain(std::iter::once(&label))
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("|");
+        let hidden = labels.len().saturating_sub(index + 1);
+        let overflow = (hidden > 0)
+            .then(|| format!("|+{hidden}"))
+            .unwrap_or_default();
+        if Line::from(format!("{candidate}{overflow}")).width() > LABEL_CHIP_TEXT_MAX_WIDTH {
+            break;
+        }
+        displayed.push(label);
+    }
+    let hidden = labels.len().saturating_sub(displayed.len());
+    format!(
+        "{}{}",
+        displayed.join("|"),
+        (hidden > 0)
+            .then(|| format!("|+{hidden}"))
+            .unwrap_or_default()
+    )
+}
+
+fn truncate_label(label: &str) -> String {
+    if Line::from(label).width() <= LABEL_TEXT_MAX_WIDTH {
+        return label.into();
+    }
+    let mut truncated = String::new();
+    for character in label.chars() {
+        let candidate = format!("{truncated}{character}…");
+        if Line::from(candidate).width() > LABEL_TEXT_MAX_WIDTH {
+            break;
+        }
+        truncated.push(character);
+    }
+    format!("{truncated}…")
 }
 
 fn append_metadata(metadata: &mut Vec<Span<'static>>, value: Span<'static>) {

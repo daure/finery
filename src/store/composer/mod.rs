@@ -205,6 +205,7 @@ pub(crate) struct ComposerState {
     pub active_change_set: Option<String>,
     pub selected_ticket: Option<String>,
     pub view_mode: ComposerViewMode,
+    pub description_diff_side_by_side: bool,
     pub sources: HashMap<(String, String), Ticket>,
     presentations: HashMap<String, HashMap<String, TicketPresentation>>,
     submitting_change_sets: HashSet<String>,
@@ -224,6 +225,7 @@ pub(crate) enum ComposerAction {
     SelectTicket(Option<String>),
     SetSelectedTickets(Vec<String>),
     SetViewMode(ComposerViewMode),
+    SetDescriptionDiffSideBySide(bool),
     SetSource {
         change_set_id: String,
         id: String,
@@ -323,6 +325,7 @@ impl ComposerState {
             active_change_set: None,
             selected_ticket: None,
             view_mode: ComposerViewMode::Changes,
+            description_diff_side_by_side: false,
             sources: HashMap::new(),
             presentations: HashMap::new(),
             submitting_change_sets: HashSet::new(),
@@ -389,6 +392,7 @@ impl ComposerState {
             active_change_set: None,
             selected_ticket: None,
             view_mode: ComposerViewMode::Changes,
+            description_diff_side_by_side: false,
             sources: HashMap::new(),
             presentations: HashMap::new(),
             submitting_change_sets: HashSet::new(),
@@ -816,6 +820,9 @@ impl ComposerState {
             ComposerAction::SelectTicket(id) => self.selected_ticket = id,
             ComposerAction::SetSelectedTickets(ids) => self.set_selected_tickets(ids),
             ComposerAction::SetViewMode(mode) => self.view_mode = mode,
+            ComposerAction::SetDescriptionDiffSideBySide(value) => {
+                self.description_diff_side_by_side = value
+            }
             ComposerAction::SetSource {
                 change_set_id,
                 id,

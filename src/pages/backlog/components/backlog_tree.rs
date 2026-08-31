@@ -1199,6 +1199,7 @@ fn work_item_row(
                 status: item.status.clone(),
                 done: item.done,
                 assignee: item.assignee.clone(),
+                labels: item.labels.clone(),
                 story_points: item
                     .story_points
                     .or_else(|| assumed_ticket_size.map(|(points, _)| points)),

@@ -6,11 +6,11 @@ use std::{
     time::Duration,
 };
 
-use ratatui::{Frame, layout::Rect};
+use ratatui::{Frame, layout::Rect, style::Style};
 use tuicore::{
     AnimationSettings, Dropdown, DropdownSearchMode, DropdownVariant, EventCtx, EventOutcome,
     EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusTarget, LayoutCtx, LayoutProposal,
-    LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, TickResult, TuiEvent, TuiNode,
+    LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, TickResult, TuiEvent, TuiNode, theme,
 };
 
 use crate::{
@@ -360,7 +360,7 @@ impl BoundPropertyDropdown {
     }
 
     fn sync(&mut self) -> bool {
-        let (value, disabled, previous) = {
+        let (value, disabled, previous, diff_styles) = {
             let state = self.state.borrow();
             let displayed = state.selected_ticket();
             let value = if self.kind == PropertyKind::Parent {
@@ -372,8 +372,16 @@ impl BoundPropertyDropdown {
             } else {
                 displayed.map_or_else(String::new, |ticket| self.kind.value(ticket))
             };
-            let previous = self.previous_value(&state, &value);
-            (value, !state.selected_is_editable(), previous)
+            let comparison_value = if self.kind == PropertyKind::Parent {
+                displayed
+                    .and_then(|ticket| ticket.parent_key.clone())
+                    .unwrap_or_default()
+            } else {
+                value.clone()
+            };
+            let previous = self.previous_value(&state, &comparison_value);
+            let diff_styles = self.diff_value_styles(&state, &comparison_value);
+            (value, !state.selected_is_editable(), previous, diff_styles)
         };
         let mut changed = false;
         if self.control.is_disabled() != disabled {
@@ -388,6 +396,13 @@ impl BoundPropertyDropdown {
             }
             self.synced_previous_value = previous;
             changed = true;
+        }
+        if let Some((current_style, previous_style)) = diff_styles {
+            self.control.set_field_text_style(current_style);
+            self.control.set_bottom_left_style(previous_style);
+        } else {
+            self.control.clear_field_text_style();
+            self.control.clear_bottom_left_style();
         }
         if self.kind != PropertyKind::Assignee {
             let mut options = self.options();
@@ -421,6 +436,28 @@ impl BoundPropertyDropdown {
             Some((_, label)) => Some(label),
             None => Some("(none)".into()),
         }
+    }
+
+    fn diff_value_styles(&self, state: &ComposerState, current: &str) -> Option<(Style, Style)> {
+        let previous = state
+            .selected_change()
+            .and_then(|change| change.original.as_ref())
+            .and_then(|ticket| self.kind.previous_value(ticket))?;
+        if state.view_mode != crate::store::composer::ComposerViewMode::Diff
+            || previous.0 == current
+            || current.is_empty()
+        {
+            return None;
+        }
+        let theme = theme();
+        Some((
+            Style::default()
+                .fg(theme.diff_added_fg())
+                .bg(theme.diff_added_bg()),
+            Style::default()
+                .fg(theme.diff_removed_fg())
+                .bg(theme.diff_removed_bg()),
+        ))
     }
 
     fn options(&self) -> Vec<JiraOption> {

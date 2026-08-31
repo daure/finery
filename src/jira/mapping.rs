@@ -111,6 +111,7 @@ fn to_work_item_fields(key: &str, fields: &Value, story_points_field_id: Option<
         parent_title,
         has_children: subtask_progress.is_some(),
         subtask_progress,
+        labels: labels(field("labels")),
         fix_versions: fix_versions(field("fixVersions")),
         epic_name: epic_name(field("parent")),
         story_points: story_points_field_id.and_then(|field_id| {
@@ -143,6 +144,16 @@ fn fix_versions(value: &Value) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter_map(|version| version.get("name").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn labels(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect()
 }

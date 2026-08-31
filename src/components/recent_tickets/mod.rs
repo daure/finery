@@ -22,15 +22,14 @@ use tuicore::{
 
 use crate::{
     components::work_item_rows::{
-        TICKET_MENU_WIDTH, TicketRowDetails, WorkItemKind, WorkItemRow, ticket_summary_text,
-        work_item_title_prefix_width,
+        TICKET_MENU_WIDTH, TicketRowDetails, WorkItemKind, WorkItemRow, ticket_menu_max_height,
+        ticket_summary_text, work_item_title_prefix_width,
     },
     service::{AppService, RecentTickets},
     store::work_items::{SubtaskProgress, WorkItem},
 };
 
 const MENU_WIDTH: u16 = TICKET_MENU_WIDTH;
-const MAX_VISIBLE_ROWS: u16 = 10;
 
 enum RecentTicketsResult {
     Loaded {
@@ -363,6 +362,7 @@ fn recent_ticket_row(
             status: ticket.status,
             done: ticket.done,
             assignee: ticket.assignee,
+            labels: ticket.labels,
             story_points: ticket.story_points.or(estimated_story_points),
             show_story_points: story_points_configured,
             story_points_estimated: missing_estimate && estimated_story_points.is_some(),
@@ -396,12 +396,14 @@ impl TuiNode for RecentTicketsMenu {
         let preferred_height = if self.loading {
             1
         } else {
-            let rows = self.visible_row_count().max(1).min(MAX_VISIBLE_ROWS.into());
-            1 + u16::try_from(rows).unwrap_or(MAX_VISIBLE_ROWS) * 2
+            let rows = u16::try_from(self.visible_row_count())
+                .unwrap_or(u16::MAX)
+                .max(1);
+            1 + rows.saturating_mul(2)
         };
         let max_height = match proposal.height {
             AxisProposal::AtMost(height) | AxisProposal::Exact(height) => {
-                height.saturating_mul(4) / 5
+                ticket_menu_max_height(height)
             }
             AxisProposal::Unbounded => preferred_height,
         };

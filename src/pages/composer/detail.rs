@@ -18,8 +18,8 @@ use crate::{
 };
 
 use super::fields::{
-    BoundDescription, BoundTextField, BoundViewMode, DescriptionAction, DescriptionEditRequest,
-    PendingDescriptionActions,
+    BoundDescription, BoundDescriptionDiffStyle, BoundTextField, BoundViewMode, DescriptionAction,
+    DescriptionEditRequest, PendingDescriptionActions,
 };
 use super::property_fields::PropertyFields;
 
@@ -38,6 +38,7 @@ struct ResponsiveDetails {
     is_wide: bool,
     description_focus_key: String,
     description_editor_key: String,
+    description_reader_key: String,
 }
 
 pub(super) struct DetailPane {
@@ -155,14 +156,22 @@ impl DetailPane {
             is_wide: false,
             description_focus_key: keys.description_focus.sequence().into(),
             description_editor_key: keys.description_editor.sequence().into(),
+            description_reader_key: keys.description_reader.sequence().into(),
         };
         let fields =
             Split::vertical(title, details).constraints(Constraint::Length(3), Constraint::Fill(1));
-        let mode = Flex::row().child(
-            "mode",
-            BoundViewMode::new(Rc::clone(&state), Rc::clone(&pending), keys.view.clone()),
-            FlexItem::fit_content(),
-        );
+        let mode = Flex::row()
+            .gap(2)
+            .child(
+                "mode",
+                BoundViewMode::new(Rc::clone(&state), Rc::clone(&pending), keys.view.clone()),
+                FlexItem::fit_content(),
+            )
+            .child(
+                "description-diff-style",
+                BoundDescriptionDiffStyle::new(Rc::clone(&state), Rc::clone(&pending)),
+                FlexItem::fit_content(),
+            );
         Self {
             state,
             description_actions,
@@ -214,6 +223,11 @@ impl DetailPane {
                     ctx.request_layout();
                     ctx.request_redraw();
                 }
+                DescriptionAction::FocusDiff => {
+                    details.focus_description();
+                    ctx.request_layout();
+                    ctx.request_redraw();
+                }
                 DescriptionAction::OpenExternalEditor(description) => {
                     self.external_editor_pending = true;
                     ctx.request_external_editor_with_extension(description, 1, 1, "md");
@@ -232,6 +246,12 @@ impl DetailPane {
         ctx.request_redraw();
     }
 
+    pub(super) fn focus_diff(&mut self, ctx: &mut EventCtx<()>) {
+        self.detail.second_mut().second_mut().focus_description();
+        ctx.request_layout();
+        ctx.request_redraw();
+    }
+
     fn sync(&mut self) {
         let fields = self.detail.second_mut();
         let title_height = fields.first().height();
@@ -242,7 +262,12 @@ impl DetailPane {
             .selected_change()
             .is_some_and(|change| change.kind == ChangeKind::Deleted);
         let details = self.detail.second_mut().second_mut();
-        details.set_action_hotkeys(!deleted, editable);
+        let (focus, editor, reader) = match state.view_mode {
+            ComposerViewMode::Changes => (!deleted, editable, true),
+            ComposerViewMode::Source => (true, false, true),
+            ComposerViewMode::Diff => (true, false, false),
+        };
+        details.set_action_hotkeys(focus, editor, reader);
         let submitted = state
             .selected_change()
             .is_some_and(|change| change.is_submitted());
@@ -317,11 +342,17 @@ impl ResponsiveDetails {
         }
     }
 
-    fn set_action_hotkeys(&mut self, description: bool, editor: bool) {
+    fn set_action_hotkeys(&mut self, description: bool, editor: bool, reader: bool) {
         self.narrow
             .set_action_hotkey_enabled(&self.description_focus_key, description);
         self.narrow
             .set_action_hotkey_enabled(&self.description_editor_key, editor);
+        self.narrow
+            .set_action_hotkey_enabled(&self.description_reader_key, reader);
+        let description_panel = self.wide.first_mut().panel_mut();
+        description_panel.set_action_hotkey_enabled(&self.description_focus_key, description);
+        description_panel.set_action_hotkey_enabled(&self.description_editor_key, editor);
+        description_panel.set_action_hotkey_enabled(&self.description_reader_key, reader);
     }
 
     fn set_dashed(&mut self, dashed: bool) {
@@ -440,43 +471,59 @@ fn description_tab_action(
     action: DescriptionTabAction,
 ) -> impl Fn(usize) + 'static {
     move |selected| {
-        if matches!(
-            action,
-            DescriptionTabAction::Focus | DescriptionTabAction::SpeedReader
-        ) {
+        let state = state.borrow();
+        let view_mode = state.view_mode;
+        if view_mode == ComposerViewMode::Changes
+            && matches!(
+                action,
+                DescriptionTabAction::Focus | DescriptionTabAction::SpeedReader
+            )
+        {
             actions.borrow_mut().push(DescriptionAction::ShowChanges);
         }
         if selected != 0 {
-            if action != DescriptionTabAction::Editor || state.borrow().selected_is_editable() {
+            if action != DescriptionTabAction::Editor || state.selected_is_editable() {
                 actions
                     .borrow_mut()
-                    .push(DescriptionAction::Focus { edit: false });
+                    .push(description_focus_action(view_mode, false));
             }
             return;
         }
-        let state = state.borrow();
-        let description = state
-            .selected_changes()
-            .map(|ticket| ticket.description.clone())
-            .unwrap_or_default();
+        let description = match view_mode {
+            ComposerViewMode::Source => state.selected_source(),
+            ComposerViewMode::Changes | ComposerViewMode::Diff => state.selected_changes(),
+        }
+        .map(|ticket| ticket.description.clone())
+        .unwrap_or_default();
         match action {
             DescriptionTabAction::Focus => {
-                actions.borrow_mut().push(DescriptionAction::Focus {
-                    edit: state.selected_is_editable(),
-                });
+                actions.borrow_mut().push(description_focus_action(
+                    view_mode,
+                    state.selected_is_editable(),
+                ));
             }
-            DescriptionTabAction::Editor if state.selected_is_editable() => {
+            DescriptionTabAction::Editor
+                if view_mode == ComposerViewMode::Changes && state.selected_is_editable() =>
+            {
                 actions
                     .borrow_mut()
                     .push(DescriptionAction::OpenExternalEditor(description));
             }
-            DescriptionTabAction::SpeedReader => {
+            DescriptionTabAction::SpeedReader if view_mode != ComposerViewMode::Diff => {
                 actions
                     .borrow_mut()
                     .push(DescriptionAction::OpenSpeedReader(description));
             }
+            DescriptionTabAction::SpeedReader => {}
             DescriptionTabAction::Editor => {}
         }
+    }
+}
+
+fn description_focus_action(view_mode: ComposerViewMode, edit: bool) -> DescriptionAction {
+    match view_mode {
+        ComposerViewMode::Diff => DescriptionAction::FocusDiff,
+        ComposerViewMode::Source | ComposerViewMode::Changes => DescriptionAction::Focus { edit },
     }
 }
 

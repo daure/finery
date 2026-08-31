@@ -11,6 +11,7 @@ pub(crate) struct WorkItem {
     pub parent_title: Option<String>,
     pub has_children: bool,
     pub subtask_progress: Option<SubtaskProgress>,
+    pub labels: Vec<String>,
     pub fix_versions: Vec<String>,
     pub epic_name: Option<String>,
     pub story_points: Option<f64>,

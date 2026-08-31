@@ -36,7 +36,7 @@ const ISSUE_FIELDS: [&str; 9] = [
     "subtasks",
 ];
 
-const BACKLOG_FIELDS: [&str; 8] = [
+const BACKLOG_FIELDS: [&str; 9] = [
     "summary",
     "issuetype",
     "status",
@@ -44,9 +44,10 @@ const BACKLOG_FIELDS: [&str; 8] = [
     "assignee",
     "parent",
     "subtasks",
+    "labels",
     "fixVersions",
 ];
-const COMPOSER_FIELDS: [&str; 10] = [
+const COMPOSER_FIELDS: [&str; 11] = [
     "summary",
     "description",
     "issuetype",
@@ -56,6 +57,7 @@ const COMPOSER_FIELDS: [&str; 10] = [
     "project",
     "parent",
     "subtasks",
+    "labels",
     "fixVersions",
 ];
 const BACKLOG_JQL: &str = "issuetype not in subTaskIssueTypes() AND issuetype != Epic";

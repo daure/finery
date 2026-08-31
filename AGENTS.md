@@ -2,4 +2,4 @@ Load architecture.md before starting any work.
 Always load ~/dev/tuicore/SKILL.md on startup.
 No PRODUCT.md or DESIGN.md required.
 
-Keep ticket presentation aligned where practical across Recent Tickets, ticket search, Backlog, and Composer. Surface-specific conditional logic is allowed, but shared ticket details should look and behave consistently.
+Ticket content is rendered through the shared `components/work_item_rows` model and `ticket_summary_text()` renderer. Use it across Recent Tickets, Jira search, Backlog, Composer, and ticket menus. Surface-specific list behavior, layout, and annotations are allowed, but shared ticket details should remain consistent.
