@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
 use super::{
-    AppSettings, BACKLOG_FILTERS_SETTING, BACKLOG_FIXED_SPRINT_CAPACITY_SETTING,
-    BACKLOG_FIXED_TICKET_SIZE_SETTING, BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING,
-    BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING, BACKLOG_USE_JIRA_VELOCITY_SETTING,
-    COMPOSER_ADD_CHILD_KEY_SETTING, COMPOSER_ADD_SIBLING_KEY_SETTING, COMPOSER_COMMIT_KEY_SETTING,
+    AppSettings, BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING, BACKLOG_FILTERS_SETTING,
+    BACKLOG_FIXED_SPRINT_CAPACITY_SETTING, BACKLOG_FIXED_TICKET_SIZE_SETTING,
+    BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING, BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING,
+    BACKLOG_USE_JIRA_VELOCITY_SETTING, COMPOSER_ADD_CHILD_KEY_SETTING,
+    COMPOSER_ADD_SIBLING_KEY_SETTING, COMPOSER_COMMIT_KEY_SETTING,
     COMPOSER_CREATE_SUBMIT_KEY_SETTING, COMPOSER_DESCRIPTION_FOCUS_KEY_SETTING,
     COMPOSER_DESCRIPTION_READER_KEY_SETTING, COMPOSER_ISSUE_TYPE_KEY_SETTING,
     COMPOSER_VIEW_KEY_SETTING, JIRA_COMPANY_MANAGED_URLS_SETTING,
@@ -166,6 +167,24 @@ fn backlog_filters_round_trip_in_their_display_order() {
             "hide_done,hide_estimated,hide_unestimated".into()
         ))
     );
+}
+
+#[test]
+fn excluded_sprint_name_fragments_round_trip_and_match_case_insensitively() {
+    let settings = AppSettings::resolve(&HashMap::from([(
+        BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING.into(),
+        " abc , Archive,ABC,,".into(),
+    )]))
+    .unwrap();
+
+    assert_eq!(settings.excluded_sprint_name_fragments, ["abc", "Archive"]);
+    assert!(settings.excludes_sprint("AbCde"));
+    assert!(settings.excludes_sprint("2026 archive"));
+    assert!(!settings.excludes_sprint("Current sprint"));
+    assert!(settings.values().contains(&(
+        BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING,
+        "abc,Archive".into(),
+    )));
 }
 
 #[test]

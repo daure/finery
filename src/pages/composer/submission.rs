@@ -13,6 +13,7 @@ pub(super) struct SubmissionController {
     state: Rc<RefCell<ComposerState>>,
     service: AppService,
     response: Option<Receiver<Result<SubmittedComposerChangeSet, String>>>,
+    preflight_error: Option<String>,
 }
 
 impl SubmissionController {
@@ -21,11 +22,16 @@ impl SubmissionController {
             state,
             service,
             response: None,
+            preflight_error: None,
         }
     }
 
     pub(super) fn is_submitting(&self) -> bool {
         self.response.is_some()
+    }
+
+    pub(super) fn take_preflight_error(&mut self) -> Option<String> {
+        self.preflight_error.take()
     }
 
     pub(super) fn start(&mut self, changes: Vec<TicketChange>, ctx: &mut tuicore::EventCtx<()>) {
@@ -105,10 +111,10 @@ impl SubmissionController {
         true
     }
 
-    fn report_outcome(&self, outcome: &SubmitChangeSetOutcome) {
+    fn report_outcome(&mut self, outcome: &SubmitChangeSetOutcome) {
         match outcome {
             SubmitChangeSetOutcome::PreflightError { message } => {
-                self.notify_error("Commit failed", message);
+                self.preflight_error = Some(message.clone());
             }
             SubmitChangeSetOutcome::Conflict { ticket_ids } => {
                 self.service.report_notification(tuicore::Notification::warning(

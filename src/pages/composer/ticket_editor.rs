@@ -14,8 +14,8 @@ use tuicore::{
     DialogBackdrop, DialogLayer, Dropdown, DropdownPopupDirection, EventCtx, EventOutcome,
     EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, Key, KeyEvent,
     LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, MainAlign, Panel,
-    PanelHost, Paragraph, RenderCtx, ScrollContainer, SpeedReader, Spinner, Split, TextInput,
-    TextInputKeyBindings, TickResult, TuiEvent, TuiNode, keybindings,
+    PanelHost, Paragraph, RenderCtx, ScrollAxes, ScrollContainer, SpeedReader, Spinner, Split,
+    TextInput, TextInputKeyBindings, TickResult, TuiEvent, TuiNode, keybindings,
 };
 
 use crate::{
@@ -35,7 +35,8 @@ use super::{
     source::SourceController,
     submission::SubmissionController,
     ticket_rows::{
-        TicketRow, set_active_ticket_style, ticket_data_view_with_number_jump, ticket_rows,
+        TicketRow, display_key_for_ticket, set_active_ticket_style,
+        ticket_data_view_with_number_jump, ticket_rows,
     },
     ticket_toolbar::{ToolbarEvent, ToolbarEvents, ToolbarFeedback, toolbar},
     title_guidance::{TitleFeedback, format_title},
@@ -477,11 +478,12 @@ impl TicketEditor {
         let ticket_action_dialog = Dialog::new()
             .top_left("Ticket action")
             .content(["Choose what should happen to the selected ticket."])
+            .scrollable(ScrollAxes::Vertical)
             .on_close(move |_| close_ticket_dialog.set(true));
         let ticket_view = DialogLayer::new(add_layer, ticket_action_dialog)
             .active(false)
             .fit_content()
-            .fit_content_max(72, 8)
+            .fit_content_max(88, 18)
             .backdrop(DialogBackdrop::dim().amount(0.55));
         let view = DialogLayer::new(
             ticket_view,
@@ -1120,18 +1122,10 @@ impl TicketEditor {
         let confirm_submit = Rc::clone(&self.submit_confirmation_requested);
         let cancel_submit = Rc::clone(&self.ticket_dialog_close_requested);
         let keys = self.composer_keys();
-        let content = {
-            let state = self.state.borrow();
-            let mut content = vec![format!("Commit {} ticket changes to Jira:", changes.len())];
-            content.extend(changes.into_iter().map(|change| {
-                let title = state
-                    .changes_for_change(&change)
-                    .map(|ticket| ticket.title.as_str())
-                    .unwrap_or("Unavailable ticket");
-                format!("• {} · {title}", change.id)
-            }));
-            content
-        };
+        let content = [format!(
+            "Commit {} selected changes to Jira?",
+            changes.len()
+        )];
         let dialog = self.view.base_mut().layer_mut();
         dialog.set_top_left("Commit changes");
         dialog.set_actions([
@@ -1264,16 +1258,50 @@ impl TicketEditor {
         true
     }
 
-    fn poll_submission(&mut self) -> bool {
+    fn poll_submission(&mut self, ctx: Option<&mut EventCtx<()>>) -> bool {
         let changed = self.submission.drain_results();
+        if let Some(error) = self.submission.take_preflight_error() {
+            self.open_commit_blocked_dialog(error, ctx);
+        }
         if changed {
             self.sync();
         }
         changed
     }
 
+    fn open_commit_blocked_dialog(&mut self, error: String, ctx: Option<&mut EventCtx<()>>) {
+        self.ticket_dialog_close_requested.set(false);
+        let close = Rc::clone(&self.ticket_dialog_close_requested);
+        let keys = self.composer_keys();
+        let content = {
+            let state = self.state.borrow();
+            error
+                .lines()
+                .map(|line| {
+                    let Some((ticket_id, message)) = line.split_once(": ") else {
+                        return line.to_owned();
+                    };
+                    let display_key = display_key_for_ticket(&state, ticket_id)
+                        .unwrap_or_else(|| ticket_id.to_owned());
+                    format!("{display_key}: {message}")
+                })
+                .collect::<Vec<_>>()
+        };
+        let dialog = self.view.base_mut().layer_mut();
+        dialog.set_top_left("Commit blocked");
+        dialog.set_content(content);
+        dialog.set_actions([DialogAction::new("Close")
+            .hotkey(keys.dialog_cancel.spec())
+            .on_trigger(move || close.set(true))]);
+        if let Some(ctx) = ctx {
+            self.view.base_mut().set_active_with_context(true, ctx);
+        } else {
+            self.view.base_mut().set_active(true);
+        }
+    }
+
     pub(super) fn poll_inactive_submission(&mut self) -> TickResult {
-        let changed = self.poll_submission();
+        let changed = self.poll_submission(None);
         (if self.submission.is_submitting() {
             TickResult::scheduled_after(Duration::from_millis(50))
         } else {
@@ -1718,7 +1746,7 @@ impl TuiNode for TicketEditor {
             }
             return self.loading_view.event(event, ctx);
         }
-        self.poll_submission();
+        self.poll_submission(Some(ctx));
         let create_dialog_open = self.view.base().base().base().is_active();
         let add_menu_open = self.view.base().base().is_active();
         let ticket_dialog_open = self.view.base().is_active();
@@ -1774,7 +1802,7 @@ impl TuiNode for TicketEditor {
             }
             return self.loading_view.dispatch_event(route, event, ctx);
         }
-        self.poll_submission();
+        self.poll_submission(Some(ctx));
         let create_dialog_open = self.view.base().base().base().is_active();
         let add_menu_open = self.view.base().base().is_active();
         let ticket_dialog_open = self.view.base().is_active();
@@ -1810,7 +1838,7 @@ impl TuiNode for TicketEditor {
     }
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let was_loading = self.source.is_loading() || self.submission.is_submitting();
-        let changed = self.poll_submission();
+        let changed = self.poll_submission(None);
         self.source.ensure_selected();
         let source_changed = self.source.drain();
         if changed || source_changed {

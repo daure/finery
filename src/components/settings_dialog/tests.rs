@@ -87,3 +87,21 @@ fn backlog_runway_changes_apply_to_live_settings() {
     assert_eq!(settings.backlog_runway.fixed_ticket_size, 2.5);
     assert_eq!(settings.backlog_runway.sprint_tolerance_percent, 15);
 }
+
+#[test]
+fn excluded_sprint_name_fragments_apply_to_live_settings() {
+    let service = AppService::for_tests();
+    let settings = service.settings();
+    let dialog = SettingsDialog::new(settings.clone(), service);
+    dialog
+        .changes
+        .borrow_mut()
+        .push(SettingChange::BacklogExcludedSprintNameFragments(
+            " abc, Archive,ABC ".into(),
+        ));
+
+    dialog.apply_changes(&mut EventCtx::default());
+
+    let settings = settings.read().unwrap();
+    assert_eq!(settings.excluded_sprint_name_fragments, ["abc", "Archive"]);
+}

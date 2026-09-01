@@ -44,6 +44,7 @@ fn snapshot() -> BacklogSnapshot {
             work_item("FIN-4", None),
             work_item("FIN-5", Some(8.0)),
         ],
+        top_level_backlog_keys: Vec::new(),
         warnings: Vec::new(),
         runway: None,
         velocity: None,

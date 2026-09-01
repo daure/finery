@@ -90,10 +90,11 @@ pub(super) fn set_active_ticket_style(
 }
 
 pub(super) fn ticket_rows(state: &ComposerState) -> Vec<TicketRow> {
-    let mut rows = state
-        .ordered_changes()
+    let changes = state.ordered_changes();
+    let temporary_keys = temporary_draft_keys(state, &changes);
+    let mut rows = changes
         .into_iter()
-        .filter_map(|change| ticket_row(state, change))
+        .filter_map(|change| ticket_row(state, change, temporary_keys.get(&change.id)))
         .collect::<Vec<_>>();
     let parents = rows
         .iter()
@@ -103,6 +104,41 @@ pub(super) fn ticket_rows(state: &ComposerState) -> Vec<TicketRow> {
         row.depth = ticket_row_depth(&row.parent_id, &parents);
     }
     rows
+}
+
+pub(super) fn display_key_for_ticket(state: &ComposerState, ticket_id: &str) -> Option<String> {
+    let changes = state.ordered_changes();
+    let temporary_keys = temporary_draft_keys(state, &changes);
+    let change = changes.into_iter().find(|change| change.id == ticket_id)?;
+    temporary_keys.get(ticket_id).cloned().or_else(|| {
+        state
+            .ticket_for_change(change)
+            .map(|ticket| ticket.key.clone())
+    })
+}
+
+fn temporary_draft_keys(
+    state: &ComposerState,
+    changes: &[&TicketChange],
+) -> HashMap<String, String> {
+    let mut counters = HashMap::<String, usize>::new();
+    changes
+        .iter()
+        .filter_map(|change| {
+            let ticket = state.ticket_for_change(change)?;
+            (change.kind == ChangeKind::Added
+                && !change.is_submitted()
+                && ticket.key.starts_with("NEW-"))
+            .then(|| {
+                let number = counters.entry(ticket.project_key.clone()).or_default();
+                *number += 1;
+                (
+                    change.id.clone(),
+                    format!("{}-TMP-{number}", ticket.project_key),
+                )
+            })
+        })
+        .collect()
 }
 
 fn ticket_row_depth(
@@ -118,7 +154,11 @@ fn ticket_row_depth(
     depth
 }
 
-fn ticket_row(state: &ComposerState, change: &TicketChange) -> Option<TicketRow> {
+fn ticket_row(
+    state: &ComposerState,
+    change: &TicketChange,
+    temporary_key: Option<&String>,
+) -> Option<TicketRow> {
     let ticket = state.ticket_for_change(change)?;
     let presentation = state.presentation_for_change(change);
     let estimated_story_points = matches!(ticket.kind, TicketKind::Story | TicketKind::Task)
@@ -158,7 +198,7 @@ fn ticket_row(state: &ComposerState, change: &TicketChange) -> Option<TicketRow>
     Some(TicketRow {
         item: WorkItemRow {
             id: change.id.clone(),
-            key: display_key(change, ticket),
+            key: temporary_key.cloned().unwrap_or_else(|| ticket.key.clone()),
             title: ticket.title.clone(),
             kind: ticket_kind(ticket.kind),
             priority: ticket.priority.clone(),
@@ -195,15 +235,6 @@ fn ticket_row(state: &ComposerState, change: &TicketChange) -> Option<TicketRow>
             .unwrap_or_default(),
         epic_name: presentation.and_then(|presentation| presentation.work_item.epic_name.clone()),
     })
-}
-
-fn display_key(change: &TicketChange, ticket: &crate::store::composer::Ticket) -> String {
-    if change.kind == ChangeKind::Added && !change.is_submitted() && ticket.key.starts_with("NEW-")
-    {
-        format!("{}-DRAFT", ticket.project_key)
-    } else {
-        ticket.key.clone()
-    }
 }
 
 fn ticket_columns(number_jump: Rc<RefCell<TicketNumberJump>>) -> Vec<Column<TicketRow, String>> {

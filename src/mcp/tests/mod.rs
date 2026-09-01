@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::{
     mcp::{
-        JiraPosition, final_order, placement_rank_plan, run_composer,
+        CHANGE_SET_GUIDANCE, JiraPosition, JiraSection, final_order, issue_sections,
+        placement_rank_plan, run_composer, section_order, validate_issue_keys,
         workspace_capacity_guidance_view, workspace_view,
     },
     service::composer_service::{
@@ -34,6 +35,14 @@ fn composer_calls_complete_from_async_runtime() {
         }));
 
     assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn change_set_guidance_includes_canonical_jira_description_tags() {
+    assert!(CHANGE_SET_GUIDANCE.contains("{{jira:panel"));
+    assert!(CHANGE_SET_GUIDANCE.contains("{{jira:mention"));
+    assert!(CHANGE_SET_GUIDANCE.contains("{{jira:inline-card"));
+    assert!(CHANGE_SET_GUIDANCE.contains("accept_unsafe_description_overwrite"));
 }
 
 fn work_item(index: usize) -> WorkItem {
@@ -90,6 +99,7 @@ fn workspace_compacts_backlog_and_change_set_payloads() {
                 capacity: None,
             }],
             work_items: (51..102).map(work_item).collect(),
+            top_level_backlog_keys: Vec::new(),
             warnings: vec!["Story points are unavailable".into()],
             runway: Some(BacklogRunway {
                 capacity: 20.5,
@@ -220,6 +230,7 @@ fn workspace_caps_velocity_projection_at_ten_sprints() {
             story_points_configured: true,
             sprints: Vec::new(),
             work_items: Vec::new(),
+            top_level_backlog_keys: Vec::new(),
             warnings: Vec::new(),
             runway: None,
             velocity: Some(VelocityReport {
@@ -363,4 +374,49 @@ fn placement_plan_can_order_an_entire_destination() {
     assert_eq!(plan.issues, ["FIN-2", "FIN-1"]);
     assert_eq!(plan.rank_after_issue.as_deref(), Some("FIN-3"));
     assert_eq!(plan.rank_before_issue, None);
+}
+
+#[test]
+fn backlog_bottom_ranks_after_hidden_epics() {
+    let snapshot = BacklogSnapshot {
+        board_name: "Finery".into(),
+        story_points_configured: false,
+        sprints: Vec::new(),
+        work_items: vec![work_item(1), work_item(2)],
+        top_level_backlog_keys: vec!["FIN-1".into(), "FIN-2".into(), "FIN-EPIC".into()],
+        warnings: Vec::new(),
+        runway: None,
+        velocity: None,
+    };
+    let order = section_order(&snapshot, JiraSection::Backlog).unwrap();
+    let final_order = final_order(&order, &["FIN-2".into()], &JiraPosition::Bottom).unwrap();
+    let plan = placement_rank_plan(&["FIN-2".into()], &final_order)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(plan.rank_after_issue.as_deref(), Some("FIN-EPIC"));
+}
+
+#[test]
+fn embedded_backlog_subtasks_are_rejected_before_ranking_or_swapping() {
+    let mut subtask = work_item(2);
+    subtask.kind = "Sub-task".into();
+    subtask.parent_key = Some("FIN-1".into());
+    let snapshot = BacklogSnapshot {
+        board_name: "Finery".into(),
+        story_points_configured: false,
+        sprints: Vec::new(),
+        work_items: vec![work_item(1), subtask],
+        top_level_backlog_keys: vec!["FIN-1".into()],
+        warnings: Vec::new(),
+        runway: None,
+        velocity: None,
+    };
+
+    let error = validate_issue_keys(&["FIN-2".into()], &issue_sections(&snapshot)).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Issue 'FIN-2' is not in this board's active, future, or backlog sections"
+    );
 }

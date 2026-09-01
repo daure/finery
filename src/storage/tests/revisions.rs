@@ -160,6 +160,7 @@ fn snapshot_set(name: &str) -> ChangeSet {
                 title: name.into(),
                 description: String::new(),
                 description_safe_to_overwrite: true,
+                description_overwrite_warning: None,
                 kind: TicketKind::Task,
                 status: "To Do".into(),
                 priority: "Medium".into(),

@@ -9,7 +9,7 @@ use ratatui::{Frame, layout::Rect};
 use tuicore::{
     AnimationSettings, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId,
     FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    PasswordInput, RenderCtx, TextInput, TickResult, Toggle, TuiEvent, TuiNode,
+    ListControl, PasswordInput, RenderCtx, TextInput, TickResult, Toggle, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -35,6 +35,7 @@ enum SettingChange {
     BacklogUseAverageTicketSize(bool),
     BacklogFixedTicketSize(String),
     BacklogSprintTolerancePercent(String),
+    BacklogExcludedSprintNameFragments(String),
     Wpm(String),
     MarkdownBlockPause(String),
     RecentTicketsLimit(String),
@@ -234,6 +235,14 @@ impl SettingsDialog {
                 FlexItem::fixed(3),
             )
             .child(
+                "backlog-excluded-sprint-name-fragments",
+                SprintExclusionList::new(
+                    values.excluded_sprint_name_fragments.clone(),
+                    Rc::clone(&changes),
+                ),
+                FlexItem::fixed(7),
+            )
+            .child(
                 "speed-reader-wpm",
                 TextInput::new()
                     .value(values.speed_reader.wpm.to_string())
@@ -386,6 +395,10 @@ impl SettingsDialog {
                     settings.backlog_runway.sprint_tolerance_percent = value;
                     changed = true;
                 }
+                SettingChange::BacklogExcludedSprintNameFragments(value) => {
+                    settings.excluded_sprint_name_fragments = sprint_name_fragments(&value);
+                    changed = true;
+                }
                 SettingChange::Wpm(value) => {
                     let Some(wpm) = parse_speed_reader_wpm(&value) else {
                         ctx.notify(tuicore::Notification::warning(
@@ -434,6 +447,144 @@ impl SettingsDialog {
             self.service.save_settings(settings);
         }
     }
+}
+
+#[derive(Clone)]
+struct SprintExclusionRow {
+    id: u64,
+    fragment: String,
+}
+
+struct SprintExclusionList {
+    list: ListControl<SprintExclusionRow, u64>,
+    changes: Rc<RefCell<Vec<SettingChange>>>,
+}
+
+impl SprintExclusionList {
+    fn new(fragments: Vec<String>, changes: Rc<RefCell<Vec<SettingChange>>>) -> Self {
+        let rows = fragments
+            .into_iter()
+            .enumerate()
+            .map(|(index, fragment)| SprintExclusionRow {
+                id: u64::try_from(index).unwrap_or(u64::MAX),
+                fragment,
+            })
+            .collect::<Vec<_>>();
+        let mut next_id = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+        let list = ListControl::list(
+            rows,
+            |row: &SprintExclusionRow| row.id,
+            |row: &SprintExclusionRow| row.fragment.clone(),
+            move |fragment, _| {
+                let row = SprintExclusionRow {
+                    id: next_id,
+                    fragment,
+                };
+                next_id = next_id.saturating_add(1);
+                row
+            },
+        )
+        .title("Excluded sprint name fragments")
+        .empty_message("No sprint names excluded.")
+        .max_rows(100)
+        .editable(
+            |row| vec![row.fragment.clone()],
+            |row, values| row.fragment.clone_from(&values[0]),
+        );
+        Self { list, changes }
+    }
+
+    fn sync(&mut self) {
+        if self.list.take_events().is_empty() {
+            return;
+        }
+        let fragments = self
+            .list
+            .items()
+            .iter()
+            .map(|row| row.fragment.trim())
+            .filter(|fragment| !fragment.is_empty())
+            .collect::<Vec<_>>()
+            .join(",");
+        self.changes
+            .borrow_mut()
+            .push(SettingChange::BacklogExcludedSprintNameFragments(fragments));
+    }
+}
+
+impl TuiNode for SprintExclusionList {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        self.list.measure(proposal)
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.list.layout(area, ctx)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        self.list.render(frame, area, ctx);
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        let outcome = self.list.event(event, ctx);
+        self.sync();
+        outcome
+    }
+
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> EventOutcome {
+        let outcome = self.list.dispatch_event(route, event, ctx);
+        self.sync();
+        outcome
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.list.dispatch_focus(target, focused, ctx);
+    }
+
+    fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.list.focus(target, focused, ctx);
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.list.tick(dt, settings)
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.list.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.list.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.list.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.list.destroy(ctx);
+    }
+}
+
+fn sprint_name_fragments(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|fragment| !fragment.is_empty())
+        .fold(Vec::new(), |mut fragments, fragment| {
+            if !fragments
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(fragment))
+            {
+                fragments.push(fragment.to_owned());
+            }
+            fragments
+        })
 }
 
 fn parse_positive_number(value: &str) -> Option<f64> {

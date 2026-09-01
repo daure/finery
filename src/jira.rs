@@ -60,7 +60,7 @@ const COMPOSER_FIELDS: [&str; 11] = [
     "labels",
     "fixVersions",
 ];
-const BACKLOG_JQL: &str = "issuetype not in subTaskIssueTypes() AND issuetype != Epic";
+const BACKLOG_JQL: &str = "";
 const MAX_VELOCITY_GOAL_LOOKUPS: usize = 10;
 const MAX_PARALLEL_SPRINT_LOADS: usize = 6;
 
@@ -451,7 +451,11 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         .filter_map(|sprint| sprint.goal.clone().map(|goal| (sprint.id, goal)))
         .collect::<HashMap<_, _>>();
     velocity_sprint_ids.retain(|sprint_id| !active_velocity_goals.contains_key(sprint_id));
-    let (sprints, work_items, closed_velocity_goals) =
+    let sprints = sprints
+        .into_iter()
+        .filter(|sprint| !settings.excludes_sprint(&sprint.name))
+        .collect::<Vec<_>>();
+    let (sprints, backlog, closed_velocity_goals, sprint_hydration_warning) =
         std::thread::scope(|scope| -> Result<_, String> {
             let backlog_client = client.clone();
             let backlog_base_url = base_url.clone();
@@ -515,6 +519,16 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
                     );
                 }
             }
+            let sprint_hydration_warning = hydrate_sprint_subtasks(
+                &client,
+                &base_url,
+                &email,
+                &token,
+                &mut sprint_work_items,
+                story_points_field_id.as_deref(),
+            )
+            .err()
+            .map(|error| format!("Could not load sprint sub-task details: {error}"));
             let work_items = backlog
                 .join()
                 .map_err(|_| "Jira backlog request panicked".to_string())??;
@@ -537,7 +551,12 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            Ok((sprints, work_items, velocity_goals))
+            Ok((
+                sprints,
+                work_items,
+                velocity_goals,
+                sprint_hydration_warning,
+            ))
         })?;
     active_velocity_goals.extend(closed_velocity_goals);
     let velocity = velocity.map(|mut report| {
@@ -552,12 +571,16 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         board_name: board.name,
         story_points_configured: story_points_field_id.is_some(),
         sprints,
-        work_items,
+        work_items: backlog.work_items,
+        top_level_backlog_keys: backlog.top_level_keys,
         warnings: Vec::new(),
         runway: None,
         velocity: velocity.as_ref().ok().cloned(),
     };
     if let Some(warning) = discovery_warning {
+        snapshot.warnings.push(warning);
+    }
+    if let Some(warning) = sprint_hydration_warning {
         snapshot.warnings.push(warning);
     }
     if let Some(warning) = story_points_warning(&snapshot) {
@@ -1037,6 +1060,53 @@ fn sprint_issues(
     }
 }
 
+fn hydrate_sprint_subtasks(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    sprint_work_items: &mut [Vec<WorkItem>],
+    story_points_field_id: Option<&str>,
+) -> Result<(), String> {
+    let mut keys = sprint_work_items
+        .iter()
+        .flatten()
+        .filter(|item| is_subtask_kind(&item.kind))
+        .map(|item| item.key.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if keys.is_empty() {
+        return Ok(());
+    }
+    keys.sort();
+    let fields = backlog_fields(story_points_field_id);
+    let hydrated = request_bulk_fetch(client, base_url, email, token, &keys, &fields)?
+        .issues
+        .into_iter()
+        .map(|issue| {
+            let work_item = to_work_item(issue, story_points_field_id);
+            (work_item.key.clone(), work_item)
+        })
+        .collect::<HashMap<_, _>>();
+    for work_items in sprint_work_items {
+        for work_item in work_items
+            .iter_mut()
+            .filter(|item| is_subtask_kind(&item.kind))
+        {
+            if let Some(hydrated) = hydrated.get(&work_item.key) {
+                *work_item = hydrated.clone();
+            }
+        }
+    }
+    Ok(())
+}
+
+struct BoardBacklog {
+    work_items: Vec<WorkItem>,
+    top_level_keys: Vec<String>,
+}
+
 fn board_backlog(
     client: &Client,
     base_url: &str,
@@ -1044,9 +1114,10 @@ fn board_backlog(
     token: &str,
     board_id: u64,
     story_points_field_id: Option<&str>,
-) -> Result<Vec<WorkItem>, String> {
+) -> Result<BoardBacklog, String> {
     let mut start_at = 0;
     let mut work_items = Vec::new();
+    let mut top_level_keys = Vec::new();
     let mut embedded_subtasks = Vec::new();
     loop {
         let response = client
@@ -1062,12 +1133,20 @@ fn board_backlog(
         let complete = backlog_page_complete(&page, loaded);
         for issue in page.issues {
             let (work_item, subtasks) = to_work_item_with_subtasks(issue, story_points_field_id);
-            work_items.push(work_item);
+            if !is_subtask_kind(&work_item.kind) {
+                top_level_keys.push(work_item.key.clone());
+            }
+            if !work_item.kind.eq_ignore_ascii_case("Epic") {
+                work_items.push(work_item);
+            }
             embedded_subtasks.extend(subtasks);
         }
         if complete {
             append_embedded_subtasks(&mut work_items, embedded_subtasks);
-            return Ok(work_items);
+            return Ok(BoardBacklog {
+                work_items,
+                top_level_keys,
+            });
         }
         start_at = page.start_at.saturating_add(page.max_results.max(loaded));
     }
@@ -1096,12 +1175,19 @@ fn board_backlog_query(
     start_at: usize,
     story_points_field_id: Option<&str>,
 ) -> Vec<(&'static str, String)> {
-    vec![
+    let mut query = vec![
         ("startAt", start_at.to_string()),
         ("maxResults", "1000".into()),
         ("fields", backlog_fields(story_points_field_id).join(",")),
-        ("jql", BACKLOG_JQL.into()),
-    ]
+    ];
+    if !BACKLOG_JQL.is_empty() {
+        query.push(("jql", BACKLOG_JQL.into()));
+    }
+    query
+}
+
+fn is_subtask_kind(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("Sub-task") || kind.eq_ignore_ascii_case("Subtask")
 }
 
 fn backlog_fields(story_points_field_id: Option<&str>) -> Vec<&str> {
@@ -1394,9 +1480,11 @@ pub(crate) fn projects(settings: &AppSettings) -> Result<Vec<JiraProject>, Strin
 pub(crate) fn submit_changes(
     settings: &AppSettings,
     changes: &[TicketChange],
+    allow_unsafe_description_overwrite: bool,
 ) -> SubmitBatchOutcome {
     let result = (|| {
         commit_order(changes)?;
+        validate_submission_descriptions(changes, allow_unsafe_description_overwrite)?;
         let (client, base_url, email, token) = configured_client(settings)?;
         let existing_keys = changes
             .iter()
@@ -1425,11 +1513,57 @@ pub(crate) fn submit_changes(
         }
 
         submit_ordered_changes(changes, |change| {
-            submit_change(&client, &base_url, &email, &token, change, &current)
+            submit_change(
+                &client,
+                &base_url,
+                &email,
+                &token,
+                change,
+                &current,
+                allow_unsafe_description_overwrite,
+            )
         })
         .map(SubmitBatchOutcome::Completed)
     })();
     result.unwrap_or_else(SubmitBatchOutcome::PreflightError)
+}
+
+fn validate_submission_descriptions(
+    changes: &[TicketChange],
+    allow_unsafe_description_overwrite: bool,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for change in changes {
+        let Some(desired) = change.updated.as_ref() else {
+            continue;
+        };
+        let description_changed = change
+            .original
+            .as_ref()
+            .is_none_or(|original| original.description != desired.description);
+        if !description_changed {
+            continue;
+        }
+        if let Some(original) = change.original.as_ref() {
+            if let Err(error) = ensure_description_can_be_overwritten(
+                original,
+                desired,
+                allow_unsafe_description_overwrite,
+            ) {
+                errors.push(format!("{}: {error}", change.id));
+            }
+        }
+        if let Err(error) =
+            crate::store::composer::jira_adf::validate_markdown(&desired.description)
+        {
+            errors.push(format!("{}: {error}", change.id));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
 }
 
 fn submit_ordered_changes(
@@ -1582,6 +1716,7 @@ fn submit_change(
     token: &str,
     change: &TicketChange,
     current: &HashMap<String, Ticket>,
+    allow_unsafe_description_overwrite: bool,
 ) -> Result<SubmissionSnapshot, SubmitFailure> {
     match change.kind {
         ChangeKind::Synced => {
@@ -1626,7 +1761,15 @@ fn submit_change(
             let current = current
                 .get(&original.key)
                 .expect("current ticket was checked");
-            match update_issue(client, base_url, email, token, current, desired) {
+            match update_issue(
+                client,
+                base_url,
+                email,
+                token,
+                current,
+                desired,
+                allow_unsafe_description_overwrite,
+            ) {
                 Ok(updated) => Ok(SubmissionSnapshot {
                     original: Some(current.clone()),
                     updated: Some(updated),
@@ -1793,13 +1936,18 @@ fn update_issue(
     token: &str,
     original: &Ticket,
     desired: &Ticket,
+    allow_unsafe_description_overwrite: bool,
 ) -> Result<Ticket, String> {
     if desired.kind == TicketKind::Subtask && desired.parent_key.is_none() {
         return Err("A sub-task cannot be moved to Root in Jira".into());
     }
-    ensure_description_can_be_overwritten(original, desired)?;
     let account_id = resolve_assignee(client, base_url, email, token, desired)?;
-    let payload = update_payload(original, desired, account_id.as_deref())?;
+    let payload = update_payload(
+        original,
+        desired,
+        account_id.as_deref(),
+        allow_unsafe_description_overwrite,
+    )?;
     let response = client
         .put(format!("{base_url}/rest/api/3/issue/{}", original.key))
         .basic_auth(email, Some(token))
@@ -1943,11 +2091,12 @@ fn update_payload(
     original: &Ticket,
     desired: &Ticket,
     account_id: Option<&str>,
+    allow_unsafe_description_overwrite: bool,
 ) -> Result<Value, String> {
     if desired.kind == TicketKind::Subtask && desired.parent_key.is_none() {
         return Err("A sub-task cannot be moved to Root in Jira".into());
     }
-    ensure_description_can_be_overwritten(original, desired)?;
+    ensure_description_can_be_overwritten(original, desired, allow_unsafe_description_overwrite)?;
     let mut payload = Map::new();
     let mut fields = issue_fields(desired, account_id, false)
         .as_object()
@@ -1969,11 +2118,19 @@ fn update_payload(
 fn ensure_description_can_be_overwritten(
     original: &Ticket,
     desired: &Ticket,
+    allow_unsafe_description_overwrite: bool,
 ) -> Result<(), String> {
-    if original.description != desired.description && !original.description_safe_to_overwrite {
-        return Err(
-            "Jira description contains unsupported formatting and cannot be edited safely".into(),
-        );
+    if original.description != desired.description
+        && !original.description_safe_to_overwrite
+        && !allow_unsafe_description_overwrite
+    {
+        let warning = original
+            .description_overwrite_warning
+            .as_deref()
+            .unwrap_or("formatting that Finery cannot preserve exactly");
+        return Err(format!(
+            "Jira description contains {warning}; edit it in Jira or submit through MCP with explicit overwrite confirmation"
+        ));
     }
     Ok(())
 }
@@ -2054,6 +2211,7 @@ fn same_jira_content(left: &Ticket, right: &Ticket) -> bool {
         && left.title == right.title
         && left.description == right.description
         && left.description_safe_to_overwrite == right.description_safe_to_overwrite
+        && left.description_overwrite_warning == right.description_overwrite_warning
         && left.kind == right.kind
         && left.status == right.status
         && left.priority == right.priority

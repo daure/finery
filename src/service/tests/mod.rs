@@ -49,6 +49,7 @@ fn ticket(key: &str) -> Ticket {
         title: "Original".into(),
         description: String::new(),
         description_safe_to_overwrite: true,
+        description_overwrite_warning: None,
         kind: TicketKind::Task,
         status: "To Do".into(),
         priority: "Medium".into(),
@@ -95,9 +96,7 @@ fn service() -> ComposerService {
 fn create_change_set_persists_an_empty_open_set() {
     let service = service();
 
-    let created = service
-        .create_change_set("CS-2".into(), "Second plan".into())
-        .unwrap();
+    let created = service.create_change_set("Second plan".into()).unwrap();
 
     assert_eq!(created.change_set.revision, 1);
     assert_eq!(created.change_set.value.id, "CS-2");
@@ -105,10 +104,15 @@ fn create_change_set_persists_an_empty_open_set() {
     assert!(!created.change_set.value.closed);
     assert!(created.change_set.value.tickets.is_empty());
     assert_eq!(created.catalog_revision, 3);
-    assert!(matches!(
-        service.create_change_set("CS-2".into(), "Duplicate".into()),
-        Err(ServiceError::AlreadyExists { .. })
-    ));
+    assert_eq!(
+        service
+            .create_change_set("Third plan".into())
+            .unwrap()
+            .change_set
+            .value
+            .id,
+        "CS-3"
+    );
 }
 
 #[test]
@@ -607,7 +611,7 @@ fn submit_persists_create_marker_before_jira_and_reconciles_once() {
     let submitted_runtime = Arc::clone(&runtime);
     let submit_marker_seen = Arc::clone(&marker_seen);
     let lookup = Arc::new(|key: &str| -> Result<Ticket, String> { Ok(ticket(key)) });
-    let submit = Arc::new(move |changes: &[TicketChange]| {
+    let submit = Arc::new(move |changes: &[TicketChange], _| {
         let change_set = submitted_runtime
             .block_on(submitted_storage.load_change_set("CS-1"))
             .unwrap()
@@ -652,7 +656,7 @@ fn submit_persists_create_marker_before_jira_and_reconciles_once() {
         .unwrap();
 
     let response = service
-        .submit_change_set("CS-1", 2, vec!["NEW-1".into()])
+        .submit_change_set("CS-1", 2, vec!["NEW-1".into()], false)
         .unwrap();
 
     assert!(marker_seen.load(Ordering::SeqCst));
@@ -680,7 +684,7 @@ fn submission_claim_blocks_patch_and_refresh_until_jira_reconciliation() {
         lookup,
         Arc::new({
             let receiver = Mutex::new(resume_jira_receiver);
-            move |changes: &[TicketChange]| {
+            move |changes: &[TicketChange], _| {
                 jira_started.send(()).unwrap();
                 receiver.lock().unwrap().recv().unwrap();
                 SubmitBatchOutcome::Completed(
@@ -700,7 +704,7 @@ fn submission_claim_blocks_patch_and_refresh_until_jira_reconciliation() {
     );
     let submitting = service.clone();
     let submitted =
-        thread::spawn(move || submitting.submit_change_set("CS-1", 1, vec!["FIN-1".into()]));
+        thread::spawn(move || submitting.submit_change_set("CS-1", 1, vec!["FIN-1".into()], false));
     jira_started_receiver
         .recv_timeout(Duration::from_secs(1))
         .unwrap();

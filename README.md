@@ -28,6 +28,8 @@ Set `FINERY_DATABASE_URL` to use another SQLite database or Postgres. Otherwise 
 
 Jira credentials and defaults are configured in the TUI settings and stored in Finery's local database. `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_DEFAULT_PROJECT`, and `JIRA_DEFAULT_BOARD` override their matching settings for the current process.
 
+Jira description conversion support and its safety contract are documented in [docs/jira-description-support.md](docs/jira-description-support.md).
+
 ## Install
 
 On another machine:

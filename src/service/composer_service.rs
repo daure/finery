@@ -56,6 +56,7 @@ pub struct TicketView {
     pub title: String,
     pub description: String,
     pub description_safe_to_overwrite: bool,
+    pub description_overwrite_warning: Option<String>,
     pub kind: TicketKindView,
     pub status: String,
     pub priority: String,
@@ -249,15 +250,23 @@ pub(crate) trait JiraTicketLookup: Send + Sync {
 }
 
 pub(crate) trait JiraTicketSubmit: Send + Sync {
-    fn submit_changes(&self, changes: &[TicketChange]) -> crate::jira::SubmitBatchOutcome;
+    fn submit_changes(
+        &self,
+        changes: &[TicketChange],
+        allow_unsafe_description_overwrite: bool,
+    ) -> crate::jira::SubmitBatchOutcome;
 }
 
 impl<F> JiraTicketSubmit for F
 where
-    F: Fn(&[TicketChange]) -> crate::jira::SubmitBatchOutcome + Send + Sync,
+    F: Fn(&[TicketChange], bool) -> crate::jira::SubmitBatchOutcome + Send + Sync,
 {
-    fn submit_changes(&self, changes: &[TicketChange]) -> crate::jira::SubmitBatchOutcome {
-        self(changes)
+    fn submit_changes(
+        &self,
+        changes: &[TicketChange],
+        allow_unsafe_description_overwrite: bool,
+    ) -> crate::jira::SubmitBatchOutcome {
+        self(changes, allow_unsafe_description_overwrite)
     }
 }
 
@@ -320,15 +329,12 @@ impl ComposerService {
 
     pub fn create_change_set(
         &self,
-        change_set_id: String,
         name: String,
     ) -> Result<ChangeSetMutationResponse, ServiceError> {
-        if change_set_id.trim().is_empty() {
-            return Err(invalid("change set ID must not be empty"));
-        }
         if name.trim().is_empty() {
             return Err(invalid("change set name must not be empty"));
         }
+        let change_set_id = self.next_change_set_id()?;
         let change_set = ChangeSet {
             id: change_set_id.clone(),
             name,
@@ -357,6 +363,28 @@ impl ComposerService {
                 id: change_set_id,
             }),
         }
+    }
+
+    fn next_change_set_id(&self) -> Result<String, ServiceError> {
+        let catalog = self
+            .runtime
+            .block_on(self.storage.load_versioned_change_sets())
+            .map_err(storage_error)?;
+        let next = catalog
+            .change_sets
+            .iter()
+            .filter_map(|change_set| {
+                change_set
+                    .change_set
+                    .id
+                    .strip_prefix("CS-")?
+                    .parse::<usize>()
+                    .ok()
+            })
+            .max()
+            .unwrap_or(0)
+            + 1;
+        Ok(format!("CS-{next}"))
     }
 
     pub fn delete_change_set(
@@ -689,6 +717,7 @@ impl ComposerService {
         change_set_id: &str,
         expected_revision: i64,
         selected_ticket_ids: Vec<String>,
+        allow_unsafe_description_overwrite: bool,
     ) -> Result<SubmitChangeSetResponse, ServiceError> {
         validate_submit_selection(&selected_ticket_ids)?;
         let versioned = self.load_expected_change_set(change_set_id, expected_revision)?;
@@ -770,7 +799,9 @@ impl ComposerService {
             )?
             .0;
 
-        let outcome = self.jira_submit.submit_changes(&changes);
+        let outcome = self
+            .jira_submit
+            .submit_changes(&changes, allow_unsafe_description_overwrite);
         match outcome {
             crate::jira::SubmitBatchOutcome::PreflightError(message) => {
                 self.clear_create_attempts(
@@ -1425,6 +1456,7 @@ impl From<Ticket> for TicketView {
             title: value.title,
             description: value.description,
             description_safe_to_overwrite: value.description_safe_to_overwrite,
+            description_overwrite_warning: value.description_overwrite_warning,
             kind: value.kind.into(),
             status: value.status,
             priority: value.priority,
@@ -1447,7 +1479,7 @@ pub(crate) fn test_service(
         storage,
         runtime,
         jira,
-        Arc::new(|_: &[TicketChange]| {
+        Arc::new(|_: &[TicketChange], _| {
             crate::jira::SubmitBatchOutcome::PreflightError("test submitter".into())
         }),
     )

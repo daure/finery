@@ -45,6 +45,7 @@ pub(crate) struct BacklogSnapshot {
     pub story_points_configured: bool,
     pub sprints: Vec<Sprint>,
     pub work_items: Vec<WorkItem>,
+    pub top_level_backlog_keys: Vec<String>,
     pub warnings: Vec<String>,
     pub runway: Option<BacklogRunway>,
     pub velocity: Option<VelocityReport>,

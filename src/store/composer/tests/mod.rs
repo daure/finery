@@ -2,7 +2,10 @@ use serde_json::json;
 
 use super::{
     ChangeKind, ComposerAction, ComposerState, ComposerViewMode, SubmissionSnapshot,
-    jira_adf::{adf_is_safe_to_overwrite, adf_to_markdown, markdown_to_adf},
+    jira_adf::{
+        adf_is_safe_to_overwrite, adf_overwrite_warning, adf_to_markdown, markdown_to_adf,
+        validate_markdown,
+    },
 };
 
 mod placement;
@@ -631,4 +634,108 @@ fn adf_round_trips_literal_markdown_punctuation_and_adjacent_text_nodes() {
     });
 
     assert!(adf_is_safe_to_overwrite(&adf));
+}
+
+#[test]
+fn jira_adf_round_trips_common_complex_descriptions() {
+    let cases = [
+        "- Seller cannot revise their final bid.\n  - Buyer cannot counter the seller's final bid.",
+        "- Parent\n  3. Ordered child\n     - Nested bullet\n- Next parent",
+        "7. Starts at seven\n   - Nested bullet\n8. Continues at eight",
+        "- **Strong**, *emphasis*, ~~strike~~, `code`, and [a link](https://example.com).\n  - Child item",
+        "## Decision\n\n> Quoted rationale\n\n```rust\nlet final_offer = true;\n```\n\n---\n\n- Confirmed",
+    ];
+
+    for markdown in cases {
+        let adf = markdown_to_adf(markdown);
+        assert!(
+            adf_is_safe_to_overwrite(&adf),
+            "did not round-trip: {markdown}"
+        );
+    }
+}
+
+#[test]
+fn jira_adf_explains_unsupported_formatting() {
+    let underlined = json!({
+        "type": "doc", "version": 1, "content": [{
+            "type": "paragraph", "content": [{
+                "type": "text", "text": "Underlined", "marks": [{ "type": "underline" }]
+            }]
+        }]
+    });
+
+    assert_eq!(
+        adf_overwrite_warning(&underlined).as_deref(),
+        Some("underlined text")
+    );
+}
+
+#[test]
+fn jira_adf_rejects_malformed_lossless_tags() {
+    assert!(validate_markdown(
+        "{{jira:panel {\"panelType\":\"info\"}}}\n{{jira:mention {\"id\":\"account-1\",\"text\":\"@Ada\"} /}}\n{{/jira:panel}}"
+    )
+    .is_ok());
+    assert!(validate_markdown("{{jira:mention {\"id\":\"account-1\"}}}").is_err());
+    assert!(validate_markdown("{{jira:mention {\"id\":\"account-1\"} /}}").is_err());
+    assert!(validate_markdown("{{jira:inline-card {\"url\":\"\"} /}}").is_err());
+    assert!(validate_markdown("{{jira:panel {}}}\nBody\n{{/jira:panel}}").is_err());
+    assert!(validate_markdown("{{jira:panel {\"panelType\":\"info\"}}}\nMissing close").is_err());
+    assert!(validate_markdown("{{/jira:panel}}").is_err());
+    assert!(validate_markdown("{{/jira:panel}").is_err());
+}
+
+#[test]
+fn jira_adf_round_trips_escaped_literal_tag_openings() {
+    let adf = json!({ "type": "doc", "version": 1, "content": [{
+        "type": "paragraph", "content": [{
+            "type": "text", "text": "Show {{literal braces without a Jira tag."
+        }]
+    }]});
+
+    let markdown = adf_to_markdown(&adf);
+    assert_eq!(markdown, "Show \\{\\{literal braces without a Jira tag.");
+    assert!(validate_markdown(&markdown).is_ok());
+    assert!(adf_is_safe_to_overwrite(&adf));
+}
+
+#[test]
+fn jira_adf_keeps_lossy_features_behind_the_overwrite_guard() {
+    let adf = json!({ "type": "doc", "version": 1, "content": [{ "type": "mediaSingle" }]});
+
+    assert!(!adf_is_safe_to_overwrite(&adf));
+    assert_eq!(adf_overwrite_warning(&adf).as_deref(), Some("Jira media"));
+}
+
+#[test]
+fn jira_adf_round_trips_tables_panels_mentions_and_smart_links() {
+    let adf = json!({
+        "type": "doc", "version": 1, "content": [
+            { "type": "panel", "attrs": { "panelType": "info" }, "content": [{
+                "type": "paragraph", "content": [
+                    { "type": "text", "text": "Ask " },
+                    { "type": "mention", "attrs": { "id": "account-1", "text": "@Ada" }},
+                    { "type": "text", "text": " to review " },
+                    { "type": "inlineCard", "attrs": { "url": "https://example.com/design" }}
+                ]
+            }]},
+            { "type": "table", "content": [
+                { "type": "tableRow", "content": [
+                    { "type": "tableHeader", "attrs": {}, "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Rule" }]}]},
+                    { "type": "tableHeader", "attrs": {}, "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Owner" }]}]}
+                ]},
+                { "type": "tableRow", "content": [
+                    { "type": "tableCell", "attrs": {}, "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Seller | buyer" }]}]},
+                    { "type": "tableCell", "attrs": {}, "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Ada", "marks": [{ "type": "strong" }]}]}]}
+                ]}
+            ]}
+        ]
+    });
+
+    assert!(adf_is_safe_to_overwrite(&adf));
+    assert_eq!(
+        adf_to_markdown(&adf),
+        "{{jira:panel {\"panelType\":\"info\"}}}\nAsk {{jira:mention {\"id\":\"account-1\",\"text\":\"@Ada\"} /}} to review {{jira:inline-card {\"url\":\"https://example.com/design\"} /}}\n{{/jira:panel}}\n\n| Rule | Owner |\n| --- | --- |\n| Seller \\| buyer | **Ada** |"
+    );
 }

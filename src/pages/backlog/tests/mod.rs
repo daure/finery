@@ -57,6 +57,7 @@ fn snapshot() -> BacklogSnapshot {
             capacity: None,
         }],
         work_items: vec![work_item("FIN-8", "Plan next sprint")],
+        top_level_backlog_keys: Vec::new(),
         warnings: Vec::new(),
         runway: None,
         velocity: None,
@@ -169,24 +170,21 @@ fn backlog_header_places_web_menu_before_the_right_aligned_refresh_button() {
 }
 
 #[test]
-fn backlog_filters_show_matching_tickets_and_hide_runway_gutters() {
+fn unpointed_filter_only_shows_unpointed_stories_and_tasks() {
     tuicore::init();
     let mut snapshot = snapshot();
     let unpointed_parent = work_item("FIN-8", "Unpointed parent");
-    let unpointed_subtask = WorkItem {
-        kind: "Sub-task".into(),
-        parent_key: Some("FIN-8".into()),
-        story_points: Some(3.0),
-        ..work_item("FIN-9", "Hidden subtask")
+    let unpointed_task = WorkItem {
+        kind: "Task".into(),
+        ..work_item("FIN-9", "Unpointed task")
     };
     let bug = WorkItem {
         kind: "Bug".into(),
         ..work_item("FIN-10", "Unpointed bug")
     };
-    let bug_subtask = WorkItem {
+    let subtask = WorkItem {
         kind: "Sub-task".into(),
-        parent_key: Some("FIN-10".into()),
-        ..work_item("FIN-11", "Visible bug subtask")
+        ..work_item("FIN-11", "Unpointed subtask")
     };
     let pointed_story = WorkItem {
         story_points: Some(8.0),
@@ -194,9 +192,9 @@ fn backlog_filters_show_matching_tickets_and_hide_runway_gutters() {
     };
     snapshot.work_items = vec![
         unpointed_parent,
-        unpointed_subtask,
+        unpointed_task,
         bug,
-        bug_subtask,
+        subtask,
         pointed_story,
     ];
     apply_capacity(
@@ -207,7 +205,7 @@ fn backlog_filters_show_matching_tickets_and_hide_runway_gutters() {
         20,
     );
     let mut filters = BacklogFilterSettings::default();
-    filters.set_selected(vec![BacklogFilter::Pointed]);
+    filters.set_selected(vec![BacklogFilter::Unpointed]);
     let (sender, _) = mpsc::channel();
     let mut tree = backlog_tree_with_filters(&snapshot, sender, Default::default(), filters);
     let area = Rect::new(0, 0, 100, 16);
@@ -222,11 +220,11 @@ fn backlog_filters_show_matching_tickets_and_hide_runway_gutters() {
         .unwrap();
 
     let text = rendered_lines(&terminal, area).concat();
-    assert!(!text.contains("Unpointed parent"));
-    assert!(!text.contains("Hidden subtask"));
-    assert!(text.contains("Unpointed bug"));
-    assert!(text.contains("Visible bug subtask"));
-    assert!(text.contains("Pointed story"));
+    assert!(text.contains("Unpointed parent"));
+    assert!(text.contains("Unpointed task"));
+    assert!(!text.contains("Unpointed bug"));
+    assert!(!text.contains("Unpointed subtask"));
+    assert!(!text.contains("Pointed story"));
     assert!(!text.contains("┃"));
 }
 
@@ -565,6 +563,36 @@ fn expanded_sprint_shows_subtasks_under_their_parent() {
     assert!(text.contains("FIN-7 Ship sprint work"));
     assert!(text.contains("FIN-9 Finish sprint work"));
     assert!(text.contains("1(2) items"));
+}
+
+#[test]
+fn orphaned_subtasks_are_hidden_from_the_backlog_and_sprints() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let mut snapshot = snapshot();
+    let mut sprint_subtask = work_item("FIN-9", "Hidden sprint child");
+    sprint_subtask.kind = "Sub-task".into();
+    sprint_subtask.parent_key = Some("MISSING-1".into());
+    snapshot.sprints[0].work_items.push(sprint_subtask);
+    let mut backlog_subtask = work_item("FIN-10", "Hidden backlog child");
+    backlog_subtask.kind = "Sub-task".into();
+    backlog_subtask.parent_key = Some("MISSING-2".into());
+    snapshot.work_items.push(backlog_subtask);
+    let mut view = backlog_tree(&snapshot, sender, Default::default());
+    let area = Rect::new(0, 0, 80, 16);
+    view.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            view.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(!text.contains("Hidden sprint child"));
+    assert!(!text.contains("Hidden backlog child"));
 }
 
 #[test]
@@ -1081,6 +1109,7 @@ fn long_backlog_titles_wrap_to_the_available_viewport_width() {
             "FIN-1",
             "A backlog title that wraps at the viewport edge",
         )],
+        top_level_backlog_keys: Vec::new(),
         warnings: Vec::new(),
         story_points_configured: false,
         runway: None,
@@ -1389,6 +1418,7 @@ fn backlog_search_filters_tickets_and_hides_runway_bands() {
             work_item("FIN-1", "Plan next sprint"),
             work_item("FIN-2", "Ship release"),
         ],
+        top_level_backlog_keys: Vec::new(),
         warnings: Vec::new(),
         runway: None,
         velocity: None,
@@ -1457,6 +1487,63 @@ fn backlog_search_filters_tickets_and_hides_runway_bands() {
 }
 
 #[test]
+fn backlog_search_keeps_subtasks_visible_when_the_parent_matches() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    let parent = work_item("KAN-22", "Catalog browsing supports discovery");
+    let mut matching_child = work_item("KAN-34", "Frontend integration");
+    matching_child.kind = "Sub-task".into();
+    matching_child.parent_key = Some("KAN-22".into());
+    let mut non_matching_child = work_item("KAN-35", "Schema foundations");
+    non_matching_child.kind = "Sub-task".into();
+    non_matching_child.parent_key = Some("KAN-22".into());
+    snapshot.work_items = vec![
+        parent,
+        matching_child,
+        non_matching_child,
+        work_item("KAN-30", "Checkout"),
+    ];
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    tree.dispatch_focus(
+        &data_focus_target(),
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('/'))),
+        &mut ctx,
+    );
+    for key in "KAN-22".chars() {
+        tree.dispatch_event(
+            &route,
+            &TuiEvent::Key(KeyEvent::from(Key::Char(key))),
+            &mut ctx,
+        );
+    }
+
+    let area = Rect::new(0, 0, 100, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(text.contains("KAN-22 Catalog browsing supports discovery"));
+    assert!(text.contains("KAN-34 Frontend integration"));
+    assert!(text.contains("KAN-35 Schema foundations"));
+    assert!(!text.contains("KAN-30 Checkout"));
+}
+
+#[test]
 fn backlog_search_requires_contiguous_text() {
     tuicore::init();
     let snapshot = BacklogSnapshot {
@@ -1464,6 +1551,7 @@ fn backlog_search_requires_contiguous_text() {
         story_points_configured: false,
         sprints: Vec::new(),
         work_items: vec![work_item("FIN-1", "A shopper can narrow products")],
+        top_level_backlog_keys: Vec::new(),
         warnings: Vec::new(),
         runway: None,
         velocity: None,
@@ -1519,6 +1607,7 @@ fn backlog_search_matches_epic_names() {
         story_points_configured: false,
         sprints: Vec::new(),
         work_items: vec![item],
+        top_level_backlog_keys: Vec::new(),
         warnings: Vec::new(),
         runway: None,
         velocity: None,
@@ -1571,6 +1660,7 @@ fn unified_tree_uses_same_section_transient_selection_for_the_quick_menu() {
         story_points_configured: false,
         sprints: Vec::new(),
         work_items: vec![work_item("FIN-1", "First"), work_item("FIN-2", "Second")],
+        top_level_backlog_keys: vec!["FIN-1".into(), "FIN-2".into()],
         warnings: Vec::new(),
         runway: None,
         velocity: None,
@@ -1651,6 +1741,73 @@ fn backlog_rank_plan_uses_section_order_anchors() {
 }
 
 #[test]
+fn successful_direct_rank_keeps_the_optimistic_order_without_reconciliation() {
+    tuicore::init();
+    let rollback = BacklogSnapshot {
+        board_name: "Finery".into(),
+        story_points_configured: false,
+        sprints: Vec::new(),
+        work_items: vec![
+            work_item("FIN-1", "First"),
+            work_item("FIN-2", "Second"),
+            work_item("FIN-3", "Third"),
+        ],
+        top_level_backlog_keys: Vec::new(),
+        warnings: Vec::new(),
+        runway: None,
+        velocity: None,
+    };
+    let final_order = vec!["FIN-3".into(), "FIN-1".into(), "FIN-2".into()];
+    let mut optimistic = rollback.clone();
+    optimistic.work_items.rotate_right(1);
+    let plan = rank_plan(vec!["FIN-3".into()], &final_order)
+        .unwrap()
+        .unwrap();
+    let mut page = BacklogPage::with_snapshot_for_test(optimistic);
+    let generation = page.begin_rank_result_for_test(
+        plan,
+        PendingRank {
+            rollback_snapshot: rollback,
+            section_id: "backlog".into(),
+            final_order,
+            unconfirmed_refreshes: 0,
+        },
+    );
+
+    assert!(page.apply_rank_result_for_test(generation, Ok(())));
+    assert!(!page.is_loading_for_test());
+    assert!(!page.is_ranking_for_test());
+    assert!(!page.move_is_locked_for_test());
+    assert!(!page.has_active_rank_plan_for_test());
+    assert!(!page.has_pending_rank_for_test());
+    assert!(!page.rank_refresh_retry_is_pending_for_test());
+
+    let area = Rect::new(0, 0, 80, 16);
+    page.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            page.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(
+        cell_position(&text, "FIN-3 Third").expect("optimistic moved ticket is visible")
+            < cell_position(&text, "FIN-1 First").expect("following ticket is visible")
+    );
+
+    page.tick(
+        std::time::Duration::from_secs(2),
+        AnimationSettings::default(),
+    );
+    assert!(!page.is_loading_for_test());
+    assert!(!page.rank_refresh_retry_is_pending_for_test());
+    assert!(!page.is_ranking_for_test());
+}
+
+#[test]
 fn quick_menu_omits_its_current_section_from_transfer_destinations() {
     let snapshot = snapshot();
     assert_eq!(
@@ -1680,6 +1837,7 @@ fn stale_rank_refresh_keeps_the_optimistic_order() {
             work_item("FIN-2", "Second"),
             work_item("FIN-3", "Third"),
         ],
+        top_level_backlog_keys: Vec::new(),
         warnings: Vec::new(),
         runway: None,
         velocity: None,

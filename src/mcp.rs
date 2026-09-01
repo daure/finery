@@ -25,7 +25,10 @@ use crate::{
     store::work_items::{BacklogSnapshot, RankPlan, RunwayCapacitySource, WorkItem, rank_plan},
 };
 
-const MCP_INSTRUCTIONS: &str = "Read Composer change sets and Jira backlog order. Before mutating an existing change set, reread it and send its current revision as expected_revision. create_change_set, apply_change_set_patch, and delete_change_set persist local edits only; delete_change_set never deletes Jira tickets. Before Jira reordering, state the exact move and get explicit user confirmation; reread the workspace afterward. submit_change_set is the only Composer Jira submission path, requires explicit ticket IDs, and submitted tickets cannot be changed or resubmitted. Recover marked draft creates only with confirmed Jira keys; never retry ambiguous creates.";
+const MCP_INSTRUCTIONS: &str = "Read Composer change sets and Jira backlog order. Before mutating an existing change set, reread it and send its current revision as expected_revision. Call get_change_set_guidance before reading or writing a Composer ticket description. create_change_set, apply_change_set_patch, and delete_change_set persist local edits only; delete_change_set never deletes Jira tickets. Before Jira reordering, state the exact move and get explicit user confirmation; reread the workspace afterward. submit_change_set is the only Composer Jira submission path, requires explicit ticket IDs, and submitted tickets cannot be changed or resubmitted. If a description cannot round-trip safely, state the identified formatting risk and get explicit user confirmation before setting accept_unsafe_description_overwrite. Recover marked draft creates only with confirmed Jira keys; never retry ambiguous creates.";
+// Agent-facing description contract. Any Jira ADF conversion, supported tag, validation, or
+// overwrite-safety change MUST update this guidance so MCP agents receive accurate instructions.
+const CHANGE_SET_GUIDANCE: &str = "Use Markdown for Composer descriptions. Supported: normal Markdown, nested ordered/bullet lists, and basic tables (one header row; one paragraph per cell).\n\nUse only these Jira tags:\n- Panel: {{jira:panel {\"panelType\":\"info\"}}} … {{/jira:panel}}\n- Mention: {{jira:mention {\"id\":\"ACCOUNT_ID\",\"text\":\"@Name\"} /}}\n- Smart link: {{jira:inline-card {\"url\":\"https://example.com\"} /}}\n\nEscape literal {{ as \\{\\{. Malformed or unclosed Jira tags block the full selected submission before Jira writes. For an unsafe existing Jira description, describe the formatting risk and get explicit approval before accept_unsafe_description_overwrite.";
 const WORKSPACE_UNPLANNED_TICKET_LIMIT: usize = 50;
 const WORKSPACE_VELOCITY_SPRINT_LIMIT: usize = 10;
 
@@ -55,7 +58,6 @@ struct ChangeSetId {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CreateChangeSet {
-    change_set_id: String,
     name: String,
 }
 
@@ -85,6 +87,8 @@ struct SubmitChangeSet {
     expected_revision: i64,
     #[schemars(length(min = 1))]
     selected_ticket_ids: Vec<String>,
+    #[serde(default)]
+    accept_unsafe_description_overwrite: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -93,6 +97,11 @@ struct RecoverSubmissionAttempt {
     expected_revision: i64,
     #[serde(default)]
     recovered_creates: Vec<RecoveredCreate>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct ChangeSetGuidanceView {
+    guidance: &'static str,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -356,11 +365,7 @@ impl JiraDestination {
 
 fn section_order(snapshot: &BacklogSnapshot, section: JiraSection) -> Result<Vec<String>, String> {
     match section {
-        JiraSection::Backlog => Ok(snapshot
-            .work_items
-            .iter()
-            .map(|item| item.key.clone())
-            .collect()),
+        JiraSection::Backlog => Ok(snapshot.top_level_backlog_keys.clone()),
         JiraSection::Sprint(sprint_id) => snapshot
             .sprints
             .iter()
@@ -378,9 +383,9 @@ fn section_order(snapshot: &BacklogSnapshot, section: JiraSection) -> Result<Vec
 
 fn issue_sections(snapshot: &BacklogSnapshot) -> HashMap<String, JiraSection> {
     let mut sections = snapshot
-        .work_items
+        .top_level_backlog_keys
         .iter()
-        .map(|item| (item.key.clone(), JiraSection::Backlog))
+        .map(|key| (key.clone(), JiraSection::Backlog))
         .collect::<HashMap<_, _>>();
     for sprint in &snapshot.sprints {
         sections.extend(
@@ -517,11 +522,21 @@ fn swap_jira_items(service: &AppService, input: SwapJiraItems) -> Result<Backlog
     let first_index = order
         .iter()
         .position(|key| key == &input.first_issue_key)
-        .unwrap();
+        .ok_or_else(|| {
+            format!(
+                "Issue '{}' is not in the rankable order for its section",
+                input.first_issue_key
+            )
+        })?;
     let second_index = order
         .iter()
         .position(|key| key == &input.second_issue_key)
-        .unwrap();
+        .ok_or_else(|| {
+            format!(
+                "Issue '{}' is not in the rankable order for its section",
+                input.second_issue_key
+            )
+        })?;
     let (earlier, later, earlier_index, later_index) = if first_index < second_index {
         (
             &input.first_issue_key,
@@ -743,6 +758,15 @@ fn workspace_parent(
 #[tool_router]
 impl McpServer {
     #[tool(
+        description = "Required before reading or writing a Composer ticket description. Get the concise canonical Markdown, Jira-tag, validation, and unsafe-overwrite rules for change sets."
+    )]
+    async fn get_change_set_guidance(&self) -> Json<ChangeSetGuidanceView> {
+        Json(ChangeSetGuidanceView {
+            guidance: CHANGE_SET_GUIDANCE,
+        })
+    }
+
+    #[tool(
         description = "Get active/future sprints, top 50 rank-ordered unplanned tickets with total_count, up to 10 recent velocity sprints, empty-sprint capacity guidance, and open change-set summaries. Tickets are compact and omit descriptions."
     )]
     async fn get_workspace(&self) -> Result<Json<WorkspaceView>, String> {
@@ -799,14 +823,14 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Create an empty open Composer change set locally. Supply a unique stable change_set_id; this never writes to Jira."
+        description = "Create an empty open Composer change set locally. Finery assigns the next sequential CS-N ID; this never writes to Jira."
     )]
     async fn create_change_set(
         &self,
         Parameters(input): Parameters<CreateChangeSet>,
     ) -> Result<Json<ChangeSetMutationResponse>, String> {
         run_composer(self.service.composer_service(), move |service| {
-            service.create_change_set(input.change_set_id, input.name)
+            service.create_change_set(input.name)
         })
         .await
         .map(Json)
@@ -877,7 +901,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Submit explicit selected tickets to Jira. Durable create-attempt markers are stored before Jira receives new-ticket creates, then results are reconciled and conditionally persisted."
+        description = "Submit explicit selected tickets to Jira. Durable create-attempt markers are stored before Jira receives new-ticket creates, then results are reconciled and conditionally persisted. Set accept_unsafe_description_overwrite only after the user explicitly accepts that unsupported Jira formatting may be replaced."
     )]
     async fn submit_change_set(
         &self,
@@ -888,6 +912,7 @@ impl McpServer {
                 &input.change_set_id,
                 input.expected_revision,
                 input.selected_ticket_ids,
+                input.accept_unsafe_description_overwrite,
             )
         })
         .await

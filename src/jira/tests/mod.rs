@@ -13,13 +13,13 @@ use super::{
     backlog_page_complete, board_backlog, board_backlog_query, board_sprints, commit_order,
     composer_fields, create_available_statuses_from_value, create_issue_fields, create_issue_type,
     create_issue_types_from_value, create_response_failure, created_issue_failure,
-    discover_story_points, fetch_composer_issues, is_ticket_number_query, issue_fields,
-    issue_key_jql, move_payload, options_from_values, rank_payload, same_jira_content,
-    search_composer_issues, search_jql, select_backlog_board, should_discover_story_points,
-    sprint_issues, story_points_field_for_load, story_points_field_id, story_points_warning,
-    submit_failure, submit_ordered_changes, to_ticket, to_ticket_and_work_item, to_work_item,
-    to_work_item_with_subtasks, update_payload, velocity_average, velocity_report,
-    velocity_sprint_goals,
+    discover_story_points, fetch_composer_issues, hydrate_sprint_subtasks, is_ticket_number_query,
+    issue_fields, issue_key_jql, move_payload, options_from_values, rank_payload,
+    same_jira_content, search_composer_issues, search_jql, select_backlog_board,
+    should_discover_story_points, sprint_issues, story_points_field_for_load,
+    story_points_field_id, story_points_warning, submit_failure, submit_ordered_changes, to_ticket,
+    to_ticket_and_work_item, to_work_item, to_work_item_with_subtasks, update_payload,
+    velocity_average, velocity_report, velocity_sprint_goals,
 };
 use crate::{
     app_settings::AppSettings,
@@ -37,6 +37,7 @@ fn ticket(key: &str, kind: TicketKind, parent_key: Option<&str>) -> Ticket {
         title: key.into(),
         description: String::new(),
         description_safe_to_overwrite: true,
+        description_overwrite_warning: None,
         kind,
         status: "To Do".into(),
         priority: "Medium".into(),
@@ -319,7 +320,7 @@ fn jira_parent_fields_and_update_payload_follow_cloud_v3_shape() {
         Some(&json!("FIN-9"))
     );
     assert_eq!(
-        update_payload(&original, &desired, None)
+        update_payload(&original, &desired, None, false)
             .unwrap()
             .pointer("/fields/parent/key"),
         Some(&json!("FIN-9"))
@@ -361,13 +362,13 @@ fn jira_parent_removal_uses_update_operation_and_rejects_root_subtasks() {
     let root_subtask = ticket("FIN-2", TicketKind::Subtask, None);
 
     assert_eq!(
-        update_payload(&original, &root, None)
+        update_payload(&original, &root, None, false)
             .unwrap()
             .pointer("/update/parent/0/set"),
         Some(&json!(null))
     );
     assert!(
-        update_payload(&original, &root_subtask, None)
+        update_payload(&original, &root_subtask, None, false)
             .unwrap_err()
             .contains("cannot be moved to Root")
     );
@@ -380,7 +381,7 @@ fn jira_update_payload_omits_unchanged_description() {
     desired.title = "Updated title".into();
 
     assert!(
-        update_payload(&original, &desired, None)
+        update_payload(&original, &desired, None, false)
             .unwrap()
             .pointer("/fields/description")
             .is_none()
@@ -388,7 +389,7 @@ fn jira_update_payload_omits_unchanged_description() {
 
     desired.description = "Updated description".into();
     assert!(
-        update_payload(&original, &desired, None)
+        update_payload(&original, &desired, None, false)
             .unwrap()
             .pointer("/fields/description")
             .is_some()
@@ -433,15 +434,21 @@ fn jira_rejects_description_overwrites_that_cannot_round_trip() {
     let mut edited = unsupported_mark.clone();
     edited.description.push_str(" changed");
     assert!(
-        update_payload(&unsupported_mark, &edited, None)
+        update_payload(&unsupported_mark, &edited, None, false)
             .unwrap_err()
-            .contains("cannot be edited safely")
+            .contains("underlined text")
+    );
+    assert!(
+        update_payload(&unsupported_mark, &edited, None, true)
+            .unwrap()
+            .pointer("/fields/description")
+            .is_some()
     );
 
     let mut title_only = unsupported_mark.clone();
     title_only.title = "New title".into();
     assert!(
-        update_payload(&unsupported_mark, &title_only, None)
+        update_payload(&unsupported_mark, &title_only, None, false)
             .unwrap()
             .pointer("/fields/description")
             .is_none()
@@ -462,6 +469,7 @@ fn jira_conflict_detection_includes_description_overwrite_safety() {
     let original = ticket("FIN-2", TicketKind::Task, None);
     let mut remote = original.clone();
     remote.description_safe_to_overwrite = false;
+    remote.description_overwrite_warning = Some("underlined text".into());
 
     assert!(!same_jira_content(&original, &remote));
 }
@@ -496,11 +504,49 @@ fn commit_orders_local_parents_before_children_and_blocks_missing_parent_before_
     let blocked = match submit_changes(
         &AppSettings::default(),
         &[added("NEW-2", TicketKind::Subtask, Some("NEW-1"))],
+        false,
     ) {
         SubmitBatchOutcome::PreflightError(error) => error,
         _ => panic!("missing local parent must block commit"),
     };
     assert!(blocked.contains("needs unsent local parent NEW-1 selected"));
+}
+
+#[test]
+fn invalid_description_in_any_ticket_blocks_the_whole_batch_before_jira_is_configured() {
+    let valid = added("NEW-1", TicketKind::Task, None);
+    let mut invalid = added("NEW-2", TicketKind::Task, None);
+    invalid.updated.as_mut().unwrap().description =
+        "{{jira:mention {\"id\":\"account-1\",\"text\":\"@Ada\"}}}".into();
+
+    let blocked = match submit_changes(&AppSettings::default(), &[valid, invalid], false) {
+        SubmitBatchOutcome::PreflightError(error) => error,
+        _ => panic!("invalid description must block the whole batch"),
+    };
+
+    assert!(blocked.contains("NEW-2: invalid Jira inline tag on line 1"));
+}
+
+#[test]
+fn invalid_descriptions_report_every_selected_ticket_before_jira_is_configured() {
+    let mut malformed_mention = added("NEW-1", TicketKind::Task, None);
+    malformed_mention.updated.as_mut().unwrap().description =
+        "{{jira:mention {\"id\":\"account-1\"} /}}".into();
+    let mut malformed_panel = added("NEW-2", TicketKind::Task, None);
+    malformed_panel.updated.as_mut().unwrap().description =
+        "{{jira:panel {\"panelType\":info}}}\nBody\n{{/jira:panel}}".into();
+
+    let blocked = match submit_changes(
+        &AppSettings::default(),
+        &[malformed_mention, malformed_panel],
+        false,
+    ) {
+        SubmitBatchOutcome::PreflightError(error) => error,
+        _ => panic!("invalid descriptions must block commit"),
+    };
+
+    assert!(blocked.contains("NEW-1: invalid Jira inline tag on line 1"));
+    assert!(blocked.contains("NEW-2: invalid Jira panel tag on line 1"));
 }
 
 #[test]
@@ -629,14 +675,11 @@ fn backlog_board_falls_back_to_a_project_board_without_scrum_type() {
 }
 
 #[test]
-fn board_backlog_query_excludes_subtasks_and_epics_hidden_by_the_web_backlog_list() {
+fn board_backlog_query_does_not_filter_subtasks() {
     let query = board_backlog_query(0, None);
 
-    assert!(
-        query
-            .iter()
-            .any(|(name, value)| *name == "jql" && value == BACKLOG_JQL)
-    );
+    assert_eq!(BACKLOG_JQL, "");
+    assert!(!query.iter().any(|(name, _)| *name == "jql"));
 }
 
 #[test]
@@ -846,6 +889,7 @@ fn backlog_warns_when_loaded_tickets_lack_story_points() {
             },
             Some("customfield_10016"),
         )],
+        top_level_backlog_keys: Vec::new(),
         warnings: Vec::new(),
         runway: None,
         velocity: None,
@@ -1102,18 +1146,29 @@ fn backlog_pagination_continues_when_jira_omits_total() {
 }
 
 #[test]
-fn sprint_loading_uses_agile_offset_pagination_across_pages() {
+fn sprint_loading_hydrates_embedded_subtask_labels_after_pagination() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
         let mut requests = Vec::new();
-        for (index, issue) in ["FIN-1", "FIN-2"].into_iter().enumerate() {
+        for (index, issue) in ["FIN-1", "FIN-3"].into_iter().enumerate() {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0; 4096];
             let size = stream.read(&mut request).unwrap();
             requests.push(String::from_utf8_lossy(&request[..size]).into_owned());
+            let fields = if index == 0 {
+                json!({
+                    "summary": issue,
+                    "subtasks": [{
+                        "key": "FIN-2",
+                        "fields": { "summary": "Child", "issuetype": { "name": "Sub-task" } }
+                    }]
+                })
+            } else {
+                json!({ "summary": issue })
+            };
             let body = json!({
-                "issues": [{ "key": issue, "fields": { "summary": issue } }],
+                "issues": [{ "key": issue, "fields": fields }],
                 "isLast": false,
                 "startAt": index,
                 "maxResults": 1,
@@ -1126,29 +1181,58 @@ fn sprint_loading_uses_agile_offset_pagination_across_pages() {
                 body.len(),
                 body
             )
-            .unwrap();
+                .unwrap();
         }
-        requests
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        let size = stream.read(&mut request).unwrap();
+        let hydration_request = String::from_utf8_lossy(&request[..size]).into_owned();
+        let body = json!({
+            "issues": [{
+                "key": "FIN-2",
+                "fields": {
+                    "summary": "Child",
+                    "issuetype": { "name": "Sub-task" },
+                    "parent": { "key": "FIN-1", "fields": { "summary": "FIN-1" } },
+                    "labels": ["frontend"]
+                }
+            }]
+        })
+        .to_string();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+        (requests, hydration_request)
     });
 
-    let items = sprint_issues(
-        &reqwest::blocking::Client::new(),
+    let client = reqwest::blocking::Client::new();
+    let items = sprint_issues(&client, &base_url, "user@example.com", "token", 42, None).unwrap();
+    let mut sprint_work_items = vec![items];
+    hydrate_sprint_subtasks(
+        &client,
         &base_url,
         "user@example.com",
         "token",
-        42,
+        &mut sprint_work_items,
         None,
     )
     .unwrap();
-    let requests = server.join().unwrap();
+    let items = sprint_work_items.pop().unwrap();
+    let (requests, hydration_request) = server.join().unwrap();
 
     assert_eq!(
         items
             .iter()
             .map(|item| item.key.as_str())
             .collect::<Vec<_>>(),
-        ["FIN-1", "FIN-2"]
+        ["FIN-1", "FIN-3", "FIN-2"]
     );
+    assert_eq!(items[2].parent_key.as_deref(), Some("FIN-1"));
+    assert_eq!(items[2].labels, ["frontend"]);
     assert!(
         requests
             .iter()
@@ -1161,10 +1245,13 @@ fn sprint_loading_uses_agile_offset_pagination_across_pages() {
             .iter()
             .all(|request| !request.contains("nextPageToken"))
     );
+    assert!(hydration_request.starts_with("POST /rest/api/3/issue/bulkfetch"));
+    assert!(hydration_request.contains("FIN-2"));
+    assert!(hydration_request.contains("\"labels\""));
 }
 
 #[test]
-fn backlog_loading_includes_embedded_subtasks() {
+fn backlog_loading_hides_epics_and_includes_embedded_subtasks() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
@@ -1173,6 +1260,9 @@ fn backlog_loading_includes_embedded_subtasks() {
         let size = stream.read(&mut request).unwrap();
         let body = json!({
             "issues": [{
+                "key": "FIN-EPIC",
+                "fields": { "summary": "Hidden Epic", "issuetype": { "name": "Epic" } }
+            }, {
                 "key": "FIN-1",
                 "fields": {
                     "summary": "Parent",
@@ -1181,11 +1271,19 @@ fn backlog_loading_includes_embedded_subtasks() {
                         "fields": { "summary": "Child", "issuetype": { "name": "Sub-task" } }
                     }]
                 }
+            }, {
+                "key": "FIN-2",
+                "fields": {
+                    "summary": "Child",
+                    "issuetype": { "name": "Sub-task" },
+                    "parent": { "key": "FIN-1", "fields": { "summary": "Parent" } },
+                    "labels": ["frontend"]
+                }
             }],
             "isLast": true,
             "startAt": 0,
             "maxResults": 100,
-            "total": 1
+            "total": 3
         })
         .to_string();
         write!(
@@ -1198,7 +1296,7 @@ fn backlog_loading_includes_embedded_subtasks() {
         String::from_utf8_lossy(&request[..size]).into_owned()
     });
 
-    let items = board_backlog(
+    let backlog = board_backlog(
         &reqwest::blocking::Client::new(),
         &base_url,
         "user@example.com",
@@ -1210,12 +1308,15 @@ fn backlog_loading_includes_embedded_subtasks() {
     let request = server.join().unwrap();
 
     assert_eq!(
-        items
+        backlog
+            .work_items
             .iter()
             .map(|item| item.key.as_str())
             .collect::<Vec<_>>(),
         ["FIN-1", "FIN-2"]
     );
-    assert_eq!(items[1].parent_key.as_deref(), Some("FIN-1"));
+    assert_eq!(backlog.work_items[1].parent_key.as_deref(), Some("FIN-1"));
+    assert_eq!(backlog.work_items[1].labels, ["frontend"]);
+    assert_eq!(backlog.top_level_keys, ["FIN-EPIC", "FIN-1"]);
     assert!(request.contains("/rest/agile/1.0/board/42/backlog"));
 }

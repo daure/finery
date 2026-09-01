@@ -14,6 +14,7 @@ fn ticket(key: &str, title: &str) -> Ticket {
         title: title.into(),
         description: "Description".into(),
         description_safe_to_overwrite: true,
+        description_overwrite_warning: None,
         kind: TicketKind::Story,
         status: "To Do".into(),
         priority: "High".into(),

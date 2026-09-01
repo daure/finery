@@ -24,6 +24,8 @@ pub(crate) const BACKLOG_FIXED_TICKET_SIZE_SETTING: &str = "backlog.fixed_ticket
 pub(crate) const BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING: &str =
     "backlog.sprint_tolerance_percent";
 pub(crate) const BACKLOG_FILTERS_SETTING: &str = "backlog.filters";
+pub(crate) const BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING: &str =
+    "backlog.excluded_sprint_name_fragments";
 pub(crate) const SPEED_READER_WPM_SETTING: &str = "reader.wpm";
 pub(crate) const SPEED_READER_BLOCK_DELAY_SETTING: &str = "reader.markdown_block_pause_ms";
 pub(crate) const RECENT_TICKETS_LIMIT_SETTING: &str = "recent_tickets.limit";
@@ -295,6 +297,7 @@ pub(crate) struct AppSettings {
     pub(crate) jira_story_points_discovery_complete: bool,
     pub(crate) backlog_runway: BacklogRunwaySettings,
     pub(crate) backlog_filters: BacklogFilterSettings,
+    pub(crate) excluded_sprint_name_fragments: Vec<String>,
     pub(crate) speed_reader: SpeedReaderSettings,
     pub(crate) recent_tickets_limit: usize,
     pub(crate) composer_keys: ComposerKeyBindings,
@@ -314,6 +317,7 @@ impl Default for AppSettings {
             jira_story_points_discovery_complete: false,
             backlog_runway: BacklogRunwaySettings::default(),
             backlog_filters: BacklogFilterSettings::default(),
+            excluded_sprint_name_fragments: Vec::new(),
             speed_reader: SpeedReaderSettings::default(),
             recent_tickets_limit: 15,
             composer_keys: ComposerKeyBindings::default(),
@@ -486,6 +490,9 @@ impl AppSettings {
             backlog_filters: BacklogFilterSettings::from_setting_value(
                 values.get(BACKLOG_FILTERS_SETTING),
             ),
+            excluded_sprint_name_fragments: sprint_name_fragments(
+                values.get(BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING),
+            ),
             speed_reader: SpeedReaderSettings {
                 wpm: values
                     .get(SPEED_READER_WPM_SETTING)
@@ -558,6 +565,10 @@ impl AppSettings {
             (
                 BACKLOG_FILTERS_SETTING,
                 self.backlog_filters.setting_value(),
+            ),
+            (
+                BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING,
+                self.excluded_sprint_name_fragments.join(","),
             ),
             (SPEED_READER_WPM_SETTING, self.speed_reader.wpm.to_string()),
             (
@@ -725,6 +736,13 @@ impl AppSettings {
         ))
     }
 
+    pub(crate) fn excludes_sprint(&self, sprint_name: &str) -> bool {
+        let sprint_name = sprint_name.to_ascii_lowercase();
+        self.excluded_sprint_name_fragments
+            .iter()
+            .any(|fragment| sprint_name.contains(&fragment.to_ascii_lowercase()))
+    }
+
     pub(crate) fn jira_issue_url(&self, key: &str) -> Option<String> {
         let base_url = self.jira_base_url.trim().trim_end_matches('/');
         (!base_url.is_empty() && !key.trim().is_empty()).then(|| format!("{base_url}/browse/{key}"))
@@ -773,6 +791,23 @@ fn setting_number(
         .and_then(|value| value.parse::<f64>().ok())
         .filter(|value| value.is_finite() && (permits_zero || *value > 0.0) && *value >= 0.0)
         .unwrap_or(default)
+}
+
+fn sprint_name_fragments(value: Option<&String>) -> Vec<String> {
+    value
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|fragment| !fragment.is_empty())
+        .fold(Vec::new(), |mut fragments, fragment| {
+            if !fragments
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(fragment))
+            {
+                fragments.push(fragment.to_owned());
+            }
+            fragments
+        })
 }
 
 fn parse_composer_key(value: &str) -> Option<KeySpec> {

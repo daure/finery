@@ -798,7 +798,7 @@ fn submit_requires_confirmation() {
 }
 
 #[test]
-fn submit_confirmation_lists_local_parent_dependencies() {
+fn submit_confirmation_uses_generic_text() {
     tuicore::init();
     let mut page = composer_page();
     page.open_change_set_for_test("CS-1");
@@ -816,9 +816,8 @@ fn submit_confirmation_lists_local_parent_dependencies() {
     );
 
     let dialog_text = render_text(&mut page);
-    assert!(dialog_text.contains("Commit 2 ticket changes to Jira:"));
-    assert!(dialog_text.contains("NEW-1 · Parent task"));
-    assert!(dialog_text.contains("NEW-2 · Child sub-task"));
+    assert!(dialog_text.contains("Commit 2 selected changes to Jira?"));
+    assert!(!dialog_text.contains("NEW-1"));
 }
 
 #[test]
@@ -1434,7 +1433,7 @@ fn jira_submission_waits_for_durable_create_marker_confirmation() {
     let marker_service = service.clone();
     let observed_marker = Arc::clone(&marker_was_durable);
     let observed_jira_call = Arc::clone(&jira_called);
-    service.set_jira_submit_for_tests(Arc::new(move |_| {
+    service.set_jira_submit_for_tests(Arc::new(move |_, _| {
         observed_jira_call.store(true, Ordering::SeqCst);
         observed_marker.store(
             marker_service
@@ -1474,6 +1473,11 @@ fn jira_submission_waits_for_durable_create_marker_confirmation() {
 
     assert!(jira_called.load(Ordering::SeqCst));
     assert!(marker_was_durable.load(Ordering::SeqCst));
+    assert_eq!(
+        submission.take_preflight_error().as_deref(),
+        Some("test preflight failure")
+    );
+    assert!(submission.take_preflight_error().is_none());
 }
 
 #[test]
@@ -1481,7 +1485,7 @@ fn cancelled_durable_claim_never_contacts_jira() {
     let service = AppService::for_tests();
     let jira_called = Arc::new(AtomicBool::new(false));
     let observed_jira_call = Arc::clone(&jira_called);
-    service.set_jira_submit_for_tests(Arc::new(move |_| {
+    service.set_jira_submit_for_tests(Arc::new(move |_, _| {
         observed_jira_call.store(true, Ordering::SeqCst);
         crate::jira::SubmitBatchOutcome::PreflightError("must not submit".into())
     }));
@@ -2018,7 +2022,7 @@ fn adding_child_expands_parent_and_focuses_new_child() {
 }
 
 #[test]
-fn added_subtask_uses_project_draft_key_until_submission() {
+fn added_subtask_uses_project_temporary_key_until_submission() {
     tuicore::init();
     let mut state = ComposerState::demo();
     state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
@@ -2054,7 +2058,8 @@ fn added_subtask_uses_project_draft_key_until_submission() {
         }
     }
 
-    assert!(text.contains("FIN-DRAFT"));
+    assert!(text.contains("FIN-TMP-1"));
+    assert!(text.contains("FIN-TMP-2"));
     assert!(text.contains("A • @-- • To Do"));
     assert!(!text.contains("Root -> NEW-1"));
 

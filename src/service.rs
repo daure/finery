@@ -70,7 +70,7 @@ pub(crate) struct ComposerSourceTicket {
 
 #[cfg(test)]
 pub(crate) type TestJiraSubmit =
-    Arc<dyn Fn(&[TicketChange]) -> jira::SubmitBatchOutcome + Send + Sync>;
+    Arc<dyn Fn(&[TicketChange], bool) -> jira::SubmitBatchOutcome + Send + Sync>;
 
 #[cfg(test)]
 struct DiscoveryPersistencePause {
@@ -332,22 +332,26 @@ impl AppService {
         let submit_settings = Arc::clone(&self.settings);
         #[cfg(test)]
         let test_jira_submit = Arc::clone(&self.jira_submit);
-        let jira_submit = Arc::new(move |changes: &[TicketChange]| {
-            #[cfg(test)]
-            if let Some(submit) = test_jira_submit
-                .lock()
-                .ok()
-                .and_then(|submit| submit.clone())
-            {
-                return submit(changes);
-            }
-            match submit_settings.read() {
-                Ok(settings) => jira::submit_changes(&settings, changes),
-                Err(_) => {
-                    jira::SubmitBatchOutcome::PreflightError("settings lock is unavailable".into())
+        let jira_submit = Arc::new(
+            move |changes: &[TicketChange], allow_unsafe_description_overwrite| {
+                #[cfg(test)]
+                if let Some(submit) = test_jira_submit
+                    .lock()
+                    .ok()
+                    .and_then(|submit| submit.clone())
+                {
+                    return submit(changes, allow_unsafe_description_overwrite);
                 }
-            }
-        });
+                match submit_settings.read() {
+                    Ok(settings) => {
+                        jira::submit_changes(&settings, changes, allow_unsafe_description_overwrite)
+                    }
+                    Err(_) => jira::SubmitBatchOutcome::PreflightError(
+                        "settings lock is unavailable".into(),
+                    ),
+                }
+            },
+        );
         composer_service::ComposerService::new(
             self.storage.clone(),
             Arc::clone(&self.runtime),
@@ -434,6 +438,7 @@ impl AppService {
             &change_set_id,
             expected_revision,
             selected_ticket_ids,
+            false,
         );
         let catalog = self
             .runtime

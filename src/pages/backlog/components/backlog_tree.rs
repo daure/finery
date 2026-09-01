@@ -13,11 +13,12 @@ use ratatui::{
     text::{Line, Span, Text},
 };
 use tuicore::{
-    Animated, Button, CellContext, ChildKey, Column, Dropdown, DropdownLabelPosition,
-    DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget, Key,
-    KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    ListControl, ListControlEvent, ListControlKeyBindings, MenuButton, MenuItem, RenderCtx,
-    SearchMode, Spinner, TickResult, TreeAdapter, TuiEvent, TuiNode,
+    Animated, Button, CellContext, ChildKey, Column, DataViewTransformMode, Dropdown,
+    DropdownLabelPosition, DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId,
+    FocusTarget, Key, KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult,
+    LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlKeyBindings,
+    MenuButton, MenuItem, RenderCtx, SearchMode, Spinner, TickResult, TreeAdapter, TuiEvent,
+    TuiNode,
 };
 
 use crate::{
@@ -268,6 +269,7 @@ impl BacklogTree {
         });
         self.control
             .set_rows(backlog_rows(snapshot, &self.filter_settings));
+        self.sync_search_results();
         let expanded = expanded
             .into_iter()
             .filter(|id| self.is_expandable(id))
@@ -653,7 +655,11 @@ impl BacklogTree {
             .iter()
             .map(|row| (row.id.clone(), row.parent_id.clone().unwrap_or_default()))
             .collect();
+        let search = self.control.data_view().transform_state().search.clone();
         let outcome = dispatch(&mut self.control, ctx);
+        if self.control.data_view().transform_state().search != search {
+            self.sync_search_results();
+        }
         let show_runway_bands = self.show_runway_bands();
         if self.runway_markers_visible.replace(show_runway_bands) != show_runway_bands {
             ctx.request_redraw();
@@ -671,6 +677,63 @@ impl BacklogTree {
                 .search
                 .trim()
                 .is_empty()
+    }
+
+    fn sync_search_results(&mut self) {
+        let search = self
+            .control
+            .data_view()
+            .transform_state()
+            .search
+            .trim()
+            .to_owned();
+        if search.is_empty() {
+            self.control
+                .data_view_mut()
+                .set_transform_mode(DataViewTransformMode::Local);
+            self.control.data_view_mut().clear_visible_row_ids();
+            return;
+        }
+
+        self.control
+            .data_view_mut()
+            .set_transform_mode(DataViewTransformMode::External);
+
+        let rows = self.control.items();
+        let row_ids = rows
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let parent_ids = rows
+            .iter()
+            .map(|row| (row.id.as_str(), row.parent_id.as_deref()))
+            .collect::<HashMap<_, _>>();
+        let mut visible_ids = std::collections::HashSet::new();
+
+        for row in rows.iter().filter(|row| {
+            tuicore::search_match(&search, &backlog_search_text(row), SearchMode::Contains)
+                .is_some()
+        }) {
+            visible_ids.insert(row.id.as_str());
+            visible_ids.extend(descendant_row_ids(row.id.as_str(), rows));
+
+            let mut parent_id = row.parent_id.as_deref();
+            while let Some(id) = parent_id {
+                if !visible_ids.insert(id) {
+                    break;
+                }
+                parent_id = parent_ids.get(id).copied().flatten();
+            }
+        }
+
+        let visible_row_ids = rows
+            .iter()
+            .filter(|row| row_ids.contains(&row.id) && visible_ids.contains(row.id.as_str()))
+            .map(|row| row.id.clone())
+            .collect::<Vec<_>>();
+        self.control
+            .data_view_mut()
+            .set_visible_row_ids(visible_row_ids);
     }
 
     fn drain_web_menu(&mut self, was_open: bool) {
@@ -1011,7 +1074,13 @@ fn visible_work_items<'a>(
     items
         .iter()
         .filter(|item| {
-            matches_filters(item, filters) && ancestors_match_filters(item, &items_by_key, filters)
+            (!matches!(work_item_kind(&item.kind), WorkItemKind::Subtask)
+                || item
+                    .parent_key
+                    .as_deref()
+                    .is_some_and(|parent| items_by_key.contains_key(parent)))
+                && matches_filters(item, filters)
+                && ancestors_match_filters(item, &items_by_key, filters)
         })
         .collect()
 }
@@ -1040,7 +1109,7 @@ fn matches_filters(item: &WorkItem, filters: &BacklogFilterSettings) -> bool {
         BacklogFilter::Done => crate::store::work_items::is_done_status(&item.status),
         BacklogFilter::Open => !crate::store::work_items::is_done_status(&item.status),
         BacklogFilter::Pointed => !estimation_eligible(item) || item.story_points.is_some(),
-        BacklogFilter::Unpointed => !estimation_eligible(item) || item.story_points.is_none(),
+        BacklogFilter::Unpointed => estimation_eligible(item) && item.story_points.is_none(),
     })
 }
 
@@ -1241,7 +1310,11 @@ fn backlog_column(number_jump: Rc<RefCell<TicketNumberJump>>) -> Column<BacklogR
             .saturating_add(2)
             .saturating_add(work_item_title_prefix_width(&item.item)),
     })
-    .search_key(|row| match &row.content {
+    .search_key(backlog_search_text)
+}
+
+fn backlog_search_text(row: &BacklogRow) -> String {
+    match &row.content {
         BacklogRowContent::Section { search_text, .. } => search_text.clone(),
         BacklogRowContent::WorkItem(item) => format!(
             "{} {} {}",
@@ -1249,7 +1322,22 @@ fn backlog_column(number_jump: Rc<RefCell<TicketNumberJump>>) -> Column<BacklogR
             item.item.title,
             item.epic_name.as_deref().unwrap_or_default(),
         ),
-    })
+    }
+}
+
+fn descendant_row_ids<'a>(id: &'a str, rows: &'a [BacklogRow]) -> Vec<&'a str> {
+    let mut descendants = Vec::new();
+    let mut parents = vec![id];
+    while let Some(parent) = parents.pop() {
+        for child in rows
+            .iter()
+            .filter(|row| row.parent_id.as_deref() == Some(parent))
+        {
+            descendants.push(child.id.as_str());
+            parents.push(child.id.as_str());
+        }
+    }
+    descendants
 }
 
 fn backlog_work_item_text(row: &BacklogWorkItem, number_query: Option<&str>) -> Text<'static> {

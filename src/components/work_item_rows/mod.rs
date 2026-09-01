@@ -88,6 +88,9 @@ pub(crate) fn ticket_summary_text(
         let style = (row.story_points.is_some() && !row.story_points_estimated)
             .then_some(text_style)
             .unwrap_or(muted_style);
+        let style = (row.story_points.is_some() && row.story_points_estimated)
+            .then(|| style.add_modifier(Modifier::UNDERLINED))
+            .unwrap_or(style);
         append_metadata(&mut metadata, Span::styled(story_points_label(row), style));
     }
     append_metadata(

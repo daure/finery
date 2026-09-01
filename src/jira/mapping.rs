@@ -3,7 +3,7 @@ use serde_json::Value;
 use crate::store::{
     composer::{
         Ticket, TicketKind,
-        jira_adf::{adf_is_safe_to_overwrite, adf_to_markdown},
+        jira_adf::{adf_is_safe_to_overwrite, adf_overwrite_warning, adf_to_markdown},
     },
     work_items::{BacklogSnapshot, SubtaskProgress, WorkItem, is_done_status},
 };
@@ -23,6 +23,7 @@ pub(super) fn to_ticket(issue: JiraIssue) -> Ticket {
         title: field("summary").as_str().unwrap_or(&issue.key).into(),
         description: adf_to_markdown(field("description")),
         description_safe_to_overwrite: adf_is_safe_to_overwrite(field("description")),
+        description_overwrite_warning: adf_overwrite_warning(field("description")),
         kind: field("issuetype")
             .get("name")
             .and_then(Value::as_str)

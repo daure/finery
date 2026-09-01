@@ -327,6 +327,48 @@ impl BacklogPage {
     }
 
     #[cfg(test)]
+    pub(super) fn is_loading_for_test(&self) -> bool {
+        self.loading
+    }
+
+    #[cfg(test)]
+    pub(super) fn begin_rank_result_for_test(
+        &mut self,
+        plan: RankPlan,
+        pending_rank: PendingRank,
+    ) -> u64 {
+        self.pending_rank = Some(pending_rank);
+        self.move_locked.set(true);
+        self.ranking = true;
+        self.active_rank_plan = Some(plan);
+        self.generations.start_rank()
+    }
+
+    #[cfg(test)]
+    pub(super) fn apply_rank_result_for_test(
+        &mut self,
+        generation: u64,
+        result: Result<(), String>,
+    ) -> bool {
+        self.apply_rank_result(generation, result)
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_pending_rank_for_test(&self) -> bool {
+        self.pending_rank.is_some()
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_active_rank_plan_for_test(&self) -> bool {
+        self.active_rank_plan.is_some()
+    }
+
+    #[cfg(test)]
+    pub(super) fn rank_refresh_retry_is_pending_for_test(&self) -> bool {
+        self.rank_refresh_retry.pending()
+    }
+
+    #[cfg(test)]
     pub(super) fn refresh_snapshot_for_test(&mut self, snapshot: BacklogSnapshot) {
         self.focus_backlog_after_load = true;
         let generation = self.generations.start_load(false, false);
@@ -570,7 +612,9 @@ impl BacklogPage {
                     .expect("completed Jira rank has an active plan");
                 self.report_rank_success(plan);
                 self.active_rank_plan = None;
-                self.load(true, true);
+                self.pending_rank = None;
+                self.move_locked.set(false);
+                self.view.base_mut().base_mut().set_loading(false);
             }
             Err(error) => {
                 self.active_rank_plan = None;
@@ -1557,6 +1601,7 @@ fn empty_snapshot() -> BacklogSnapshot {
         story_points_configured: false,
         sprints: Vec::new(),
         work_items: Vec::new(),
+        top_level_backlog_keys: Vec::new(),
         warnings: Vec::new(),
         runway: None,
         velocity: None,
