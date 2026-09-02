@@ -1,6 +1,6 @@
 [package]
 name = "finery"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 default-run = "finery"
 description = "Keyboard-first Jira backlog and Composer with optional MCP access"
@@ -39,7 +39,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "sqlite", "postgres", "migrate", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "net", "signal"] }
-tuicore = { version = "0.23.0", path = "../tuicore" }
+tuicore = { version = "0.24.0", path = "../tuicore" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

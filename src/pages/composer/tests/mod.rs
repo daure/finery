@@ -66,8 +66,10 @@ fn render_text_at(page: &mut ComposerPage, width: u16) -> String {
 }
 
 fn render_text_after_syntax(page: &mut ComposerPage, width: u16) -> String {
-    std::thread::sleep(Duration::from_millis(20));
-    page.tick(Duration::from_millis(100), AnimationSettings::default());
+    for _ in 0..3 {
+        std::thread::sleep(Duration::from_millis(20));
+        page.tick(Duration::from_millis(100), AnimationSettings::default());
+    }
     render_text_at(page, width)
 }
 
@@ -2170,7 +2172,7 @@ fn editing_description_does_not_leak_hotkeys() {
         &TuiEvent::Key(KeyEvent::from(Key::Char('M'))),
         &mut ctx,
     );
-    let text = render_text(&mut page);
+    let text = render_text_after_syntax(&mut page, TEST_WIDTH);
     assert!(text.contains("RM"));
     assert!(!text.contains("Commit changes"));
 }
