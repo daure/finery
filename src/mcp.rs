@@ -25,10 +25,10 @@ use crate::{
     store::work_items::{BacklogSnapshot, RankPlan, RunwayCapacitySource, WorkItem, rank_plan},
 };
 
-const MCP_INSTRUCTIONS: &str = "Read Composer change sets and Jira backlog order. Before mutating an existing change set, reread it and send its current revision as expected_revision. Call get_change_set_guidance before reading or writing a Composer ticket description. create_change_set, apply_change_set_patch, and delete_change_set persist local edits only; delete_change_set never deletes Jira tickets. Before Jira reordering, state the exact move and get explicit user confirmation; reread the workspace afterward. submit_change_set is the only Composer Jira submission path, requires explicit ticket IDs, and submitted tickets cannot be changed or resubmitted. If a description cannot round-trip safely, state the identified formatting risk and get explicit user confirmation before setting accept_unsafe_description_overwrite. Recover marked draft creates only with confirmed Jira keys; never retry ambiguous creates.";
+const MCP_INSTRUCTIONS: &str = "Read Composer change sets and Jira backlog order. Before mutating an existing change set, reread it and send its current revision as expected_revision. Call get_change_set_guidance before reading or writing a Composer ticket description. Call lookup_jira_user before creating an @mention unless the account ID is already known. create_change_set, apply_change_set_patch, and delete_change_set persist local edits only; delete_change_set never deletes Jira tickets. Before Jira reordering, state the exact move and get explicit user confirmation; reread the workspace afterward. submit_change_set is the only Composer Jira submission path, requires explicit ticket IDs, and submitted tickets cannot be changed or resubmitted. If a description cannot round-trip safely, state the identified formatting risk and get explicit user confirmation before setting accept_unsafe_description_overwrite. Recover marked draft creates only with confirmed Jira keys; never retry ambiguous creates.";
 // Agent-facing description contract. Any Jira ADF conversion, supported tag, validation, or
 // overwrite-safety change MUST update this guidance so MCP agents receive accurate instructions.
-const CHANGE_SET_GUIDANCE: &str = "Use Markdown for Composer descriptions. Supported: normal Markdown, nested ordered/bullet lists, and basic tables (one header row; one paragraph per cell).\n\nUse only these Jira tags:\n- Panel: {{jira:panel {\"panelType\":\"info\"}}} … {{/jira:panel}}\n- Mention: {{jira:mention {\"id\":\"ACCOUNT_ID\",\"text\":\"@Name\"} /}}\n- Smart link: {{jira:inline-card {\"url\":\"https://example.com\"} /}}\n\nEscape literal {{ as \\{\\{. Malformed or unclosed Jira tags block the full selected submission before Jira writes. For an unsafe existing Jira description, describe the formatting risk and get explicit approval before accept_unsafe_description_overwrite.";
+const CHANGE_SET_GUIDANCE: &str = "Composer descriptions are Markdown transformed to and from Jira ADF. This is reference documentation, not a recommendation to add rich formatting. The syntax preserves Jira-specific source content when it is present.\n\nAvailable syntax: normal Markdown, nested ordered/bullet lists, basic tables (one header row; one paragraph per cell), underline (++text++), text colour ({color:#RRGGBB}text{/color}), emoji (:short_name:), UTC dates (@date(YYYY-MM-DD)), statuses (@status(\"Text\", color)), mentions (@mention(\"@Name\", \"ACCOUNT_ID\")), and cards (@card(https://example.com)). Jira background highlights are rejected because they break Jira's native editor. Status colors: green, blue, red, yellow, neutral, purple.\n\nJira blocks:\n- Panel: {{jira:panel {\"panelType\":\"info\"}}} … {{/jira:panel}}\n- Task list: {{jira:task-list}} with - [ ] or - [x] items … {{/jira:task-list}}\n- Decision list: {{jira:decision-list}} with plain - item entries … {{/jira:decision-list}}\n\nEscape literal {{ as \\{\\{ and any literal canonical inline opening with a leading backslash. Old {{jira:mention ... /}} and {{jira:inline-card ... /}} forms are rejected. Malformed syntax blocks the full selected submission before Jira writes. For an unsafe existing Jira description, describe the formatting risk and get explicit approval before accept_unsafe_description_overwrite.";
 const WORKSPACE_UNPLANNED_TICKET_LIMIT: usize = 50;
 const WORKSPACE_VELOCITY_SPRINT_LIMIT: usize = 10;
 
@@ -59,6 +59,22 @@ struct ChangeSetId {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CreateChangeSet {
     name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct LookupJiraUser {
+    search: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct JiraMentionUserView {
+    account_id: String,
+    display_name: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct JiraMentionUsersView {
+    users: Vec<JiraMentionUserView>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -757,6 +773,30 @@ fn workspace_parent(
 
 #[tool_router]
 impl McpServer {
+    #[tool(
+        description = "Look up Jira users for @mention Markdown. Returns display names and account IDs; use the account ID in @mention(\"@Name\", \"ACCOUNT_ID\")."
+    )]
+    async fn lookup_jira_user(
+        &self,
+        Parameters(input): Parameters<LookupJiraUser>,
+    ) -> Result<Json<JiraMentionUsersView>, String> {
+        let service = self.service.clone();
+        tokio::task::spawn_blocking(move || service.search_jira_users(&input.search))
+            .await
+            .map_err(|_| "internal_error: Jira user lookup failed".to_string())?
+            .map(|users| {
+                Json(JiraMentionUsersView {
+                    users: users
+                        .into_iter()
+                        .map(|user| JiraMentionUserView {
+                            account_id: user.account_id,
+                            display_name: user.display_name,
+                        })
+                        .collect(),
+                })
+            })
+    }
+
     #[tool(
         description = "Required before reading or writing a Composer ticket description. Get the concise canonical Markdown, Jira-tag, validation, and unsafe-overwrite rules for change sets."
     )]

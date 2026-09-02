@@ -103,6 +103,9 @@ impl ComposerPage {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> Option<EventOutcome> {
+        if self.editor.create_dialog_is_open() {
+            return None;
+        }
         if !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Enter, KeyModifiers::CONTROL).matches(*key))
         {
             return None;
@@ -345,6 +348,9 @@ impl TuiNode for ComposerPage {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        if let Some(outcome) = self.open_selected_ticket(event, ctx) {
+            return outcome;
+        }
         let was_open = self.in_change_set();
         let outcome = self.active_mut().event(event, ctx);
         self.handle_active_view_change(was_open, ctx);
@@ -360,6 +366,9 @@ impl TuiNode for ComposerPage {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
+        if let Some(outcome) = self.open_selected_ticket(event, ctx) {
+            return outcome;
+        }
         let was_open = self.in_change_set();
         let outcome = self.active_mut().dispatch_event(route, event, ctx);
         self.handle_active_view_change(was_open, ctx);

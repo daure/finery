@@ -656,7 +656,7 @@ fn jira_adf_round_trips_common_complex_descriptions() {
 }
 
 #[test]
-fn jira_adf_explains_unsupported_formatting() {
+fn jira_adf_round_trips_underlined_text() {
     let underlined = json!({
         "type": "doc", "version": 1, "content": [{
             "type": "paragraph", "content": [{
@@ -665,21 +665,22 @@ fn jira_adf_explains_unsupported_formatting() {
         }]
     });
 
-    assert_eq!(
-        adf_overwrite_warning(&underlined).as_deref(),
-        Some("underlined text")
-    );
+    assert!(adf_is_safe_to_overwrite(&underlined));
 }
 
 #[test]
-fn jira_adf_rejects_malformed_lossless_tags() {
+fn jira_adf_validates_canonical_jira_syntax_and_rejects_legacy_tags() {
     assert!(validate_markdown(
-        "{{jira:panel {\"panelType\":\"info\"}}}\n{{jira:mention {\"id\":\"account-1\",\"text\":\"@Ada\"} /}}\n{{/jira:panel}}"
+        "{{jira:panel {\"panelType\":\"info\"}}}\n@mention(\"@Ada\", \"account-1\")\n{{/jira:panel}}\n\n{{jira:task-list}}\n- [ ] Plan\n- [x] Ship\n{{/jira:task-list}}\n\n{{jira:decision-list}}\n- [DECIDED] Use ADF\n{{/jira:decision-list}}"
     )
     .is_ok());
-    assert!(validate_markdown("{{jira:mention {\"id\":\"account-1\"}}}").is_err());
     assert!(validate_markdown("{{jira:mention {\"id\":\"account-1\"} /}}").is_err());
-    assert!(validate_markdown("{{jira:inline-card {\"url\":\"\"} /}}").is_err());
+    assert!(validate_markdown("{{jira:inline-card {\"url\":\"https://example.com\"} /}}").is_err());
+    assert!(validate_markdown("@status(\"Ready\", orange)").is_err());
+    assert!(validate_markdown("@date(2026-02-30)").is_err());
+    assert!(validate_markdown("{color:#12345}Text{/color}").is_err());
+    assert!(validate_markdown("{highlight:#FFF0B3}Text{/highlight}").is_err());
+    assert!(validate_markdown("{{jira:task-list}}\n- [X] Wrong\n{{/jira:task-list}}").is_err());
     assert!(validate_markdown("{{jira:panel {}}}\nBody\n{{/jira:panel}}").is_err());
     assert!(validate_markdown("{{jira:panel {\"panelType\":\"info\"}}}\nMissing close").is_err());
     assert!(validate_markdown("{{/jira:panel}}").is_err());
@@ -690,12 +691,15 @@ fn jira_adf_rejects_malformed_lossless_tags() {
 fn jira_adf_round_trips_escaped_literal_tag_openings() {
     let adf = json!({ "type": "doc", "version": 1, "content": [{
         "type": "paragraph", "content": [{
-            "type": "text", "text": "Show {{literal braces without a Jira tag."
+            "type": "text", "text": "Show {{literal @date(2026-02-28), :smile:, ++underline++, and {color:#112233}colour{/color}."
         }]
     }]});
 
     let markdown = adf_to_markdown(&adf);
-    assert_eq!(markdown, "Show \\{\\{literal braces without a Jira tag.");
+    assert_eq!(
+        markdown,
+        "Show \\{\\{literal \\@date(2026-02-28), \\:smile:, \\++underline\\++, and \\{color:#112233}colour{/color}."
+    );
     assert!(validate_markdown(&markdown).is_ok());
     assert!(adf_is_safe_to_overwrite(&adf));
 }
@@ -709,15 +713,39 @@ fn jira_adf_keeps_lossy_features_behind_the_overwrite_guard() {
 }
 
 #[test]
-fn jira_adf_round_trips_tables_panels_mentions_and_smart_links() {
+fn jira_adf_rejects_background_highlights_that_break_jira_editor() {
+    let adf = json!({ "type": "doc", "version": 1, "content": [{
+        "type": "paragraph", "content": [{
+            "type": "text", "text": "Highlighted", "marks": [{
+                "type": "backgroundColor", "attrs": { "color": "#FFF0B3" }
+            }]
+        }]
+    }]});
+
+    assert!(!adf_is_safe_to_overwrite(&adf));
+    assert_eq!(
+        adf_overwrite_warning(&adf).as_deref(),
+        Some("text background colour Finery cannot preserve exactly")
+    );
+}
+
+#[test]
+fn jira_adf_round_trips_canonical_jira_nodes() {
     let adf = json!({
         "type": "doc", "version": 1, "content": [
             { "type": "panel", "attrs": { "panelType": "info" }, "content": [{
                 "type": "paragraph", "content": [
                     { "type": "text", "text": "Ask " },
-                    { "type": "mention", "attrs": { "id": "account-1", "text": "@Ada" }},
+                    { "type": "mention", "attrs": { "id": "account-1", "text": "@Ada", "accessLevel": "" }},
                     { "type": "text", "text": " to review " },
-                    { "type": "inlineCard", "attrs": { "url": "https://example.com/design" }}
+                    { "type": "inlineCard", "attrs": { "url": "https://example.com/design" }},
+                    { "type": "emoji", "attrs": { "shortName": ":rocket:" }},
+                    { "type": "date", "attrs": { "timestamp": "1772236800000" }},
+                    { "type": "status", "attrs": { "text": "Ready", "color": "green" }},
+                    { "type": "text", "text": "Styled", "marks": [
+                        { "type": "strong" }, { "type": "underline" },
+                        { "type": "textColor", "attrs": { "color": "#112233" } }
+                    ]}
                 ]
             }]},
             { "type": "table", "content": [
@@ -730,12 +758,43 @@ fn jira_adf_round_trips_tables_panels_mentions_and_smart_links() {
                     { "type": "tableCell", "attrs": {}, "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Ada", "marks": [{ "type": "strong" }]}]}]}
                 ]}
             ]}
+            , { "type": "taskList", "content": [
+                { "type": "taskItem", "attrs": { "state": "TODO" }, "content": [{ "type": "text", "text": "Plan" }] },
+                { "type": "taskItem", "attrs": { "state": "DONE" }, "content": [{ "type": "text", "text": "Ship" }] }
+            ]}
+            , { "type": "decisionList", "content": [
+                { "type": "decisionItem", "attrs": { "state": "UNDECIDED" }, "content": [{ "type": "text", "text": "Use ADF" }] }
+            ]}
         ]
     });
 
     assert!(adf_is_safe_to_overwrite(&adf));
     assert_eq!(
         adf_to_markdown(&adf),
-        "{{jira:panel {\"panelType\":\"info\"}}}\nAsk {{jira:mention {\"id\":\"account-1\",\"text\":\"@Ada\"} /}} to review {{jira:inline-card {\"url\":\"https://example.com/design\"} /}}\n{{/jira:panel}}\n\n| Rule | Owner |\n| --- | --- |\n| Seller \\| buyer | **Ada** |"
+        "{{jira:panel {\"panelType\":\"info\"}}}\nAsk @mention(\"@Ada\", \"account-1\") to review @card(https://example.com/design):rocket:@date(2026-02-28)@status(\"Ready\", green){color:#112233}++**Styled**++{/color}\n{{/jira:panel}}\n\n| Rule | Owner |\n| --- | --- |\n| Seller \\| buyer | **Ada** |\n\n{{jira:task-list}}\n- [ ] Plan\n- [x] Ship\n{{/jira:task-list}}\n\n{{jira:decision-list}}\n- Use ADF\n{{/jira:decision-list}}"
+    );
+}
+
+#[test]
+fn jira_list_nodes_receive_document_unique_local_ids() {
+    let adf = markdown_to_adf(
+        "{{jira:task-list}}\n- [ ] First\n- [x] Second\n{{/jira:task-list}}\n\n{{jira:decision-list}}\n- Decide one\n- Decide two\n{{/jira:decision-list}}",
+    );
+    let blocks = adf["content"].as_array().unwrap();
+    let task_list = &blocks[0];
+    let decision_list = &blocks[1];
+    let ids = [
+        &task_list["attrs"]["localId"],
+        &task_list["content"][0]["attrs"]["localId"],
+        &task_list["content"][1]["attrs"]["localId"],
+        &decision_list["attrs"]["localId"],
+        &decision_list["content"][0]["attrs"]["localId"],
+        &decision_list["content"][1]["attrs"]["localId"],
+    ];
+
+    assert!(ids.iter().all(|id| id.is_string()));
+    assert_eq!(
+        ids.len(),
+        ids.iter().collect::<std::collections::HashSet<_>>().len()
     );
 }

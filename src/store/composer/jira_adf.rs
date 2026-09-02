@@ -17,11 +17,13 @@ pub(crate) fn adf_to_markdown(value: &Value) -> String {
 }
 
 pub(crate) fn markdown_to_adf(markdown: &str) -> Value {
-    json!({ "type": "doc", "version": 1, "content": parse_blocks(markdown) })
+    let mut document = json!({ "type": "doc", "version": 1, "content": parse_blocks(markdown) });
+    assign_list_local_ids(&mut document, &mut 1);
+    document
 }
 
 pub(crate) fn validate_markdown(markdown: &str) -> Result<(), String> {
-    let mut open_panel = None;
+    let mut open_block = None;
     for (index, line) in markdown.lines().enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
@@ -31,46 +33,63 @@ pub(crate) fn validate_markdown(markdown: &str) -> Result<(), String> {
             if !valid {
                 return Err(format!("invalid Jira panel tag on line {line_number}"));
             }
-            if open_panel.replace(line_number).is_some() {
-                return Err(format!("nested Jira panel tag on line {line_number}"));
+            if open_block.replace(("panel", line_number)).is_some() {
+                return Err(format!("nested Jira block tag on line {line_number}"));
             }
             continue;
         }
-        if trimmed.starts_with("{{/jira:panel") {
-            if trimmed != "{{/jira:panel}}" {
-                return Err(format!(
-                    "invalid Jira panel closing tag on line {line_number}"
-                ));
-            }
-            if open_panel.take().is_none() {
-                return Err(format!(
-                    "Jira panel closing tag without an opening tag on line {line_number}"
-                ));
+        if let Some(kind) = jira_block_start(trimmed) {
+            if open_block.replace((kind, line_number)).is_some() {
+                return Err(format!("nested Jira block tag on line {line_number}"));
             }
             continue;
         }
-
-        let mut remaining = line;
-        while let Some(index) = find_unescaped(remaining, "{{jira:") {
-            let tag = &remaining[index..];
-            if tag.starts_with("{{jira:panel ") || tag.starts_with("{{/jira:panel}}") {
+        if let Some(kind) = jira_block_end(trimmed) {
+            let Some((open_kind, _)) = open_block.take() else {
                 return Err(format!(
-                    "Jira panel tags must be on their own lines (line {line_number})"
+                    "Jira {kind} closing tag without an opening tag on line {line_number}"
                 ));
-            }
-            let Some((node, rest)) = jira_inline_node(tag) else {
-                return Err(format!("invalid Jira inline tag on line {line_number}"));
             };
-            if !is_valid_jira_inline_node(&node) {
-                return Err(format!("invalid Jira inline tag on line {line_number}"));
+            if open_kind != kind {
+                return Err(format!(
+                    "mismatched Jira block closing tag on line {line_number}"
+                ));
             }
-            let consumed = tag.len() - rest.len();
-            remaining = &tag[consumed..];
+            continue;
+        }
+        if trimmed.starts_with("{{jira:mention") || trimmed.starts_with("{{jira:inline-card") {
+            validate_inline(line, line_number)?;
+            continue;
+        }
+        if trimmed.starts_with("{{jira:") || trimmed.starts_with("{{/jira:") {
+            return Err(format!("invalid Jira block tag on line {line_number}"));
+        }
+        if let Some((kind, _)) = open_block {
+            match kind {
+                "task-list" if task_list_item(trimmed).is_none() => {
+                    return Err(format!("invalid Jira task list item on line {line_number}"));
+                }
+                "decision-list" if decision_list_item(trimmed).is_none() => {
+                    return Err(format!(
+                        "invalid Jira decision list item on line {line_number}"
+                    ));
+                }
+                "panel" => validate_inline(line, line_number)?,
+                _ => {}
+            }
+            if let Some(text) = task_list_item(trimmed)
+                .map(|(_, text)| text)
+                .or_else(|| decision_list_item(trimmed))
+            {
+                validate_inline(text, line_number)?;
+            }
+        } else {
+            validate_inline(line, line_number)?;
         }
     }
-    if let Some(line_number) = open_panel {
+    if let Some((kind, line_number)) = open_block {
         return Err(format!(
-            "Jira panel opened on line {line_number} is not closed"
+            "Jira {kind} opened on line {line_number} is not closed"
         ));
     }
     Ok(())
@@ -136,6 +155,8 @@ fn render_block(node: &Map<String, Value>) -> String {
         }
         "rule" => "---".into(),
         "panel" => render_panel(node),
+        "taskList" => render_task_list(node),
+        "decisionList" => render_decision_list(node),
         "table" => render_table(node).unwrap_or_else(|| "<!-- unsupported Jira table -->".into()),
         "mediaSingle" | "mediaGroup" => "<!-- unsupported Jira media -->".into(),
         unknown => {
@@ -261,26 +282,100 @@ fn render_inline(nodes: &[Value]) -> String {
         .map(|node| match node_type(node).unwrap_or_default() {
             "text" => render_text(node),
             "hardBreak" => "  \n".into(),
-            "mention" => render_inline_node("jira:mention", node),
+            "mention" => render_mention(node),
             "emoji" => node
                 .get("attrs")
-                .and_then(|attrs| attrs.get("text").or_else(|| attrs.get("shortName")))
+                .and_then(|attrs| attrs.get("shortName"))
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
-            "inlineCard" => render_inline_node("jira:inline-card", node),
+            "date" => render_date(node),
+            "status" => render_status(node),
+            "inlineCard" => render_card(node),
             _ => render_inline(content(node)),
         })
         .collect()
 }
 
-fn render_inline_node(kind: &str, node: &Map<String, Value>) -> String {
-    let attrs = node
-        .get("attrs")
-        .and_then(Value::as_object)
-        .cloned()
+fn render_task_list(node: &Map<String, Value>) -> String {
+    let items = content(node)
+        .iter()
+        .filter_map(Value::as_object)
+        .map(|item| {
+            let done = item
+                .get("attrs")
+                .and_then(|attrs| attrs.get("state"))
+                .and_then(Value::as_str)
+                == Some("DONE");
+            format!(
+                "- [{}] {}",
+                if done { "x" } else { " " },
+                render_inline(content(item))
+            )
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "{{{{jira:task-list}}}}\n{}\n{{{{/jira:task-list}}}}",
+        items.join("\n")
+    )
+}
+
+fn render_decision_list(node: &Map<String, Value>) -> String {
+    let items = content(node)
+        .iter()
+        .filter_map(Value::as_object)
+        .map(|item| format!("- {}", render_inline(content(item))))
+        .collect::<Vec<_>>();
+    format!(
+        "{{{{jira:decision-list}}}}\n{}\n{{{{/jira:decision-list}}}}",
+        items.join("\n")
+    )
+}
+
+fn render_mention(node: &Map<String, Value>) -> String {
+    let attrs = node.get("attrs").and_then(Value::as_object);
+    let text = attrs
+        .and_then(|attrs| attrs.get("text"))
+        .and_then(Value::as_str)
         .unwrap_or_default();
-    format!("{{{{{kind} {} /}}}}", Value::Object(attrs))
+    let id = attrs
+        .and_then(|attrs| attrs.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    format!("@mention({}, {})", json!(text), json!(id))
+}
+
+fn render_date(node: &Map<String, Value>) -> String {
+    let timestamp = node
+        .get("attrs")
+        .and_then(|attrs| attrs.get("timestamp"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    date_from_timestamp(timestamp)
+        .map(|date| format!("@date({date})"))
+        .unwrap_or_else(|| "<!-- unsupported Jira date -->".into())
+}
+
+fn render_status(node: &Map<String, Value>) -> String {
+    let attrs = node.get("attrs").and_then(Value::as_object);
+    let text = attrs
+        .and_then(|attrs| attrs.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let color = attrs
+        .and_then(|attrs| attrs.get("color"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    format!("@status({}, {color})", json!(text))
+}
+
+fn render_card(node: &Map<String, Value>) -> String {
+    let url = node
+        .get("attrs")
+        .and_then(|attrs| attrs.get("url"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    format!("@card({url})")
 }
 
 fn render_text(node: &Map<String, Value>) -> String {
@@ -304,6 +399,9 @@ fn render_text(node: &Map<String, Value>) -> String {
             "em" => format!("*{text}*"),
             "strike" => format!("~~{text}~~"),
             "code" => format!("`{text}`"),
+            "underline" => format!("++{text}++"),
+            "textColor" => mark_color(&text, mark, "color"),
+            "backgroundColor" => text,
             "link" => format!(
                 "[{text}]({})",
                 mark.get("attrs")
@@ -315,6 +413,15 @@ fn render_text(node: &Map<String, Value>) -> String {
         };
     }
     text
+}
+
+fn mark_color(text: &str, mark: &Map<String, Value>, name: &str) -> String {
+    let color = mark
+        .get("attrs")
+        .and_then(|attrs| attrs.get("color"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    format!("{{{name}:{color}}}{text}{{/{name}}}")
 }
 
 fn plain_text(nodes: &[Value]) -> String {
@@ -334,12 +441,25 @@ fn first_unsupported_feature(value: &Value) -> Option<String> {
     let node = value.as_object()?;
     match node_type(node)? {
         "panel" => {}
+        "taskList" if valid_task_list(node) => {}
+        "taskList" => return Some("a Jira task list Finery cannot preserve exactly".into()),
+        "decisionList" if valid_decision_list(node) => {}
+        "decisionList" => {
+            return Some("a Jira decision list Finery cannot preserve exactly".into());
+        }
         "table" if render_table(node).is_some() => {}
         "table" => return Some("a Jira table structure Finery cannot preserve exactly".into()),
         "mediaSingle" | "mediaGroup" => return Some("Jira media".into()),
-        "mention" => {}
-        "emoji" => return Some("Jira emoji".into()),
-        "inlineCard" => {}
+        "mention" if valid_mention(node) => {}
+        "mention" => return Some("a Jira mention Finery cannot preserve exactly".into()),
+        "emoji" if valid_emoji(node) => {}
+        "emoji" => return Some("a Jira emoji Finery cannot preserve exactly".into()),
+        "date" if valid_date(node) => {}
+        "date" => return Some("a Jira date with a time of day or invalid timestamp".into()),
+        "status" if valid_status(node) => {}
+        "status" => return Some("a Jira status Finery cannot preserve exactly".into()),
+        "inlineCard" if valid_card(node) => {}
+        "inlineCard" => return Some("a Jira smart link Finery cannot preserve exactly".into()),
         "text" => {
             for mark in node
                 .get("marks")
@@ -349,24 +469,31 @@ fn first_unsupported_feature(value: &Value) -> Option<String> {
                 .filter_map(Value::as_object)
             {
                 match node_type(mark).unwrap_or_default() {
-                    "strong" | "em" | "strike" | "code" | "link" => {}
-                    "underline" => return Some("underlined text".into()),
-                    "textColor" => return Some("text colour".into()),
-                    "backgroundColor" => return Some("text background colour".into()),
+                    "strong" | "em" | "strike" | "code" | "link" | "underline" => {}
+                    "textColor" if valid_color_mark(mark) => {}
+                    "textColor" => {
+                        return Some("text colour Finery cannot preserve exactly".into());
+                    }
+                    "backgroundColor" => {
+                        return Some(
+                            "text background colour Finery cannot preserve exactly".into(),
+                        );
+                    }
                     mark => return Some(format!("Jira {mark} text formatting")),
                 }
             }
         }
         "doc" | "paragraph" | "heading" | "bulletList" | "orderedList" | "listItem"
         | "blockquote" | "codeBlock" | "rule" | "hardBreak" | "tableRow" | "tableHeader"
-        | "tableCell" => {}
+        | "tableCell" | "taskItem" | "decisionItem" => {}
         node_type => return Some(format!("Jira {node_type} content")),
     }
     content(node).iter().find_map(first_unsupported_feature)
 }
 
 fn escape_markdown(text: &str) -> String {
-    text.replace('\\', "\\\\")
+    let escaped = text
+        .replace('\\', "\\\\")
         .replace('*', "\\*")
         .replace('_', "\\_")
         .replace('`', "\\`")
@@ -374,7 +501,8 @@ fn escape_markdown(text: &str) -> String {
         .replace(']', "\\]")
         .replace('|', "\\|")
         .replace("{{", "\\{\\{")
-        .replace('~', "\\~")
+        .replace('~', "\\~");
+    escape_canonical_literals(&escaped)
 }
 
 fn parse_blocks(markdown: &str) -> Vec<Value> {
@@ -395,6 +523,16 @@ fn parse_blocks(markdown: &str) -> Vec<Value> {
             }
             blocks.push(panel);
             index = next + 1;
+            continue;
+        }
+        if let Some((list, next)) = jira_task_list(&lines, index) {
+            blocks.push(list);
+            index = next;
+            continue;
+        }
+        if let Some((list, next)) = jira_decision_list(&lines, index) {
+            blocks.push(list);
+            index = next;
             continue;
         }
         if let Some(language) = line.trim().strip_prefix("```") {
@@ -474,6 +612,52 @@ fn panel_start(lines: &[&str], start: usize) -> Option<(Map<String, Value>, usiz
         .iter()
         .position(|line| line.trim() == "{{/jira:panel}}")?;
     Some((attrs, start + end + 1))
+}
+
+fn jira_task_list(lines: &[&str], start: usize) -> Option<(Value, usize)> {
+    (lines.get(start)?.trim() == "{{jira:task-list}}").then_some(())?;
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| line.trim() == "{{/jira:task-list}}")?;
+    let items = lines[start + 1..start + end + 1]
+        .iter()
+        .map(|line| task_list_item(line.trim()))
+        .collect::<Option<Vec<_>>>()?;
+    Some((
+        json!({
+            "type": "taskList",
+            "attrs": { "localId": "00000000-0000-4000-8000-000000000001" },
+            "content": items.into_iter().enumerate().map(|(index, (state, text))| json!({
+                "type": "taskItem",
+                "attrs": { "state": state, "localId": local_id(2 + index) },
+                "content": parse_inline(text),
+            })).collect::<Vec<_>>(),
+        }),
+        start + end + 2,
+    ))
+}
+
+fn jira_decision_list(lines: &[&str], start: usize) -> Option<(Value, usize)> {
+    (lines.get(start)?.trim() == "{{jira:decision-list}}").then_some(())?;
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| line.trim() == "{{/jira:decision-list}}")?;
+    let items = lines[start + 1..start + end + 1]
+        .iter()
+        .map(|line| decision_list_item(line.trim()))
+        .collect::<Option<Vec<_>>>()?;
+    Some((
+        json!({
+            "type": "decisionList",
+            "attrs": { "localId": "00000000-0000-4000-8000-000000000003" },
+            "content": items.into_iter().enumerate().map(|(index, text)| json!({
+                "type": "decisionItem",
+                "attrs": { "state": "DECIDED", "localId": local_id(1_002 + index) },
+                "content": parse_inline(text),
+            })).collect::<Vec<_>>(),
+        }),
+        start + end + 2,
+    ))
 }
 
 fn markdown_table(lines: &[&str], start: usize) -> Option<(Value, usize)> {
@@ -556,6 +740,7 @@ fn starts_block(line: &str) -> bool {
     markdown_heading(line).is_some()
         || list_item(line).is_some()
         || line.trim().starts_with("{{jira:panel ")
+        || jira_block_start(line.trim()).is_some()
         || table_cells(line).is_some()
         || line.trim_start().starts_with("> ")
         || line.trim().starts_with("```")
@@ -672,22 +857,28 @@ fn parse_inline(text: &str) -> Vec<Value> {
             remaining = rest;
             continue;
         }
-        if let Some((node, rest)) = jira_inline_node(remaining) {
+        if let Some((nodes_with_mark, rest)) = color_inline_nodes(remaining, "color", "textColor") {
+            nodes.extend(nodes_with_mark);
+            remaining = rest;
+            continue;
+        }
+        if let Some((node, rest)) = canonical_inline_node(remaining) {
             nodes.push(node);
             remaining = rest;
             continue;
         }
-        if let Some((node, rest)) = marked_inline(remaining, "**", "strong")
-            .or_else(|| marked_inline(remaining, "~~", "strike"))
-            .or_else(|| marked_inline(remaining, "`", "code"))
-            .or_else(|| marked_inline(remaining, "*", "em"))
+        if let Some((nodes_with_mark, rest)) = marked_inline_nodes(remaining, "**", "strong")
+            .or_else(|| marked_inline_nodes(remaining, "~~", "strike"))
+            .or_else(|| marked_inline_nodes(remaining, "++", "underline"))
+            .or_else(|| marked_inline_nodes(remaining, "`", "code"))
+            .or_else(|| marked_inline_nodes(remaining, "*", "em"))
         {
-            nodes.push(node);
+            nodes.extend(nodes_with_mark);
             remaining = rest;
             continue;
         }
-        if let Some((node, rest)) = markdown_link(remaining) {
-            nodes.push(node);
+        if let Some((nodes_with_mark, rest)) = markdown_link(remaining) {
+            nodes.extend(nodes_with_mark);
             remaining = rest;
             continue;
         }
@@ -700,59 +891,137 @@ fn parse_inline(text: &str) -> Vec<Value> {
     nodes
 }
 
-fn marked_inline<'a>(source: &'a str, delimiter: &str, mark: &str) -> Option<(Value, &'a str)> {
+fn marked_inline_nodes<'a>(
+    source: &'a str,
+    delimiter: &str,
+    mark: &str,
+) -> Option<(Vec<Value>, &'a str)> {
     let rest = source.strip_prefix(delimiter)?;
     let end = find_unescaped(rest, delimiter)?;
     let text = &rest[..end];
     let remaining = &rest[end + delimiter.len()..];
-    Some((
-        json!({
-            "type": "text",
-            "text": unescape_markdown(text),
-            "marks": [{ "type": mark }],
-        }),
-        remaining,
-    ))
+    let mut nodes = parse_inline(text);
+    add_mark(&mut nodes, json!({ "type": mark }));
+    Some((nodes, remaining))
 }
 
-fn markdown_link(source: &str) -> Option<(Value, &str)> {
+fn markdown_link(source: &str) -> Option<(Vec<Value>, &str)> {
     let label = source.strip_prefix('[')?;
     let label_end = find_unescaped(label, "](")?;
     let url = &label[label_end + 2..];
     let url_end = find_unescaped(url, ")")?;
+    let mut nodes = parse_inline(&label[..label_end]);
+    add_mark(
+        &mut nodes,
+        json!({ "type": "link", "attrs": { "href": &url[..url_end] } }),
+    );
+    Some((nodes, &url[url_end + 1..]))
+}
+
+fn canonical_inline_node(source: &str) -> Option<(Value, &str)> {
+    date_inline_node(source)
+        .or_else(|| status_inline_node(source))
+        .or_else(|| mention_inline_node(source))
+        .or_else(|| card_inline_node(source))
+        .or_else(|| emoji_inline_node(source))
+}
+
+fn date_inline_node(source: &str) -> Option<(Value, &str)> {
+    let date = source.strip_prefix("@date(")?;
+    let end = date.find(')')?;
+    let timestamp = date_timestamp(&date[..end])?;
     Some((
-        json!({
-            "type": "text",
-            "text": unescape_markdown(&label[..label_end]),
-            "marks": [{ "type": "link", "attrs": { "href": &url[..url_end] } }],
-        }),
-        &url[url_end + 1..],
+        json!({ "type": "date", "attrs": { "timestamp": timestamp } }),
+        &date[end + 1..],
     ))
 }
 
-fn jira_inline_node(source: &str) -> Option<(Value, &str)> {
-    for (token, node_type) in [
-        ("{{jira:mention ", "mention"),
-        ("{{jira:inline-card ", "inlineCard"),
-    ] {
-        let Some(payload) = source.strip_prefix(token) else {
-            continue;
-        };
-        let (attrs, rest) = json_attrs(payload)?;
-        let rest = rest.strip_prefix(" /}}")?;
-        return Some((json!({ "type": node_type, "attrs": attrs }), rest));
-    }
-    None
+fn status_inline_node(source: &str) -> Option<(Value, &str)> {
+    let rest = source.strip_prefix("@status(")?;
+    let (text, rest) = json_string(rest)?;
+    let rest = rest.strip_prefix(", ")?;
+    let color_end = rest.find(')')?;
+    let color = &rest[..color_end];
+    valid_status_color(color).then_some(())?;
+    Some((
+        json!({ "type": "status", "attrs": { "text": text, "color": color } }),
+        &rest[color_end + 1..],
+    ))
 }
 
-fn is_valid_jira_inline_node(node: &Value) -> bool {
-    let Some(attrs) = node.get("attrs").and_then(Value::as_object) else {
-        return false;
-    };
-    match node.get("type").and_then(Value::as_str) {
-        Some("mention") => has_string_attr(attrs, "id") && has_string_attr(attrs, "text"),
-        Some("inlineCard") => has_string_attr(attrs, "url"),
-        _ => false,
+fn mention_inline_node(source: &str) -> Option<(Value, &str)> {
+    let rest = source.strip_prefix("@mention(")?;
+    let (text, rest) = json_string(rest)?;
+    let rest = rest.strip_prefix(", ")?;
+    let (id, rest) = json_string(rest)?;
+    let rest = rest.strip_prefix(')')?;
+    (!text.is_empty() && !id.is_empty()).then_some(())?;
+    Some((
+        json!({ "type": "mention", "attrs": { "text": text, "id": id } }),
+        rest,
+    ))
+}
+
+fn card_inline_node(source: &str) -> Option<(Value, &str)> {
+    let rest = source.strip_prefix("@card(")?;
+    let end = rest.find(')')?;
+    let url = &rest[..end];
+    valid_card_url(url).then_some(())?;
+    Some((
+        json!({ "type": "inlineCard", "attrs": { "url": url } }),
+        &rest[end + 1..],
+    ))
+}
+
+fn emoji_inline_node(source: &str) -> Option<(Value, &str)> {
+    let name = source.strip_prefix(':')?;
+    let end = name.find(':')?;
+    let short_name = &name[..end];
+    valid_emoji_short_name(short_name).then_some(())?;
+    Some((
+        json!({ "type": "emoji", "attrs": { "shortName": format!(":{short_name}:") } }),
+        &name[end + 1..],
+    ))
+}
+
+fn color_inline_nodes<'a>(
+    source: &'a str,
+    name: &str,
+    mark_type: &str,
+) -> Option<(Vec<Value>, &'a str)> {
+    let rest = source.strip_prefix(&format!("{{{name}:"))?;
+    let color_end = rest.find('}')?;
+    let color = &rest[..color_end];
+    valid_hex_color(color).then_some(())?;
+    let text = &rest[color_end + 1..];
+    let closing = format!("{{/{name}}}");
+    let end = find_unescaped(text, &closing)?;
+    let mut nodes = parse_inline(&text[..end]);
+    add_mark(
+        &mut nodes,
+        json!({ "type": mark_type, "attrs": { "color": color } }),
+    );
+    Some((nodes, &text[end + closing.len()..]))
+}
+
+fn json_string(source: &str) -> Option<(String, &str)> {
+    let mut values = serde_json::Deserializer::from_str(source).into_iter::<String>();
+    let value = values.next()?.ok()?;
+    Some((value, &source[values.byte_offset()..]))
+}
+
+fn add_mark(nodes: &mut [Value], mark: Value) {
+    for node in nodes
+        .iter_mut()
+        .filter(|node| node.get("type") == Some(&json!("text")))
+    {
+        node.as_object_mut()
+            .expect("text node is an object")
+            .entry("marks")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("text marks are an array")
+            .push(mark.clone());
     }
 }
 
@@ -763,6 +1032,204 @@ fn has_string_attr(attrs: &Map<String, Value>, key: &str) -> bool {
         .is_some_and(|value| !value.is_empty())
 }
 
+fn jira_block_start(line: &str) -> Option<&'static str> {
+    match line {
+        "{{jira:task-list}}" => Some("task-list"),
+        "{{jira:decision-list}}" => Some("decision-list"),
+        _ => None,
+    }
+}
+
+fn jira_block_end(line: &str) -> Option<&'static str> {
+    match line {
+        "{{/jira:panel}}" => Some("panel"),
+        "{{/jira:task-list}}" => Some("task-list"),
+        "{{/jira:decision-list}}" => Some("decision-list"),
+        _ => None,
+    }
+}
+
+fn task_list_item(line: &str) -> Option<(&'static str, &str)> {
+    line.strip_prefix("- [ ] ")
+        .map(|text| ("TODO", text))
+        .or_else(|| line.strip_prefix("- [x] ").map(|text| ("DONE", text)))
+}
+
+fn decision_list_item(line: &str) -> Option<&str> {
+    line.strip_prefix("- ")
+}
+
+fn local_id(index: usize) -> String {
+    format!("00000000-0000-4000-8000-{index:012}")
+}
+
+fn assign_list_local_ids(value: &mut Value, next_id: &mut usize) {
+    let Some(node) = value.as_object_mut() else {
+        return;
+    };
+    if matches!(
+        node.get("type").and_then(Value::as_str),
+        Some("taskList" | "taskItem" | "decisionList" | "decisionItem")
+    ) {
+        node.entry("attrs")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .expect("list ADF attrs are an object")
+            .insert("localId".into(), Value::String(local_id(*next_id)));
+        *next_id += 1;
+    }
+    if let Some(children) = node.get_mut("content").and_then(Value::as_array_mut) {
+        for child in children {
+            assign_list_local_ids(child, next_id);
+        }
+    }
+}
+
+fn validate_inline(line: &str, line_number: usize) -> Result<(), String> {
+    let mut remaining = line;
+    while !remaining.is_empty() {
+        if let Some(rest) = remaining.strip_prefix('\\') {
+            let length = rest.chars().next().map(char::len_utf8).unwrap_or(0);
+            remaining = &rest[length..];
+            continue;
+        }
+        if remaining.starts_with("{{jira:") {
+            return Err(format!(
+                "legacy Jira inline tags are not supported on line {line_number}"
+            ));
+        }
+        if remaining.starts_with("{{/jira:") {
+            return Err(format!("invalid Jira block tag on line {line_number}"));
+        }
+        if let Some((_, rest)) = canonical_inline_node(remaining) {
+            remaining = rest;
+            continue;
+        }
+        if let Some((_, rest)) = marked_inline_nodes(remaining, "++", "underline")
+            .or_else(|| color_inline_nodes(remaining, "color", "textColor"))
+        {
+            remaining = rest;
+            continue;
+        }
+        if is_canonical_inline_start(remaining) && !valid_canonical_inline(remaining) {
+            return Err(format!("invalid Jira inline syntax on line {line_number}"));
+        }
+        let length = remaining.chars().next().map(char::len_utf8).unwrap_or(0);
+        remaining = &remaining[length..];
+    }
+    Ok(())
+}
+
+fn valid_canonical_inline(source: &str) -> bool {
+    canonical_inline_node(source).is_some()
+        || marked_inline_nodes(source, "++", "underline").is_some()
+        || color_inline_nodes(source, "color", "textColor").is_some()
+}
+
+fn is_canonical_inline_start(source: &str) -> bool {
+    [
+        "@date(",
+        "@status(",
+        "@mention(",
+        "@card(",
+        "++",
+        "{color:",
+        "{highlight:",
+    ]
+    .into_iter()
+    .any(|prefix| source.starts_with(prefix))
+        || source.starts_with(':')
+            && source
+                .get(1..)
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+fn valid_emoji_short_name(short_name: &str) -> bool {
+    !short_name.is_empty()
+        && short_name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '+' | '-')
+        })
+}
+
+fn valid_status_color(color: &str) -> bool {
+    matches!(
+        color,
+        "green" | "blue" | "red" | "yellow" | "neutral" | "purple"
+    )
+}
+
+fn valid_hex_color(color: &str) -> bool {
+    color.len() == 7
+        && color.starts_with('#')
+        && color[1..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+}
+
+fn valid_card_url(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("http://")
+}
+
+fn date_timestamp(date: &str) -> Option<String> {
+    let (year, month, day) = parse_date(date)?;
+    let days = days_since_unix_epoch(year, month, day);
+    Some((days * 86_400_000).to_string())
+}
+
+fn date_from_timestamp(timestamp: &str) -> Option<String> {
+    let milliseconds = timestamp.parse::<i64>().ok()?;
+    (milliseconds % 86_400_000 == 0).then_some(())?;
+    let (year, month, day) = civil_from_days(milliseconds / 86_400_000);
+    Some(format!("{year:04}-{month:02}-{day:02}"))
+}
+
+fn parse_date(date: &str) -> Option<(i64, u32, u32)> {
+    let [year, month, day] = date.split('-').collect::<Vec<_>>().try_into().ok()?;
+    (year.len() == 4 && month.len() == 2 && day.len() == 2).then_some(())?;
+    let year = year.parse().ok()?;
+    let month = month.parse().ok()?;
+    let day = day.parse().ok()?;
+    (1..=12).contains(&month).then_some(())?;
+    (1..=days_in_month(year, month))
+        .contains(&day)
+        .then_some(())?;
+    Some((year, month, day))
+}
+
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn days_since_unix_epoch(year: i64, month: u32, day: u32) -> i64 {
+    let year = year - (month <= 2) as i64;
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let day_of_year =
+        (153 * (month as i64 + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i64 - 1;
+    era * 146_097 + year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year - 719_468
+}
+
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = month_index + if month_index < 10 { 3 } else { -9 };
+    (year + (month <= 2) as i64, month as u32, day as u32)
+}
+
 fn json_attrs(source: &str) -> Option<(Map<String, Value>, &str)> {
     let mut values = serde_json::Deserializer::from_str(source).into_iter::<Value>();
     let attrs = values.next()?.ok()?.as_object()?.clone();
@@ -770,10 +1237,52 @@ fn json_attrs(source: &str) -> Option<(Map<String, Value>, &str)> {
 }
 
 fn next_inline_marker(source: &str) -> Option<usize> {
-    ["{{", "**", "~~", "`", "*", "[", "\n"]
+    [
+        "{{",
+        "**",
+        "~~",
+        "++",
+        "`",
+        "*",
+        "[",
+        "@date(",
+        "@status(",
+        "@mention(",
+        "@card(",
+        ":",
+        "{color:",
+        "{highlight:",
+        "\n",
+    ]
+    .into_iter()
+    .filter_map(|marker| find_unescaped(source, marker))
+    .min()
+}
+
+fn escape_canonical_literals(text: &str) -> String {
+    let mut output = String::new();
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        if [
+            "@date(",
+            "@status(",
+            "@mention(",
+            "@card(",
+            "{color:",
+            "{highlight:",
+        ]
         .into_iter()
-        .filter_map(|marker| find_unescaped(source, marker))
-        .min()
+        .any(|prefix| remaining.starts_with(prefix))
+            || remaining.starts_with("++")
+            || emoji_inline_node(remaining).is_some()
+        {
+            output.push('\\');
+        }
+        let character = remaining.chars().next().expect("remaining is not empty");
+        output.push(character);
+        remaining = &remaining[character.len_utf8()..];
+    }
+    output
 }
 
 fn push_text(nodes: &mut Vec<Value>, text: String, marks: Vec<Value>) {
@@ -839,12 +1348,29 @@ fn normalize_adf_node(value: &mut Value) {
     let Some(node) = value.as_object_mut() else {
         return;
     };
-    if node
-        .get("attrs")
-        .and_then(Value::as_object)
-        .is_some_and(Map::is_empty)
-    {
-        node.remove("attrs");
+    let is_mention = node_type(node) == Some("mention");
+    let is_decision_item = node_type(node) == Some("decisionItem");
+    if let Some(attrs) = node.get_mut("attrs").and_then(Value::as_object_mut) {
+        attrs.remove("localId");
+        if is_mention {
+            attrs.remove("accessLevel");
+        }
+        if is_decision_item {
+            attrs.remove("state");
+        }
+        if attrs.is_empty() {
+            node.remove("attrs");
+        }
+    }
+    if let Some(marks) = node.get_mut("marks").and_then(Value::as_array_mut) {
+        for mark in marks.iter_mut().filter_map(Value::as_object_mut) {
+            if let Some(attrs) = mark.get_mut("attrs").and_then(Value::as_object_mut) {
+                attrs.remove("localId");
+                if attrs.is_empty() {
+                    mark.remove("attrs");
+                }
+            }
+        }
     }
     let Some(children) = node.get_mut("content").and_then(Value::as_array_mut) else {
         return;
@@ -871,6 +1397,123 @@ fn normalize_adf_node(value: &mut Value) {
         }
     }
     *children = normalized;
+}
+
+fn valid_mention(node: &Map<String, Value>) -> bool {
+    let Some(attrs) = node.get("attrs").and_then(Value::as_object) else {
+        return false;
+    };
+    has_string_attr(attrs, "id")
+        && has_string_attr(attrs, "text")
+        && attrs
+            .keys()
+            .all(|key| matches!(key.as_str(), "id" | "text" | "accessLevel" | "localId"))
+}
+
+fn valid_emoji(node: &Map<String, Value>) -> bool {
+    let Some(attrs) = node.get("attrs").and_then(Value::as_object) else {
+        return false;
+    };
+    attrs
+        .get("shortName")
+        .and_then(Value::as_str)
+        .and_then(|short_name| {
+            short_name
+                .strip_prefix(':')
+                .and_then(|name| name.strip_suffix(':'))
+        })
+        .is_some_and(valid_emoji_short_name)
+        && attrs
+            .keys()
+            .all(|key| matches!(key.as_str(), "shortName" | "localId"))
+}
+
+fn valid_date(node: &Map<String, Value>) -> bool {
+    let Some(attrs) = node.get("attrs").and_then(Value::as_object) else {
+        return false;
+    };
+    attrs
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(date_from_timestamp)
+        .is_some()
+        && attrs
+            .keys()
+            .all(|key| matches!(key.as_str(), "timestamp" | "localId"))
+}
+
+fn valid_status(node: &Map<String, Value>) -> bool {
+    let Some(attrs) = node.get("attrs").and_then(Value::as_object) else {
+        return false;
+    };
+    has_string_attr(attrs, "text")
+        && attrs
+            .get("color")
+            .and_then(Value::as_str)
+            .is_some_and(valid_status_color)
+        && attrs
+            .keys()
+            .all(|key| matches!(key.as_str(), "text" | "color" | "localId"))
+}
+
+fn valid_card(node: &Map<String, Value>) -> bool {
+    let Some(attrs) = node.get("attrs").and_then(Value::as_object) else {
+        return false;
+    };
+    attrs
+        .get("url")
+        .and_then(Value::as_str)
+        .is_some_and(valid_card_url)
+        && attrs
+            .keys()
+            .all(|key| matches!(key.as_str(), "url" | "localId"))
+}
+
+fn valid_color_mark(mark: &Map<String, Value>) -> bool {
+    let Some(attrs) = mark.get("attrs").and_then(Value::as_object) else {
+        return false;
+    };
+    attrs
+        .get("color")
+        .and_then(Value::as_str)
+        .is_some_and(valid_hex_color)
+        && attrs.keys().all(|key| key == "color")
+}
+
+fn valid_task_list(node: &Map<String, Value>) -> bool {
+    attrs_are(node, &["localId"])
+        && content(node).iter().all(|item| {
+            item.as_object().is_some_and(|item| {
+                node_type(item) == Some("taskItem")
+                    && item
+                        .get("attrs")
+                        .and_then(|attrs| attrs.get("state"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|state| matches!(state, "TODO" | "DONE"))
+                    && attrs_are(item, &["state", "localId"])
+            })
+        })
+}
+
+fn valid_decision_list(node: &Map<String, Value>) -> bool {
+    attrs_are(node, &["localId"])
+        && content(node).iter().all(|item| {
+            item.as_object().is_some_and(|item| {
+                node_type(item) == Some("decisionItem")
+                    && item
+                        .get("attrs")
+                        .and_then(|attrs| attrs.get("state"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|state| matches!(state, "DECIDED" | "UNDECIDED"))
+                    && attrs_are(item, &["state", "localId"])
+            })
+        })
+}
+
+fn attrs_are(node: &Map<String, Value>, allowed: &[&str]) -> bool {
+    node.get("attrs")
+        .and_then(Value::as_object)
+        .is_none_or(|attrs| attrs.keys().all(|key| allowed.contains(&key.as_str())))
 }
 
 fn node_type(node: &Map<String, Value>) -> Option<&str> {

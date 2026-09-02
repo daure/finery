@@ -204,7 +204,7 @@ impl ComposerKeyBindings {
             create_submit: binding(COMPOSER_CREATE_SUBMIT_KEY_SETTING, "ctrl+enter")?,
             create_confirm: binding(COMPOSER_CREATE_CONFIRM_KEY_SETTING, "o")?,
             dialog_cancel: binding(COMPOSER_DIALOG_CANCEL_KEY_SETTING, "c")?,
-            submit_confirm: binding(COMPOSER_SUBMIT_CONFIRM_KEY_SETTING, "s")?,
+            submit_confirm: binding(COMPOSER_SUBMIT_CONFIRM_KEY_SETTING, "m")?,
             reparent_confirm: binding(COMPOSER_REPARENT_CONFIRM_KEY_SETTING, "m")?,
             ticket_action: binding(COMPOSER_TICKET_ACTION_KEY_SETTING, "ctrl+x")?,
             restore_reset: binding(COMPOSER_RESTORE_RESET_KEY_SETTING, "ctrl+r")?,

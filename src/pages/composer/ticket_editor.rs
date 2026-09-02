@@ -576,9 +576,10 @@ impl TicketEditor {
     pub(super) fn sync(&mut self) {
         let (breadcrumb, rows, selected, selected_for_submission, is_open) = {
             let state = self.state.borrow();
-            let breadcrumb = state
-                .active_set()
-                .map_or_else(|| "Change sets".into(), |set| set.name.clone());
+            let breadcrumb = state.active_set().map_or_else(
+                || "Change sets".into(),
+                |set| format!("{} • {}", set.id, set.name),
+            );
             let selected_for_submission = state
                 .active_set()
                 .into_iter()
@@ -682,7 +683,6 @@ impl TicketEditor {
             .is_open()
     }
 
-    #[cfg(test)]
     pub(super) fn create_dialog_is_open(&self) -> bool {
         self.view.base().base().base().is_active()
     }
@@ -1122,10 +1122,25 @@ impl TicketEditor {
         let confirm_submit = Rc::clone(&self.submit_confirmation_requested);
         let cancel_submit = Rc::clone(&self.ticket_dialog_close_requested);
         let keys = self.composer_keys();
-        let content = [format!(
-            "Commit {} selected changes to Jira?",
-            changes.len()
-        )];
+        let content = {
+            let state = self.state.borrow();
+            let mut content = vec![format!(
+                "Commit {} selected changes to Jira?",
+                changes.len()
+            )];
+            for change in &changes {
+                let Some(ticket) = state.changes_for_change(change) else {
+                    continue;
+                };
+                if let Some(warning) = ticket.description_overwrite_warning.as_deref() {
+                    content.push(format!(
+                        "Warning — {}: Jira description contains {warning}.",
+                        ticket.key
+                    ));
+                }
+            }
+            content
+        };
         let dialog = self.view.base_mut().layer_mut();
         dialog.set_top_left("Commit changes");
         dialog.set_actions([

@@ -407,7 +407,7 @@ fn created_ticket_recovery_keeps_the_created_key_when_refresh_fails() {
 }
 
 #[test]
-fn jira_rejects_description_overwrites_that_cannot_round_trip() {
+fn jira_description_overwrite_safety_allows_supported_marks_and_guards_media() {
     let unsupported_mark = to_ticket(JiraIssue {
         key: "FIN-2".into(),
         fields: json!({
@@ -428,15 +428,16 @@ fn jira_rejects_description_overwrites_that_cannot_round_trip() {
             }
         }),
     });
-    assert!(!unsupported_mark.description_safe_to_overwrite);
+    assert!(unsupported_mark.description_safe_to_overwrite);
     assert!(!unsupported_content.description_safe_to_overwrite);
 
     let mut edited = unsupported_mark.clone();
     edited.description.push_str(" changed");
     assert!(
         update_payload(&unsupported_mark, &edited, None, false)
-            .unwrap_err()
-            .contains("underlined text")
+            .unwrap()
+            .pointer("/fields/description")
+            .is_some()
     );
     assert!(
         update_payload(&unsupported_mark, &edited, None, true)
@@ -516,15 +517,14 @@ fn commit_orders_local_parents_before_children_and_blocks_missing_parent_before_
 fn invalid_description_in_any_ticket_blocks_the_whole_batch_before_jira_is_configured() {
     let valid = added("NEW-1", TicketKind::Task, None);
     let mut invalid = added("NEW-2", TicketKind::Task, None);
-    invalid.updated.as_mut().unwrap().description =
-        "{{jira:mention {\"id\":\"account-1\",\"text\":\"@Ada\"}}}".into();
+    invalid.updated.as_mut().unwrap().description = "@mention(\"@Ada\", \"account-1\"".into();
 
     let blocked = match submit_changes(&AppSettings::default(), &[valid, invalid], false) {
         SubmitBatchOutcome::PreflightError(error) => error,
         _ => panic!("invalid description must block the whole batch"),
     };
 
-    assert!(blocked.contains("NEW-2: invalid Jira inline tag on line 1"));
+    assert!(blocked.contains("NEW-2: invalid Jira inline syntax on line 1"));
 }
 
 #[test]
@@ -545,7 +545,7 @@ fn invalid_descriptions_report_every_selected_ticket_before_jira_is_configured()
         _ => panic!("invalid descriptions must block commit"),
     };
 
-    assert!(blocked.contains("NEW-1: invalid Jira inline tag on line 1"));
+    assert!(blocked.contains("NEW-1: legacy Jira inline tags are not supported on line 1"));
     assert!(blocked.contains("NEW-2: invalid Jira panel tag on line 1"));
 }
 

@@ -793,7 +793,7 @@ fn submit_requires_confirmation() {
 
     let dialog_text = render_text(&mut page);
     assert!(dialog_text.contains("Commit changes"));
-    assert!(dialog_text.contains("Commit (s)"));
+    assert!(dialog_text.contains("Commit (m)"));
     assert!(dialog_text.contains("Cancel (c)"));
 }
 

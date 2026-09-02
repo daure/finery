@@ -890,6 +890,15 @@ impl AppService {
         jira::assignees(&settings, project_key, query)
     }
 
+    pub(crate) fn search_jira_users(&self, query: &str) -> Result<Vec<jira::JiraAssignee>, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::users(&settings, query)
+    }
+
     pub(crate) fn take_errors(&self) -> Vec<String> {
         self.errors
             .lock()

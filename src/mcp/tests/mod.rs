@@ -40,8 +40,10 @@ fn composer_calls_complete_from_async_runtime() {
 #[test]
 fn change_set_guidance_includes_canonical_jira_description_tags() {
     assert!(CHANGE_SET_GUIDANCE.contains("{{jira:panel"));
-    assert!(CHANGE_SET_GUIDANCE.contains("{{jira:mention"));
-    assert!(CHANGE_SET_GUIDANCE.contains("{{jira:inline-card"));
+    assert!(CHANGE_SET_GUIDANCE.contains("@mention("));
+    assert!(CHANGE_SET_GUIDANCE.contains("@card("));
+    assert!(CHANGE_SET_GUIDANCE.contains("@date("));
+    assert!(CHANGE_SET_GUIDANCE.contains("{{jira:task-list"));
     assert!(CHANGE_SET_GUIDANCE.contains("accept_unsafe_description_overwrite"));
 }
 

@@ -1271,6 +1271,25 @@ pub(crate) fn assignees(
     })
 }
 
+pub(crate) fn users(settings: &AppSettings, query: &str) -> Result<Vec<JiraAssignee>, String> {
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let response = client
+        .get(format!("{base_url}/rest/api/3/user/search"))
+        .basic_auth(email, Some(token))
+        .query(&[("query", query), ("maxResults", "20")])
+        .send()
+        .map_err(|error| error.to_string())?;
+    response_json::<Vec<JiraUser>>(response).map(|users| {
+        users
+            .into_iter()
+            .map(|user| JiraAssignee {
+                account_id: user.account_id,
+                display_name: user.display_name,
+            })
+            .collect()
+    })
+}
+
 fn create_issue_types(
     client: &Client,
     base_url: &str,

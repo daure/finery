@@ -495,8 +495,8 @@ impl ComposerState {
 
     pub(crate) fn selected_existing_ticket_key(&self) -> Option<String> {
         let change = self.selected_change()?;
-        let ticket = change.original.as_ref()?;
-        (change.kind != ChangeKind::Added).then(|| ticket.key.clone())
+        let ticket = change.updated.as_ref().or(change.original.as_ref())?;
+        (!ticket.key.starts_with("NEW-")).then(|| ticket.key.clone())
     }
 
     pub(crate) fn selected_source(&self) -> Option<&Ticket> {
