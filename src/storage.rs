@@ -42,13 +42,13 @@ pub(crate) struct Storage {
     dialect: SqlDialect,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct VersionedChangeSet {
     pub change_set: ChangeSet,
     pub revision: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct VersionedChangeSetCatalog {
     pub change_sets: Vec<VersionedChangeSet>,
     pub catalog_revision: i64,

@@ -15,14 +15,30 @@ use tuicore::{
 
 use crate::{
     app_settings::{ComposerKeyBindings, ComposerSequenceBinding},
-    jira::{JiraAssignee, JiraFieldOptions, JiraOption},
+    jira::{JiraAssignee, JiraFieldOptions, JiraFixVersion, JiraOption},
     service::AppService,
     store::composer::{ComposerAction, ComposerState, PlacementTarget, Ticket, TicketKind},
 };
 
+use super::fields::{BoundLabelsInput, BoundTicketPropertyInput, TicketPropertyText};
+
 type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
 type PropertyDropdown = Dropdown<JiraOption, String>;
+type FixVersionsDropdown = Dropdown<JiraFixVersion, String>;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
+
+fn jira_project_key(ticket: &Ticket) -> String {
+    (!ticket.key.starts_with("NEW-"))
+        .then(|| {
+            ticket
+                .key
+                .split_once('-')
+                .map(|(project_key, _)| project_key)
+        })
+        .flatten()
+        .unwrap_or(ticket.project_key.as_str())
+        .to_owned()
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PropertyKind {
@@ -110,11 +126,41 @@ impl PropertyFields {
                 "assignee",
                 BoundPropertyDropdown::new(
                     Rc::clone(&state),
-                    pending,
+                    Rc::clone(&pending),
                     Rc::clone(&shared),
                     service.clone(),
                     PropertyKind::Assignee,
                     keys.assignee.clone(),
+                ),
+                FlexItem::fixed(3),
+            )
+            .child(
+                "story-points",
+                BoundTicketPropertyInput::new(
+                    Rc::clone(&state),
+                    Rc::clone(&pending),
+                    TicketPropertyText::StoryPoints,
+                    keys.story_points.clone(),
+                ),
+                FlexItem::fixed(3),
+            )
+            .child(
+                "fix-versions",
+                BoundFixVersionsDropdown::new(
+                    Rc::clone(&state),
+                    Rc::clone(&pending),
+                    service.clone(),
+                    keys.fix_versions.clone(),
+                ),
+                FlexItem::fixed(3),
+            )
+            .child(
+                "labels",
+                BoundLabelsInput::new(
+                    Rc::clone(&state),
+                    Rc::clone(&pending),
+                    service.clone(),
+                    keys.labels.clone(),
                 ),
                 FlexItem::fixed(3),
             );
@@ -184,6 +230,183 @@ impl PropertyFields {
             changed = true;
         }
         changed
+    }
+}
+
+struct BoundFixVersionsDropdown {
+    state: Rc<RefCell<ComposerState>>,
+    service: AppService,
+    control: FixVersionsDropdown,
+    sender: Sender<(u64, Result<Vec<JiraFixVersion>, String>)>,
+    receiver: Receiver<(u64, Result<Vec<JiraFixVersion>, String>)>,
+    generation: u64,
+    ticket_id: Option<String>,
+    versions: Vec<JiraFixVersion>,
+    selected: Vec<String>,
+}
+
+impl BoundFixVersionsDropdown {
+    fn new(
+        state: Rc<RefCell<ComposerState>>,
+        pending: PendingActions,
+        service: AppService,
+        hotkey: ComposerSequenceBinding,
+    ) -> Self {
+        let sink = Rc::clone(&pending);
+        let control = Dropdown::multi(
+            [],
+            |version: &JiraFixVersion| version.name.clone(),
+            |version| version.name.clone(),
+        )
+        .variant(DropdownVariant::Bordered)
+        .label("Fix versions")
+        .hotkey(hotkey.sequence())
+        .on_select(move |names| {
+            sink.borrow_mut()
+                .push(ComposerAction::UpdateFixVersions(names));
+        });
+        let (sender, receiver) = mpsc::channel();
+        Self {
+            state,
+            service,
+            control,
+            sender,
+            receiver,
+            generation: 0,
+            ticket_id: None,
+            versions: Vec::new(),
+            selected: Vec::new(),
+        }
+    }
+
+    fn sync(&mut self) -> bool {
+        let (ticket_id, project_key, selected, editable, remote_queries_allowed) = {
+            let state = self.state.borrow();
+            let ticket = state.selected_changes();
+            (
+                ticket.map(|ticket| ticket.key.clone()),
+                ticket.map(jira_project_key),
+                ticket
+                    .map(|ticket| ticket.fix_versions.clone())
+                    .unwrap_or_default(),
+                state.selected_is_editable(),
+                state.remote_queries_allowed(),
+            )
+        };
+        let mut changed = false;
+        if self.ticket_id != ticket_id {
+            self.ticket_id = ticket_id;
+            self.generation = self.generation.saturating_add(1);
+            self.versions.clear();
+            if remote_queries_allowed {
+                if let Some(project_key) = project_key {
+                    self.fetch_versions(project_key);
+                }
+            }
+            changed = true;
+        }
+        if self.control.is_disabled() == editable {
+            self.control.set_disabled(!editable);
+            changed = true;
+        }
+        if self.selected != selected {
+            self.control.set_selected(selected.clone());
+            self.selected = selected;
+            changed = true;
+        }
+        changed
+    }
+
+    fn fetch_versions(&self, project_key: String) {
+        let generation = self.generation;
+        let sender = self.sender.clone();
+        let service = self.service.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name(format!("finery-jira-fix-versions-{generation}"))
+            .spawn(move || {
+                let _ = sender.send((
+                    generation,
+                    service.search_jira_fix_versions(&project_key, ""),
+                ));
+            })
+        {
+            self.service
+                .report_error(format!("could not fetch Jira fix versions: {error}"));
+        }
+    }
+
+    fn drain_versions(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok((generation, result)) = self.receiver.try_recv() {
+            if generation != self.generation {
+                continue;
+            }
+            match result {
+                Ok(versions) => {
+                    self.versions = versions;
+                    self.control.set_rows(self.versions.clone());
+                    self.control.set_selected(self.selected.clone());
+                    changed = true;
+                }
+                Err(error) => self
+                    .service
+                    .report_error(format!("Jira fix-version lookup failed: {error}")),
+            }
+        }
+        changed
+    }
+}
+
+impl TuiNode for BoundFixVersionsDropdown {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        <FixVersionsDropdown as TuiNode<()>>::measure(&self.control, proposal)
+    }
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.sync();
+        <FixVersionsDropdown as TuiNode<()>>::layout(&mut self.control, area, ctx)
+    }
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        self.control.render(frame, area, ctx);
+    }
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        self.control.event(event, ctx)
+    }
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> EventOutcome {
+        self.control.dispatch_event(route, event, ctx)
+    }
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        let changed = self.sync() || self.drain_versions();
+        <FixVersionsDropdown as TuiNode<()>>::tick(&mut self.control, dt, settings).merge(
+            if changed {
+                TickResult::CHANGED
+            } else {
+                TickResult::IDLE
+            },
+        )
+    }
+    fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.control.focus(target, focused, ctx);
+    }
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.control.dispatch_focus(target, focused, ctx);
+    }
+    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.control.init(ctx);
+    }
+    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.control.mount(ctx);
+        ctx.request_tick();
+    }
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.control.unmount(ctx);
+    }
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.control.destroy(ctx);
     }
 }
 
@@ -679,7 +902,7 @@ impl BoundPropertyDropdown {
         if let Err(error) = std::thread::Builder::new()
             .name(format!("finery-jira-users-{generation}"))
             .spawn(move || {
-                let result = service.search_jira_assignees(&ticket.project_key, &query);
+                let result = service.search_jira_assignees(&jira_project_key(&ticket), &query);
                 let _ = sender.send((generation, result));
             })
         {

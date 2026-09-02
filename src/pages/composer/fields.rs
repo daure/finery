@@ -1,6 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
+    sync::mpsc::{self, Receiver, Sender},
     time::Duration,
 };
 
@@ -8,20 +9,389 @@ use ratatui::{Frame, layout::Rect};
 use tuicore::{
     AnimationSettings, BorderKind, DiffStyle, DiffViewer, Dropdown, DropdownLabelPosition,
     DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget,
-    HotkeyEvent, InputChrome, Language, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
-    LifecycleCtx, Panel, PanelHost, RenderCtx, TextInput, TextareaInput, TickResult, Toggle,
-    TuiEvent, TuiNode,
+    FocusRequest, HotkeyEvent, InputChrome, Language, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
+    LifecycleCtx, Panel, PanelHost, RenderCtx, TagInput, TagInputEvent, TextInput, TextareaInput,
+    TickResult, Toggle, TuiEvent, TuiNode,
 };
 
 use crate::{
-    app_settings::{ComposerKeyBinding, ComposerKeyBindings},
-    store::composer::{ComposerAction, ComposerState, ComposerViewMode},
+    app_settings::{ComposerKeyBinding, ComposerKeyBindings, ComposerSequenceBinding},
+    service::AppService,
+    store::composer::{ComposerAction, ComposerState, ComposerViewMode, Ticket},
 };
 
 type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
 
+fn is_unfocus_event(event: &TuiEvent) -> bool {
+    matches!(
+        event,
+        TuiEvent::Key(key)
+            if matches!(key.code, tuicore::Key::Esc)
+                || (key.modifiers == tuicore::KeyModifiers::CONTROL
+                    && matches!(key.code, tuicore::Key::Char('[')))
+    )
+}
+
 pub(super) type PendingDescriptionActions = Rc<RefCell<Vec<DescriptionAction>>>;
 pub(super) type DescriptionEditRequest = Rc<Cell<bool>>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum TicketPropertyText {
+    StoryPoints,
+}
+
+pub(super) struct BoundTicketPropertyInput {
+    state: Rc<RefCell<ComposerState>>,
+    kind: TicketPropertyText,
+    input: TextInput,
+}
+
+impl BoundTicketPropertyInput {
+    pub(super) fn new(
+        state: Rc<RefCell<ComposerState>>,
+        pending: PendingActions,
+        kind: TicketPropertyText,
+        hotkey: ComposerSequenceBinding,
+    ) -> Self {
+        let input = TextInput::new()
+            .panel(kind.label())
+            .placeholder("(none)")
+            .hotkey(hotkey.sequence())
+            .on_edit_end(move |value| {
+                if let Some(action) = kind.action(value) {
+                    pending.borrow_mut().push(action);
+                }
+            });
+        let input = if kind == TicketPropertyText::StoryPoints {
+            input.numbers_only(true)
+        } else {
+            input
+        };
+        Self { state, kind, input }
+    }
+
+    fn sync(&mut self) -> bool {
+        let state = self.state.borrow();
+        let value = state
+            .selected_ticket()
+            .map(|ticket| self.kind.value(ticket))
+            .unwrap_or_default();
+        let editable = state.selected_is_editable();
+        let value_changed =
+            (!self.input.insert_mode() || !editable) && self.input.current_value() != value;
+        if value_changed {
+            self.input.set_value(value);
+            self.input.move_cursor_to_end();
+        }
+        let disabled_changed = editable == self.input.is_disabled();
+        self.input.set_disabled(!editable);
+        value_changed || disabled_changed
+    }
+}
+
+impl TicketPropertyText {
+    fn label(self) -> &'static str {
+        match self {
+            Self::StoryPoints => "Story points",
+        }
+    }
+
+    fn value(self, ticket: &Ticket) -> String {
+        match self {
+            Self::StoryPoints => ticket
+                .story_points
+                .map_or_else(String::new, |points| points.to_string()),
+        }
+    }
+
+    fn action(self, value: String) -> Option<ComposerAction> {
+        match self {
+            Self::StoryPoints => {
+                let value = value.trim();
+                if value.is_empty() {
+                    Some(ComposerAction::UpdateStoryPoints(None))
+                } else {
+                    value
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|points| points.is_finite() && *points >= 0.0)
+                        .map(|points| ComposerAction::UpdateStoryPoints(Some(points)))
+                }
+            }
+        }
+    }
+}
+
+pub(super) struct BoundLabelsInput {
+    state: Rc<RefCell<ComposerState>>,
+    service: AppService,
+    pending: PendingActions,
+    hotkey: ComposerSequenceBinding,
+    input: TagInput,
+    label_sender: Sender<(u64, Result<Vec<String>, String>)>,
+    label_receiver: Receiver<(u64, Result<Vec<String>, String>)>,
+    labels_generation: u64,
+    labels_ticket: Option<String>,
+    available_labels: Vec<String>,
+    synced_labels: Vec<String>,
+    editable: bool,
+}
+
+impl BoundLabelsInput {
+    pub(super) fn new(
+        state: Rc<RefCell<ComposerState>>,
+        pending: PendingActions,
+        service: AppService,
+        hotkey: ComposerSequenceBinding,
+    ) -> Self {
+        let (label_sender, label_receiver) = mpsc::channel();
+        Self {
+            state,
+            service,
+            pending,
+            input: labels_input(&hotkey, &[], Vec::new()),
+            hotkey,
+            label_sender,
+            label_receiver,
+            labels_generation: 0,
+            labels_ticket: None,
+            available_labels: Vec::new(),
+            synced_labels: Vec::new(),
+            editable: false,
+        }
+    }
+
+    fn sync(&mut self) -> bool {
+        let state = self.state.borrow();
+        let labels = state
+            .selected_ticket()
+            .map(|ticket| ticket.labels.clone())
+            .unwrap_or_default();
+        let editable = state.selected_is_editable();
+        if self.synced_labels == labels && self.editable == editable {
+            return false;
+        }
+        self.input = labels_input(&self.hotkey, &self.available_labels, labels.clone());
+        self.synced_labels = labels;
+        self.editable = editable;
+        true
+    }
+
+    fn drain_events(&mut self) {
+        let changed = self.input.take_events().into_iter().any(|event| {
+            matches!(
+                event,
+                TagInputEvent::AddedExisting { .. }
+                    | TagInputEvent::CreateRequested { .. }
+                    | TagInputEvent::RemovedExisting { .. }
+                    | TagInputEvent::RemovedCustom { .. }
+            )
+        });
+        if changed {
+            self.pending.borrow_mut().push(ComposerAction::UpdateLabels(
+                self.input
+                    .selected_tags()
+                    .iter()
+                    .map(|tag| tag.label().to_owned())
+                    .collect(),
+            ));
+        }
+    }
+
+    fn sync_available_labels(&mut self) -> bool {
+        let ticket = self.state.borrow().selected_changes().cloned();
+        let ticket_id = ticket.as_ref().map(|ticket| ticket.key.clone());
+        if self.labels_ticket != ticket_id {
+            self.labels_generation = self.labels_generation.saturating_add(1);
+            self.labels_ticket = ticket_id;
+            self.available_labels.clear();
+            if self.state.borrow().remote_queries_allowed() && ticket.is_some() {
+                self.fetch_labels();
+            }
+        }
+        let mut changed = false;
+        while let Ok((generation, result)) = self.label_receiver.try_recv() {
+            if generation != self.labels_generation {
+                continue;
+            }
+            match result {
+                Ok(labels) => {
+                    self.available_labels = labels;
+                    changed = true;
+                }
+                Err(error) => self
+                    .service
+                    .report_error(format!("Jira label lookup failed: {error}")),
+            }
+        }
+        changed
+    }
+
+    fn fetch_labels(&self) {
+        let generation = self.labels_generation;
+        let sender = self.label_sender.clone();
+        let service = self.service.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name(format!("finery-jira-labels-{generation}"))
+            .spawn(move || {
+                let _ = sender.send((generation, service.search_jira_labels("")));
+            })
+        {
+            self.service
+                .report_error(format!("could not fetch Jira labels: {error}"));
+        }
+    }
+}
+
+fn labels_input(
+    hotkey: &ComposerSequenceBinding,
+    options: &[String],
+    labels: Vec<String>,
+) -> TagInput {
+    TagInput::new(options.iter().cloned())
+        .selected(labels)
+        .placeholder("Select...")
+        .hotkey(hotkey.sequence())
+        .panel("Labels")
+}
+
+impl TuiNode for BoundLabelsInput {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        <TagInput as TuiNode<()>>::measure(&self.input, proposal)
+    }
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.sync();
+        <TagInput as TuiNode<()>>::layout(&mut self.input, area, ctx)
+    }
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        self.input.render(frame, area, ctx);
+    }
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        if !self.editable {
+            return EventOutcome::Ignored;
+        }
+        let was_active = self.input.is_active();
+        let outcome = self.input.event(event, ctx);
+        if was_active && is_unfocus_event(event) {
+            ctx.stop_propagation();
+        }
+        self.drain_events();
+        outcome
+    }
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> EventOutcome {
+        if !self.editable {
+            return EventOutcome::Ignored;
+        }
+        let was_active = self.input.is_active();
+        let outcome = self.input.dispatch_event(route, event, ctx);
+        if was_active && is_unfocus_event(event) {
+            ctx.stop_propagation();
+        }
+        self.drain_events();
+        outcome
+    }
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        let options_changed = self.sync_available_labels();
+        if options_changed {
+            let labels = self
+                .state
+                .borrow()
+                .selected_ticket()
+                .map(|ticket| ticket.labels.clone())
+                .unwrap_or_default();
+            self.input = labels_input(&self.hotkey, &self.available_labels, labels);
+        }
+        <TagInput as TuiNode<()>>::tick(&mut self.input, dt, settings).merge(
+            if self.sync() || options_changed {
+                TickResult::CHANGED
+            } else {
+                TickResult::IDLE
+            },
+        )
+    }
+    fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.input.focus(target, focused, ctx);
+    }
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.input.dispatch_focus(target, focused, ctx);
+    }
+    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.init(ctx);
+    }
+    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.mount(ctx);
+    }
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.unmount(ctx);
+    }
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.destroy(ctx);
+    }
+}
+
+impl TuiNode for BoundTicketPropertyInput {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        self.input.measure(proposal)
+    }
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.sync();
+        self.input.layout(area, ctx)
+    }
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, _ctx: &mut RenderCtx<'a>) {
+        self.input.render(frame, area);
+    }
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        let was_inserting = self.input.insert_mode();
+        let outcome = self.input.event(event, ctx);
+        if was_inserting && is_unfocus_event(event) {
+            ctx.stop_propagation();
+        }
+        outcome
+    }
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> EventOutcome {
+        let was_inserting = self.input.insert_mode();
+        let outcome = self.input.dispatch_event(route, event, ctx);
+        if was_inserting && is_unfocus_event(event) {
+            ctx.stop_propagation();
+        }
+        outcome
+    }
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.input.tick(dt, settings).merge(if self.sync() {
+            TickResult::CHANGED
+        } else {
+            TickResult::IDLE
+        })
+    }
+    fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.input.focus(target, focused, ctx);
+    }
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.input.dispatch_focus(target, focused, ctx);
+    }
+    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.init(ctx);
+    }
+    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.mount(ctx);
+    }
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.unmount(ctx);
+    }
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.destroy(ctx);
+    }
+}
 
 pub(super) enum DescriptionAction {
     ShowChanges,
@@ -196,7 +566,12 @@ impl TuiNode for BoundTextField {
         if self.shows_diff() {
             self.diff.event(event, ctx)
         } else {
-            self.input.event(event, ctx)
+            let was_inserting = self.input.insert_mode();
+            let outcome = self.input.event(event, ctx);
+            if was_inserting && is_unfocus_event(event) {
+                ctx.focus(FocusRequest::Target(FocusId::new("data-view")));
+            }
+            outcome
         }
     }
     fn dispatch_event(
@@ -210,7 +585,12 @@ impl TuiNode for BoundTextField {
         } else if route.path.is_empty() {
             self.event(event, ctx)
         } else {
-            EventOutcome::Ignored
+            let was_inserting = self.input.insert_mode();
+            let outcome = self.input.dispatch_event(route, event, ctx);
+            if was_inserting && is_unfocus_event(event) {
+                ctx.focus(FocusRequest::Target(FocusId::new("data-view")));
+            }
+            outcome
         }
     }
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
@@ -476,22 +856,34 @@ pub(super) struct BoundDescriptionDiffStyle {
 }
 
 impl BoundDescriptionDiffStyle {
-    pub(super) fn new(state: Rc<RefCell<ComposerState>>, pending: PendingActions) -> Self {
+    pub(super) fn new(
+        state: Rc<RefCell<ComposerState>>,
+        pending: PendingActions,
+        hotkey: ComposerKeyBinding,
+    ) -> Self {
         let sink = Rc::clone(&pending);
-        let toggle = Toggle::new("Side-by-side diff").on_change(move |value| {
-            sink.borrow_mut()
-                .push(ComposerAction::SetDescriptionDiffSideBySide(value));
-        });
+        let toggle = Toggle::new("Inline")
+            .hotkey(hotkey.sequence())
+            .preserve_focus_on_hotkey(true)
+            .on_change(move |value| {
+                sink.borrow_mut()
+                    .push(ComposerAction::SetDescriptionDiffSideBySide(!value));
+            });
         let mut bound = Self { state, toggle };
         bound.sync();
         bound
     }
 
     fn sync(&mut self) -> bool {
-        let value = self.state.borrow().description_diff_side_by_side;
-        let changed = self.toggle.is_checked() != value;
-        if changed {
+        let state = self.state.borrow();
+        let value = !state.description_diff_side_by_side;
+        let disabled = state.view_mode != ComposerViewMode::Diff;
+        let changed = self.toggle.is_checked() != value || self.toggle.is_disabled() != disabled;
+        if self.toggle.is_checked() != value {
             self.toggle.set_value(value);
+        }
+        if self.toggle.is_disabled() != disabled {
+            self.toggle.set_disabled(disabled);
         }
         changed
     }

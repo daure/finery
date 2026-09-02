@@ -61,6 +61,9 @@ pub struct TicketView {
     pub status: String,
     pub priority: String,
     pub assignee: String,
+    pub story_points: Option<f64>,
+    pub fix_versions: Vec<String>,
+    pub labels: Vec<String>,
     pub parent_key: Option<String>,
     pub parent_title: Option<String>,
     pub parent_kind: Option<TicketKindView>,
@@ -86,16 +89,22 @@ pub enum ChangeKindView {
     Synced,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DraftTicketInput {
     pub title: String,
     pub project_key: String,
     pub kind: TicketKindView,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub story_points: Option<f64>,
+    #[serde(default)]
+    pub fix_versions: Vec<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChangeSetPatchOperation {
     AddDraftTicket {
@@ -117,6 +126,18 @@ pub enum ChangeSetPatchOperation {
     UpdateDescription {
         ticket_id: String,
         description: String,
+    },
+    UpdateStoryPoints {
+        ticket_id: String,
+        story_points: Option<f64>,
+    },
+    UpdateFixVersions {
+        ticket_id: String,
+        fix_versions: Vec<String>,
+    },
+    UpdateLabels {
+        ticket_id: String,
+        labels: Vec<String>,
     },
     MoveTicket {
         ticket_id: String,
@@ -423,6 +444,7 @@ impl ComposerService {
         }
     }
 
+    #[cfg(test)]
     pub fn open_change_set_jira_ticket_keys(&self) -> Result<Vec<String>, ServiceError> {
         let catalog = self
             .runtime
@@ -439,6 +461,7 @@ impl ComposerService {
             .collect())
     }
 
+    #[cfg(test)]
     pub fn refresh_open_change_set_baselines(
         &self,
         refreshed_tickets: &HashMap<String, Ticket>,
@@ -507,6 +530,7 @@ impl ComposerService {
                 ticket_ids,
             });
         }
+        validate_patch_descriptions(&state)?;
         let edited = state
             .active_set()
             .expect("opened change set is present")
@@ -974,6 +998,9 @@ impl ComposerService {
                 if !draft.description.is_empty() {
                     update_description(state, &ticket_id, draft.description)?;
                 }
+                update_story_points(state, &ticket_id, draft.story_points)?;
+                update_fix_versions(state, &ticket_id, draft.fix_versions)?;
+                update_labels(state, &ticket_id, draft.labels)?;
                 Ok(vec![ticket_id])
             }
             ChangeSetPatchOperation::IncludeJiraTicket {
@@ -1026,6 +1053,24 @@ impl ComposerService {
                 description,
             } => {
                 update_description(state, &ticket_id, description)?;
+                Ok(vec![ticket_id])
+            }
+            ChangeSetPatchOperation::UpdateStoryPoints {
+                ticket_id,
+                story_points,
+            } => {
+                update_story_points(state, &ticket_id, story_points)?;
+                Ok(vec![ticket_id])
+            }
+            ChangeSetPatchOperation::UpdateFixVersions {
+                ticket_id,
+                fix_versions,
+            } => {
+                update_fix_versions(state, &ticket_id, fix_versions)?;
+                Ok(vec![ticket_id])
+            }
+            ChangeSetPatchOperation::UpdateLabels { ticket_id, labels } => {
+                update_labels(state, &ticket_id, labels)?;
                 Ok(vec![ticket_id])
             }
             ChangeSetPatchOperation::MoveTicket {
@@ -1333,6 +1378,71 @@ fn update_description(
     select(state, ticket_id)?;
     dispatch(state, ComposerAction::UpdateDescription(description))
 }
+fn update_story_points(
+    state: &mut ComposerState,
+    ticket_id: &str,
+    story_points: Option<f64>,
+) -> Result<(), ServiceError> {
+    if story_points.is_some_and(|points| !points.is_finite() || points < 0.0) {
+        return Err(invalid("story points must be a finite non-negative number"));
+    }
+    select(state, ticket_id)?;
+    dispatch(state, ComposerAction::UpdateStoryPoints(story_points))
+}
+fn update_fix_versions(
+    state: &mut ComposerState,
+    ticket_id: &str,
+    fix_versions: Vec<String>,
+) -> Result<(), ServiceError> {
+    select(state, ticket_id)?;
+    dispatch(
+        state,
+        ComposerAction::UpdateFixVersions(clean_values(fix_versions)),
+    )
+}
+fn update_labels(
+    state: &mut ComposerState,
+    ticket_id: &str,
+    labels: Vec<String>,
+) -> Result<(), ServiceError> {
+    select(state, ticket_id)?;
+    dispatch(state, ComposerAction::UpdateLabels(clean_values(labels)))
+}
+fn clean_values(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+fn validate_patch_descriptions(state: &ComposerState) -> Result<(), ServiceError> {
+    let Some(change_set) = state.active_set() else {
+        return Ok(());
+    };
+    let errors = change_set
+        .tickets
+        .iter()
+        .filter_map(|change| {
+            let desired = change.updated.as_ref()?;
+            let changed = change
+                .original
+                .as_ref()
+                .is_none_or(|original| original.description != desired.description);
+            changed
+                .then(|| {
+                    crate::store::composer::jira_adf::validate_markdown(&desired.description)
+                        .err()
+                        .map(|error| format!("{}: {error}", change.id))
+                })
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(invalid(errors.join("\n")))
+    }
+}
 fn invalid(message: impl Into<String>) -> ServiceError {
     ServiceError::InvalidOperation {
         message: message.into(),
@@ -1461,6 +1571,9 @@ impl From<Ticket> for TicketView {
             status: value.status,
             priority: value.priority,
             assignee: value.assignee,
+            story_points: value.story_points,
+            fix_versions: value.fix_versions,
+            labels: value.labels,
             parent_key: value.parent_key,
             parent_title: value.parent_title,
             parent_kind: value.parent_kind.map(Into::into),

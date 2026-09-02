@@ -169,7 +169,11 @@ impl DetailPane {
             )
             .child(
                 "description-diff-style",
-                BoundDescriptionDiffStyle::new(Rc::clone(&state), Rc::clone(&pending)),
+                BoundDescriptionDiffStyle::new(
+                    Rc::clone(&state),
+                    Rc::clone(&pending),
+                    keys.description_inline.clone(),
+                ),
                 FlexItem::fit_content(),
             );
         Self {

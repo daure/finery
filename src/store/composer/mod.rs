@@ -16,7 +16,7 @@ pub(crate) enum TicketKind {
     Subtask,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Ticket {
     pub key: String,
     #[serde(default)]
@@ -33,6 +33,12 @@ pub(crate) struct Ticket {
     pub assignee: String,
     #[serde(default)]
     pub assignee_account_id: String,
+    #[serde(default)]
+    pub story_points: Option<f64>,
+    #[serde(default)]
+    pub fix_versions: Vec<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
     #[serde(default)]
     pub parent_key: Option<String>,
     #[serde(default)]
@@ -65,7 +71,7 @@ pub(crate) enum ComposerViewMode {
     Diff,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct TicketChange {
     pub id: String,
     pub original: Option<Ticket>,
@@ -133,7 +139,7 @@ impl std::fmt::Display for PlacementError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SubmissionSnapshot {
     pub original: Option<Ticket>,
     pub updated: Option<Ticket>,
@@ -179,7 +185,7 @@ impl ChangeSet {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ChangeSet {
     pub id: String,
     pub name: String,
@@ -273,6 +279,9 @@ pub(crate) enum ComposerAction {
     UpdateKind(TicketKind),
     UpdateStatus(String),
     UpdatePriority(String),
+    UpdateStoryPoints(Option<f64>),
+    UpdateFixVersions(Vec<String>),
+    UpdateLabels(Vec<String>),
     UpdateAssignee {
         name: String,
         account_id: String,
@@ -495,7 +504,7 @@ impl ComposerState {
 
     pub(crate) fn selected_existing_ticket_key(&self) -> Option<String> {
         let change = self.selected_change()?;
-        let ticket = change.updated.as_ref().or(change.original.as_ref())?;
+        let ticket = self.changes_for_change(change)?;
         (!ticket.key.starts_with("NEW-")).then(|| ticket.key.clone())
     }
 
@@ -875,6 +884,15 @@ impl ComposerState {
             ComposerAction::UpdatePriority(value) => {
                 self.edit_selected(|ticket| ticket.priority = value)
             }
+            ComposerAction::UpdateStoryPoints(value) => {
+                self.edit_selected(|ticket| ticket.story_points = value)
+            }
+            ComposerAction::UpdateFixVersions(value) => {
+                self.edit_selected(|ticket| ticket.fix_versions = value)
+            }
+            ComposerAction::UpdateLabels(value) => {
+                self.edit_selected(|ticket| ticket.labels = value)
+            }
             ComposerAction::UpdateAssignee { name, account_id } => self.edit_selected(|ticket| {
                 ticket.assignee = name;
                 ticket.assignee_account_id = account_id;
@@ -1037,6 +1055,9 @@ impl ComposerState {
             priority: "Medium".into(),
             assignee: "Unassigned".into(),
             assignee_account_id: String::new(),
+            story_points: None,
+            fix_versions: Vec::new(),
+            labels: Vec::new(),
             parent_key: None,
             parent_title: None,
             parent_kind: None,
@@ -1773,6 +1794,15 @@ pub(crate) fn rebase_ticket(original: &Ticket, updated: &Ticket, refreshed: &Tic
     if original.assignee_account_id != updated.assignee_account_id {
         rebased.assignee_account_id = updated.assignee_account_id.clone();
     }
+    if original.story_points != updated.story_points {
+        rebased.story_points = updated.story_points;
+    }
+    if original.fix_versions != updated.fix_versions {
+        rebased.fix_versions = updated.fix_versions.clone();
+    }
+    if original.labels != updated.labels {
+        rebased.labels = updated.labels.clone();
+    }
     if original.parent_key != updated.parent_key {
         rebased.parent_key = updated.parent_key.clone();
         rebased.parent_title = updated.parent_title.clone();
@@ -1852,6 +1882,9 @@ impl ComposerAction {
                 | Self::UpdateKind(_)
                 | Self::UpdateStatus(_)
                 | Self::UpdatePriority(_)
+                | Self::UpdateStoryPoints(_)
+                | Self::UpdateFixVersions(_)
+                | Self::UpdateLabels(_)
                 | Self::UpdateAssignee { .. }
                 | Self::SetSelectedTickets(_)
         )
@@ -1876,6 +1909,9 @@ impl ComposerAction {
                 | Self::UpdateKind(_)
                 | Self::UpdateStatus(_)
                 | Self::UpdatePriority(_)
+                | Self::UpdateStoryPoints(_)
+                | Self::UpdateFixVersions(_)
+                | Self::UpdateLabels(_)
                 | Self::UpdateAssignee { .. }
                 | Self::BlockTicketRetry { .. }
                 | Self::MarkCreateAttempts { .. }
@@ -1901,6 +1937,9 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             priority: "High".into(),
             assignee: "Mina Patel".into(),
             assignee_account_id: "mina".into(),
+            story_points: Some(3.0),
+            fix_versions: vec!["1.0".into()],
+            labels: vec!["checkout".into()],
             parent_key: None,
             parent_title: None,
             parent_kind: None,
@@ -1918,6 +1957,9 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             priority: "Highest".into(),
             assignee: "Ada Mensah".into(),
             assignee_account_id: "ada".into(),
+            story_points: Some(2.0),
+            fix_versions: Vec::new(),
+            labels: Vec::new(),
             parent_key: None,
             parent_title: None,
             parent_kind: None,
@@ -1935,6 +1977,9 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             priority: "Low".into(),
             assignee: "Lin Chen".into(),
             assignee_account_id: "lin".into(),
+            story_points: None,
+            fix_versions: Vec::new(),
+            labels: Vec::new(),
             parent_key: None,
             parent_title: None,
             parent_kind: None,
@@ -1952,6 +1997,9 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             priority: "Medium".into(),
             assignee: "Unassigned".into(),
             assignee_account_id: String::new(),
+            story_points: None,
+            fix_versions: Vec::new(),
+            labels: Vec::new(),
             parent_key: None,
             parent_title: None,
             parent_kind: None,

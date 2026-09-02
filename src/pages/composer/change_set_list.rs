@@ -9,15 +9,15 @@ use ratatui::{
 use tuicore::{
     ActivationMode, AnimationSettings, Button, CellContext, ChildKey, Column, Dialog, DialogAction,
     DialogBackdrop, DialogLayer, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId,
-    FocusRequest, FocusTarget, InputChrome, Key, KeyModifiers, KeySpec, LayoutCtx, LayoutProposal,
-    LayoutResult, LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent,
+    FocusRequest, FocusTarget, HotkeyEvent, InputChrome, Key, KeyModifiers, KeySpec, LayoutCtx,
+    LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent,
     ListControlKeyBindings, RenderCtx, TextInput, TickResult, TuiEvent, TuiNode, keybindings,
 };
 
 use crate::{
     app_settings::ComposerKeyBindings,
     service::AppService,
-    store::composer::{ComposerAction, ComposerState},
+    store::composer::{ChangeKind, ChangeSet, ComposerAction, ComposerState, Ticket, TicketChange},
 };
 
 #[derive(Clone)]
@@ -166,9 +166,16 @@ impl TuiNode for ChangeSetContent {
             area.width,
             area.height.saturating_sub(button_height),
         );
-        ctx.push_slot(ChildKey::new("change-sets"), self.control_area, |ctx| {
-            self.control.layout(self.control_area, ctx);
-        });
+        ctx.with_focus_fallback_hotkey_sequences_status(
+            FocusId::new("data-view"),
+            self.control_area,
+            ["ys".to_owned()],
+            |ctx| {
+                ctx.push_slot(ChildKey::new("change-sets"), self.control_area, |ctx| {
+                    self.control.layout(self.control_area, ctx);
+                });
+            },
+        );
         ctx.push_slot(ChildKey::new("new-change-set"), self.button_area, |ctx| {
             self.new_button.layout(self.button_area, ctx);
         });
@@ -297,6 +304,7 @@ impl ChangeSetListView {
             },
         )
         .column(change_set_column())
+        .copy_with(|row| format!("Finery {} \"{}\"", row.id, escape_reference(&row.name)))
         .row_height(2)
         .panel_visible(false)
         .action_bar(true)
@@ -483,6 +491,35 @@ impl ChangeSetListView {
         true
     }
 
+    fn yank_share(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        if !matches!(event, TuiEvent::Hotkey(HotkeyEvent::Commit(sequence)) if sequence == "ys") {
+            return false;
+        }
+        let Some(id) = self.view.base().control.data_view().highlighted_id() else {
+            return false;
+        };
+        let state = self.state.borrow();
+        let Some(change_set) = state.change_sets.iter().find(|set| set.id == id) else {
+            return false;
+        };
+        let base_url = self
+            .service
+            .settings()
+            .read()
+            .ok()
+            .map(|settings| {
+                settings
+                    .jira_base_url
+                    .trim()
+                    .trim_end_matches('/')
+                    .to_owned()
+            })
+            .filter(|url| !url.is_empty());
+        ctx.copy_to_clipboard(change_set_share_text(change_set, base_url.as_deref()));
+        ctx.stop_propagation();
+        true
+    }
+
     #[cfg(test)]
     pub(super) fn highlighted_change_set(&self) -> Option<String> {
         self.view.base().control.data_view().highlighted_id()
@@ -542,6 +579,9 @@ impl TuiNode for ChangeSetListView {
         if self.submit_on_ctrl_enter(event, ctx) {
             return EventOutcome::Handled;
         }
+        if self.yank_share(event, ctx) {
+            return EventOutcome::Handled;
+        }
         let outcome = self.view.event(event, ctx);
         self.drain_events(ctx);
         outcome
@@ -553,6 +593,9 @@ impl TuiNode for ChangeSetListView {
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
         if self.submit_on_ctrl_enter(event, ctx) {
+            return EventOutcome::Handled;
+        }
+        if self.yank_share(event, ctx) {
             return EventOutcome::Handled;
         }
         let outcome = self.view.dispatch_event(route, event, ctx);
@@ -580,4 +623,121 @@ impl TuiNode for ChangeSetListView {
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.view.destroy(ctx);
     }
+}
+
+fn escape_reference(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn change_set_share_text(change_set: &ChangeSet, base_url: Option<&str>) -> String {
+    let aliases = change_set
+        .tickets
+        .iter()
+        .filter_map(|change| {
+            ticket_for_change(change).map(|ticket| (ticket.key.as_str(), change.id.as_str()))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut children = std::collections::HashMap::<Option<&str>, Vec<&TicketChange>>::new();
+    for change in &change_set.tickets {
+        let parent = ticket_for_change(change)
+            .and_then(|ticket| ticket.parent_key.as_deref())
+            .and_then(|parent| aliases.get(parent).copied());
+        children.entry(parent).or_default().push(change);
+    }
+    for siblings in children.values_mut() {
+        siblings.sort_by_key(|change| (change.sibling_order, change.id.as_str()));
+    }
+    let mut lines = vec![change_set.name.clone()];
+    let mut visited = std::collections::HashSet::new();
+    append_share_children(
+        None,
+        "",
+        &children,
+        &mut visited,
+        &mut lines,
+        change_set,
+        base_url,
+    );
+    for change in &change_set.tickets {
+        if visited.insert(change.id.as_str()) {
+            append_share_line(change, "", &mut lines, change_set, base_url);
+        }
+    }
+    lines.join("\n")
+}
+
+fn append_share_children<'a>(
+    parent: Option<&'a str>,
+    prefix: &str,
+    children: &std::collections::HashMap<Option<&'a str>, Vec<&'a TicketChange>>,
+    visited: &mut std::collections::HashSet<&'a str>,
+    lines: &mut Vec<String>,
+    change_set: &ChangeSet,
+    base_url: Option<&str>,
+) {
+    let Some(siblings) = children.get(&parent) else {
+        return;
+    };
+    for (index, change) in siblings.iter().enumerate() {
+        if !visited.insert(change.id.as_str()) {
+            continue;
+        }
+        let last = index + 1 == siblings.len();
+        let branch = parent
+            .map(|_| if last { "└─ " } else { "├─ " })
+            .unwrap_or("");
+        append_share_line(
+            change,
+            &format!("{prefix}{branch}"),
+            lines,
+            change_set,
+            base_url,
+        );
+        let next_prefix = match parent {
+            Some(_) if last => format!("{prefix}   "),
+            Some(_) => format!("{prefix}│  "),
+            None => String::new(),
+        };
+        append_share_children(
+            Some(change.id.as_str()),
+            &next_prefix,
+            children,
+            visited,
+            lines,
+            change_set,
+            base_url,
+        );
+    }
+}
+
+fn append_share_line(
+    change: &TicketChange,
+    prefix: &str,
+    lines: &mut Vec<String>,
+    change_set: &ChangeSet,
+    base_url: Option<&str>,
+) {
+    let Some(ticket) = ticket_for_change(change) else {
+        return;
+    };
+    let action = match change.kind {
+        ChangeKind::Added => "Created",
+        ChangeKind::Modified => "Updated",
+        ChangeKind::Deleted => "Deleted",
+        ChangeKind::Synced => "Unchanged",
+    };
+    let reference = (!ticket.key.starts_with("NEW-"))
+        .then(|| base_url.map(|url| format!("{url}/browse/{}", ticket.key)))
+        .flatten()
+        .unwrap_or_else(|| format!("Draft {}/{}", change_set.id, change.id));
+    lines.push(format!("{prefix}{action} - {reference} - {}", ticket.title));
+}
+
+fn ticket_for_change(change: &TicketChange) -> Option<&Ticket> {
+    change
+        .submitted
+        .as_ref()
+        .and_then(|snapshot| snapshot.updated.as_ref().or(snapshot.original.as_ref()))
+        .or(change.updated.as_ref())
+        .or(change.original.as_ref())
 }

@@ -64,6 +64,7 @@ pub(crate) struct VelocitySprint {
     pub name: String,
     pub completed: f64,
     pub goal: Option<String>,
+    pub work_items: Option<Vec<WorkItem>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

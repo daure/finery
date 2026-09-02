@@ -11,9 +11,10 @@ use super::{
     page::{
         BacklogPage, MAX_UNCONFIRMED_TRANSFER_REFRESHES, PendingRank, PendingRankReconciliation,
         PendingTransfer, PendingTransferReconciliation, move_work_items_to_edge,
-        recalculate_capacity, reconcile_pending_rank, reconcile_pending_transfer, should_poll,
-        source_transfer_highlight, source_transfer_highlight_key, transfer_destinations,
-        transfer_reconciliation_highlight, velocity_dialog,
+         recalculate_capacity, reconcile_pending_rank, reconcile_pending_transfer, should_poll,
+         source_transfer_highlight, source_transfer_highlight_key, sprint_report,
+         transfer_destinations, transfer_reconciliation_highlight, velocity_dialog,
+         velocity_share_report,
     },
 };
 use crate::app_settings::{BacklogFilter, BacklogFilterSettings, BacklogRunwaySettings};
@@ -40,6 +41,70 @@ fn work_item(key: &str, title: &str) -> WorkItem {
         epic_name: None,
         story_points: None,
     }
+}
+
+#[test]
+fn sprint_report_uses_compact_ticket_points_without_dates() {
+    let mut estimated = work_item("FIN-8", "Estimate this work");
+    estimated.story_points = Some(8.0);
+    let mut unestimated_bug = work_item("FIN-9", "Fix a bug");
+    unestimated_bug.kind = "Bug".into();
+    unestimated_bug.done = true;
+    let mut unestimated_story = work_item("FIN-10", "Unestimated story");
+    unestimated_story.done = true;
+    let mut subtask = work_item("FIN-11", "Hidden subtask");
+    subtask.kind = "Sub-task".into();
+    subtask.done = true;
+    let sprint = Sprint {
+        id: 1,
+        name: "Sprint 1".into(),
+        state: "active".into(),
+        goal: Some("Ship it".into()),
+        start_date: Some("2026-07-02T09:00:00.000Z".into()),
+        end_date: Some("2026-07-16T17:00:00.000Z".into()),
+        work_items: vec![estimated, unestimated_bug, unestimated_story, subtask],
+        capacity: None,
+    };
+
+    let report = sprint_report(&sprint, Some("https://jira.example"));
+
+    assert!(report.starts_with(
+        "Sprint 1\n\nGoal: Ship it\nCompleted: 0 points across 2 tickets"
+    ));
+    assert!(!report.contains("2026-07-02"));
+    assert!(report.contains("Completed: 0 points across 2 tickets"));
+    assert!(report.contains("Unestimated: 1 completed tickets, 1 remaining tickets"));
+    assert!(
+        report.contains(
+            "• [S] Estimate this work - 8pts - To Do - https://jira.example/browse/FIN-8"
+        )
+    );
+    assert!(report.contains("✓ [B] Fix a bug - To Do - https://jira.example/browse/FIN-9"));
+    assert!(
+        report.contains(
+            "✓ [S] Unestimated story - ?pts - To Do - https://jira.example/browse/FIN-10"
+        )
+    );
+    assert!(!report.contains("Hidden subtask"));
+}
+
+#[test]
+fn velocity_report_uses_loaded_historical_sprint_tickets() {
+    let mut item = work_item("FIN-12", "Ship the report");
+    item.done = true;
+    item.story_points = Some(3.0);
+    let sprint = VelocitySprint {
+        id: 12,
+        name: "Sprint 12".into(),
+        completed: 3.0,
+        goal: Some("Report accurately".into()),
+        work_items: Some(vec![item]),
+    };
+
+    let report = velocity_share_report(&sprint, None, Some("https://jira.example"));
+
+    assert!(report.contains("Completed: 3 points across 1 tickets"));
+    assert!(report.contains("✓ [S] Ship the report - 3pts - To Do - https://jira.example/browse/FIN-12"));
 }
 
 fn snapshot() -> BacklogSnapshot {
@@ -1251,18 +1316,21 @@ fn velocity_dialog_shows_goals_in_alternating_two_line_rows() {
                 name: "Sprint one".into(),
                 completed: 22.0,
                 goal: Some("Ship release".into()),
+                work_items: None,
             },
             VelocitySprint {
                 id: 2,
                 name: "Sprint two".into(),
                 completed: 20.0,
                 goal: None,
+                work_items: None,
             },
             VelocitySprint {
                 id: 3,
                 name: "Sprint three".into(),
                 completed: 18.0,
                 goal: Some("Finish migration".into()),
+                work_items: None,
             },
         ],
         dynamic_capacity: Some(21.0),
@@ -1270,6 +1338,8 @@ fn velocity_dialog_shows_goals_in_alternating_two_line_rows() {
     };
     let mut dialog = velocity_dialog(
         Some(&report),
+        None,
+        None,
         &BacklogRunwaySettings::default(),
         None,
         Rc::new(Cell::new(false)),
@@ -1373,12 +1443,15 @@ fn velocity_dialog_wraps_long_sprint_goals() {
             name: "Sprint one".into(),
             completed: 22.0,
             goal: Some("Deliver the migration with reliable error handling".into()),
+            work_items: None,
         }],
         dynamic_capacity: Some(22.0),
         configured_sprints: 1,
     };
     let mut dialog = velocity_dialog(
         Some(&report),
+        None,
+        None,
         &BacklogRunwaySettings::default(),
         None,
         Rc::new(Cell::new(false)),

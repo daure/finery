@@ -5,6 +5,7 @@ mod fields;
 mod page;
 mod property_fields;
 mod source;
+mod speed_reader_text;
 mod submission;
 #[cfg(test)]
 mod tests;

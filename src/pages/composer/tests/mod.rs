@@ -18,6 +18,7 @@ use tuicore::{
 use super::page::ComposerPage;
 use super::property_fields::BoundPropertyDropdown;
 use super::source::SourceController;
+use super::speed_reader_text::clean_for_speed_reader;
 use super::submission::SubmissionController;
 use super::ticket_rows::ticket_data_view;
 use crate::{
@@ -33,6 +34,16 @@ use crate::{
 use super::title_guidance::{TitleLevel, evaluate_title, format_title};
 
 const TEST_WIDTH: u16 = 96;
+
+#[test]
+fn speed_reader_removes_jira_adf_syntax_and_preserves_its_meaning() {
+    let source = "{{jira:panel {\"panelType\":\"info\"}}}\nAsk @mention(\"@Ada\", \"account-1\") to review @card(https://example.com/design) by @date(2026-02-28). @status(\"Ready\", green) :rocket: {color:#112233}++Styled++{/color}\n{{/jira:panel}}\n\n{{jira:task-list}}\n- [ ] Plan\n- [x] Ship\n{{/jira:task-list}}\n\n{{jira:decision-list}}\n- Use ADF\n{{/jira:decision-list}}\n\nLiteral: \\{\\{not a tag, \\@date(2026-02-28), \\:smile:, and \\++underlined\\++.\n\n`:rocket: @mention(\"@Ada\", \"account-1\")`";
+
+    assert_eq!(
+        clean_for_speed_reader(source),
+        "Info:\nAsk @Ada to review https://example.com/design by 2026-02-28. Ready rocket Styled\n\n- To do: Plan\n- Done: Ship\n\n- Decision: Use ADF\n\nLiteral: {{not a tag, @date(2026-02-28), :smile:, and ++underlined++.\n\n`:rocket: @mention(\"@Ada\", \"account-1\")`"
+    );
+}
 
 fn composer_page() -> ComposerPage {
     let service = AppService::for_tests();
@@ -903,17 +914,22 @@ fn ctrl_enter_creates_a_ticket_from_the_title_input() {
         );
     }
 
+    let mut created = EventCtx::default();
     page.dispatch_event(
         &EventRoute::new(input.path),
         &TuiEvent::Key(KeyEvent {
             code: Key::Enter,
             modifiers: KeyModifiers::CONTROL,
         }),
-        &mut EventCtx::default(),
+        &mut created,
     );
 
     assert_eq!(page.selected_changes().title, "Fix login redirect");
     assert!(!render_text(&mut page).contains("Create ticket"));
+    assert_eq!(
+        created.focus_request(),
+        Some(&FocusRequest::Target(FocusId::new("data-view")))
+    );
 }
 
 #[test]
@@ -934,6 +950,40 @@ fn ctrl_enter_opens_the_selected_existing_ticket() {
     );
 
     assert_eq!(outcome, EventOutcome::Handled);
+    assert_eq!(ctx.propagation(), tuicore::Propagation::Stopped);
+}
+
+#[test]
+fn ctrl_enter_creates_a_label_instead_of_opening_the_ticket() {
+    tuicore::init();
+    let mut page = composer_page();
+    page.open_change_set_for_test("CS-1");
+    let labels = target_at(&mut page, "tag-input", 120);
+    page.dispatch_focus(&labels, true, &mut FocusCtx::default());
+
+    page.dispatch_event(
+        &EventRoute::new(labels.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::default(),
+    );
+    for character in "frontend".chars() {
+        page.dispatch_event(
+            &EventRoute::new(labels.path.clone()),
+            &TuiEvent::Key(KeyEvent::from(Key::Char(character))),
+            &mut EventCtx::default(),
+        );
+    }
+    let mut ctx = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(labels.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Enter,
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut ctx,
+    );
+
+    assert_eq!(page.selected_changes().labels, ["checkout", "frontend"]);
     assert_eq!(ctx.propagation(), tuicore::Propagation::Stopped);
 }
 
@@ -1035,6 +1085,99 @@ fn escape_in_insert_or_select_mode_exits_editing_before_closing_dialog() {
         &mut EventCtx::default(),
     );
     assert!(!page.create_dialog_is_open());
+}
+
+#[test]
+fn property_unfocus_first_exits_the_control_then_returns_to_tickets() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 1);
+    let tabs = target(&mut page, "tabs");
+    page.dispatch_event(
+        &EventRoute::new(tabs.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("shift+p".into())),
+        &mut EventCtx::default(),
+    );
+    let tickets = focus(&mut page, "data-view");
+    page.dispatch_focus(&tickets, false, &mut FocusCtx::default());
+
+    let story_points = last_target(&mut page, "input");
+    page.dispatch_focus(&story_points, true, &mut FocusCtx::default());
+    page.dispatch_event(
+        &EventRoute::new(story_points.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::default(),
+    );
+    let mut story_points_exit = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(story_points.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Esc)),
+        &mut story_points_exit,
+    );
+    assert_eq!(story_points_exit.focus_request(), None);
+    let mut story_points_leave = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(story_points.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Esc)),
+        &mut story_points_leave,
+    );
+    assert_eq!(
+        story_points_leave.focus_request(),
+        Some(&FocusRequest::Target(FocusId::new("data-view")))
+    );
+
+    let labels = last_target(&mut page, "tag-input");
+    page.dispatch_focus(&labels, true, &mut FocusCtx::default());
+    page.dispatch_event(
+        &EventRoute::new(labels.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::default(),
+    );
+    let mut labels_exit = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(labels.path.clone()),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('['),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut labels_exit,
+    );
+    assert_eq!(labels_exit.focus_request(), None);
+    let mut labels_leave = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(labels.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Esc)),
+        &mut labels_leave,
+    );
+    assert_eq!(
+        labels_leave.focus_request(),
+        Some(&FocusRequest::Target(FocusId::new("data-view")))
+    );
+
+    let fix_versions = last_target(&mut page, "field");
+    page.dispatch_focus(&fix_versions, true, &mut FocusCtx::default());
+    page.dispatch_event(
+        &EventRoute::new(fix_versions.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::default(),
+    );
+    let mut fix_versions_exit = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(fix_versions.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Esc)),
+        &mut fix_versions_exit,
+    );
+    assert_eq!(fix_versions_exit.focus_request(), None);
+    let mut fix_versions_leave = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(fix_versions.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Esc)),
+        &mut fix_versions_leave,
+    );
+    assert_eq!(
+        fix_versions_leave.focus_request(),
+        Some(&FocusRequest::Target(FocusId::new("data-view")))
+    );
 }
 
 #[test]
@@ -1209,7 +1352,7 @@ fn refreshed_source_updates_ticket_row_title_issue_type_and_title_field() {
 }
 
 #[test]
-fn composer_rows_show_shared_work_item_details_from_presentation_cache() {
+fn composer_rows_show_current_ticket_properties_with_presentation_only_details() {
     tuicore::init();
     let mut state = ComposerState::demo();
     state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
@@ -1234,15 +1377,18 @@ fn composer_rows_show_shared_work_item_details_from_presentation_cache() {
                         total: 2,
                     }),
                     labels: Vec::new(),
-                    fix_versions: vec!["2026.9".into()],
+                    fix_versions: Vec::new(),
                     epic_name: Some("Checkout reliability".into()),
-                    story_points: Some(8.0),
+                    story_points: None,
                 },
                 story_points_configured: true,
                 assumed_story_points: 3.0,
             },
         })
         .unwrap();
+    state.dispatch(ComposerAction::UpdateStoryPoints(Some(8.0)));
+    state.dispatch(ComposerAction::UpdateFixVersions(vec!["2026.9".into()]));
+    state.dispatch(ComposerAction::UpdateLabels(vec!["checkout".into()]));
     let mut tickets = ticket_data_view(&state);
     let area = Rect::new(0, 0, 120, 8);
     TuiNode::<()>::layout(&mut tickets, area, &mut LayoutCtx::new());
@@ -1262,6 +1408,7 @@ fn composer_rows_show_shared_work_item_details_from_presentation_cache() {
     assert!(text.contains("8"), "rendered: {text:?}");
     assert!(text.contains("1/2"), "rendered: {text:?}");
     assert!(text.contains("2026.9"), "rendered: {text:?}");
+    assert!(text.contains("checkout"), "rendered: {text:?}");
     assert!(text.contains("Checkout reliability"), "rendered: {text:?}");
 }
 
@@ -1839,7 +1986,7 @@ fn responsive_details_use_tabs_when_narrow_and_seventy_thirty_panels_when_wide()
 }
 
 #[test]
-fn mode_controls_are_compact_and_source_uses_dashed_narrow_border() {
+fn mode_controls_disable_inline_outside_diffs_and_source_uses_dashed_narrow_border() {
     tuicore::init();
     let mut page = composer_page();
     open_change_set(&mut page, 1);
@@ -1853,7 +2000,37 @@ fn mode_controls_are_compact_and_source_uses_dashed_narrow_border() {
         .find(|target| target.hotkey_sequences == ["shift+v"])
         .unwrap();
     assert!(mode.area.width < TEST_WIDTH / 2);
-    assert!(render_text(&mut page).contains("Side-by-side diff"));
+    assert!(render_text(&mut page).contains("Inline"));
+    let inline = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.hotkey_sequences == ["shift+i"])
+        .unwrap()
+        .clone();
+    let mut disabled_hotkey = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(inline.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("shift+i".into())),
+        &mut disabled_hotkey,
+    );
+    assert_eq!(disabled_hotkey.focus_request(), Some(&FocusRequest::Keep));
+
+    page.set_view_mode(ComposerViewMode::Diff);
+    page.layout(Rect::new(0, 0, TEST_WIDTH, 40), &mut layout);
+    assert!(render_text(&mut page).contains("Inline"));
+    let inline = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.hotkey_sequences == ["shift+i"])
+        .unwrap()
+        .clone();
+    let mut toggled = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(inline.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("shift+i".into())),
+        &mut toggled,
+    );
+    assert_eq!(toggled.focus_request(), Some(&FocusRequest::Keep));
     assert_eq!(page.narrow_border_style(), TabsBodyBorderStyle::Dashed);
     assert_eq!(page.ticket_detail_areas().0.height, 9);
 }
@@ -2101,6 +2278,7 @@ fn added_subtask_uses_project_temporary_key_until_submission() {
 
     assert!(text.contains("FIN-200"));
     assert!(text.contains("A • @-- • To Do"));
+    assert_eq!(state.selected_existing_ticket_key().as_deref(), Some("FIN-200"));
 }
 
 #[test]

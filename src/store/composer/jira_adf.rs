@@ -867,10 +867,10 @@ fn parse_inline(text: &str) -> Vec<Value> {
             remaining = rest;
             continue;
         }
-        if let Some((nodes_with_mark, rest)) = marked_inline_nodes(remaining, "**", "strong")
+        if let Some((nodes_with_mark, rest)) = code_inline_nodes(remaining)
+            .or_else(|| marked_inline_nodes(remaining, "**", "strong"))
             .or_else(|| marked_inline_nodes(remaining, "~~", "strike"))
             .or_else(|| marked_inline_nodes(remaining, "++", "underline"))
-            .or_else(|| marked_inline_nodes(remaining, "`", "code"))
             .or_else(|| marked_inline_nodes(remaining, "*", "em"))
         {
             nodes.extend(nodes_with_mark);
@@ -889,6 +889,18 @@ fn parse_inline(text: &str) -> Vec<Value> {
         remaining = rest;
     }
     nodes
+}
+
+fn code_inline_nodes(source: &str) -> Option<(Vec<Value>, &str)> {
+    let text = source.strip_prefix('`')?;
+    let end = find_unescaped(text, "`")?;
+    let mut nodes = Vec::new();
+    push_text(
+        &mut nodes,
+        text[..end].into(),
+        vec![json!({ "type": "code" })],
+    );
+    Some((nodes, &text[end + 1..]))
 }
 
 fn marked_inline_nodes<'a>(
@@ -1105,6 +1117,10 @@ fn validate_inline(line: &str, line_number: usize) -> Result<(), String> {
             remaining = rest;
             continue;
         }
+        if let Some((_, rest)) = code_inline_nodes(remaining) {
+            remaining = rest;
+            continue;
+        }
         if let Some((_, rest)) = marked_inline_nodes(remaining, "++", "underline")
             .or_else(|| color_inline_nodes(remaining, "color", "textColor"))
         {
@@ -1138,11 +1154,12 @@ fn is_canonical_inline_start(source: &str) -> bool {
     ]
     .into_iter()
     .any(|prefix| source.starts_with(prefix))
-        || source.starts_with(':')
-            && source
-                .get(1..)
-                .and_then(|rest| rest.chars().next())
+        || source.strip_prefix(':').is_some_and(|name| {
+            name.chars()
+                .next()
                 .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+                && name.contains(':')
+        })
 }
 
 fn valid_emoji_short_name(short_name: &str) -> bool {

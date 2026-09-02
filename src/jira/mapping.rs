@@ -41,6 +41,9 @@ pub(super) fn to_ticket(issue: JiraIssue) -> Ticket {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .into(),
+        story_points: None,
+        fix_versions: fix_versions(field("fixVersions")),
+        labels: labels(field("labels")),
         parent_key,
         parent_title,
         parent_kind: field("parent")
@@ -53,12 +56,27 @@ pub(super) fn to_ticket(issue: JiraIssue) -> Ticket {
     }
 }
 
+pub(super) fn to_ticket_with_story_points(
+    issue: JiraIssue,
+    story_points_field_id: Option<&str>,
+) -> Ticket {
+    let story_points = story_points_field_id.and_then(|field_id| {
+        issue
+            .fields
+            .get(field_id)
+            .and_then(|value| value.as_f64().or_else(|| value.as_str()?.parse().ok()))
+    });
+    let mut ticket = to_ticket(issue);
+    ticket.story_points = story_points;
+    ticket
+}
+
 pub(super) fn to_ticket_and_work_item(
     issue: JiraIssue,
     story_points_field_id: Option<&str>,
 ) -> (Ticket, WorkItem) {
     let work_item = to_work_item_fields(&issue.key, &issue.fields, story_points_field_id);
-    let ticket = to_ticket(issue);
+    let ticket = to_ticket_with_story_points(issue, story_points_field_id);
     (ticket, work_item)
 }
 

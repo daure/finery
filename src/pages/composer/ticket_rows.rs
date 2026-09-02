@@ -33,12 +33,17 @@ pub(super) struct TicketRow {
 
 #[cfg(test)]
 pub(super) fn ticket_data_view(state: &ComposerState) -> DataView<TicketRow, String> {
-    ticket_data_view_with_number_jump(state, Rc::new(RefCell::new(TicketNumberJump::default())))
+    ticket_data_view_with_number_jump(
+        state,
+        Rc::new(RefCell::new(TicketNumberJump::default())),
+        None,
+    )
 }
 
 pub(super) fn ticket_data_view_with_number_jump(
     state: &ComposerState,
     number_jump: Rc<RefCell<TicketNumberJump>>,
+    jira_base_url: Option<String>,
 ) -> DataView<TicketRow, String> {
     let mut view = DataView::new(ticket_rows(state), |row: &TicketRow| row.item.id.clone())
         .headers(false)
@@ -67,7 +72,14 @@ pub(super) fn ticket_data_view_with_number_jump(
                 .into_iter()
                 .flat_map(|set| set.selected_ticket_ids.clone())
                 .collect::<Vec<_>>(),
-        );
+        )
+        .copy_hotkey("yu", move |row| {
+            (!row.item.key.starts_with("NEW-")).then(|| {
+                jira_base_url
+                    .as_ref()
+                    .map(|base_url| format!("{base_url}/browse/{}", row.item.key))
+            })?
+        });
     if let Some(selected) = state.selected_ticket.as_ref() {
         view.highlight_id(selected);
     }
@@ -161,9 +173,6 @@ fn ticket_row(
 ) -> Option<TicketRow> {
     let ticket = state.ticket_for_change(change)?;
     let presentation = state.presentation_for_change(change);
-    let estimated_story_points = matches!(ticket.kind, TicketKind::Story | TicketKind::Task)
-        .then(|| presentation.map(|presentation| presentation.assumed_story_points))
-        .flatten();
     let active_ids = state
         .active_set()?
         .tickets
@@ -205,17 +214,11 @@ fn ticket_row(
             status: ticket.status.clone(),
             done: is_done_status(&ticket.status),
             assignee: ticket.assignee.clone(),
-            labels: presentation
-                .map(|presentation| presentation.work_item.labels.clone())
-                .unwrap_or_default(),
-            story_points: presentation
-                .and_then(|presentation| presentation.work_item.story_points)
-                .or(estimated_story_points),
+            labels: ticket.labels.clone(),
+            story_points: ticket.story_points,
             show_story_points: presentation
                 .is_some_and(|presentation| presentation.story_points_configured),
-            story_points_estimated: presentation
-                .is_some_and(|presentation| presentation.work_item.story_points.is_none())
-                && estimated_story_points.is_some(),
+            story_points_estimated: false,
             story_points_from_average: false,
             change_badge: Some(change_badge(change.kind)),
             submitted: change.is_submitted(),
@@ -230,9 +233,7 @@ fn ticket_row(
                 .as_ref()
                 .map(|progress| (progress.completed, progress.total))
         }),
-        fix_versions: presentation
-            .map(|presentation| presentation.work_item.fix_versions.clone())
-            .unwrap_or_default(),
+        fix_versions: ticket.fix_versions.clone(),
         epic_name: presentation.and_then(|presentation| presentation.work_item.epic_name.clone()),
     })
 }

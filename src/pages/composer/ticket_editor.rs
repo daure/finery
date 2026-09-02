@@ -13,9 +13,9 @@ use tuicore::{
     AnimationSettings, ChildKey, CrossAlign, DataView, DataViewTypedEvent, Dialog, DialogAction,
     DialogBackdrop, DialogLayer, Dropdown, DropdownPopupDirection, EventCtx, EventOutcome,
     EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, Key, KeyEvent,
-    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, MainAlign, Panel,
-    PanelHost, Paragraph, RenderCtx, ScrollAxes, ScrollContainer, SpeedReader, Spinner, Split,
-    TextInput, TextInputKeyBindings, TickResult, TuiEvent, TuiNode, keybindings,
+    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, MainAlign,
+    Panel, PanelHost, Paragraph, RenderCtx, ScrollAxes, ScrollContainer, SpeedReader, Spinner,
+    Split, TextInput, TextInputKeyBindings, TickResult, TuiEvent, TuiNode, keybindings,
 };
 
 use crate::{
@@ -33,6 +33,7 @@ use super::{
     detail::DetailPane,
     fields::{DescriptionAction, PendingDescriptionActions},
     source::SourceController,
+    speed_reader_text::clean_for_speed_reader,
     submission::SubmissionController,
     ticket_rows::{
         TicketRow, display_key_for_ticket, set_active_ticket_style,
@@ -356,8 +357,19 @@ impl TicketEditor {
             .composer_keys
             .clone();
         let number_jump = Rc::new(RefCell::new(TicketNumberJump::default()));
+        let jira_base_url = settings
+            .read()
+            .expect("settings lock poisoned")
+            .jira_base_url
+            .trim()
+            .trim_end_matches('/')
+            .to_owned();
         let ticket_list = Panel::new().top_left("Change sets").one_row(true).host(
-            ticket_data_view_with_number_jump(&state.borrow(), Rc::clone(&number_jump)),
+            ticket_data_view_with_number_jump(
+                &state.borrow(),
+                Rc::clone(&number_jump),
+                (!jira_base_url.is_empty()).then_some(jira_base_url),
+            ),
         );
 
         let detail = DetailPane::new(
@@ -872,6 +884,7 @@ impl TicketEditor {
             self.service.save_change_set(set);
         }
         if created {
+            self.pending_focus_tickets = true;
             self.view
                 .base_mut()
                 .base_mut()
@@ -938,7 +951,18 @@ impl TicketEditor {
             .into_iter()
             .flat_map(|set| &set.tickets)
             .filter_map(|change| state.ticket_for_change(change))
-            .map(|ticket| ticket.project_key.trim())
+            .map(|ticket| {
+                (!ticket.key.starts_with("NEW-"))
+                    .then(|| {
+                        ticket
+                            .key
+                            .split_once('-')
+                            .map(|(project_key, _)| project_key)
+                    })
+                    .flatten()
+                    .unwrap_or(ticket.project_key.as_str())
+                    .trim()
+            })
             .filter(|project| !project.is_empty())
             .map(str::to_owned)
             .collect::<Vec<_>>();
@@ -1161,6 +1185,19 @@ impl TicketEditor {
         placement: PlacementTarget,
         ctx: &mut EventCtx<()>,
     ) {
+        let already_in_change_set = self.state.borrow().active_set().is_some_and(|set| {
+            set.tickets
+                .iter()
+                .any(|change| change.id == ticket.ticket.key)
+        });
+        if already_in_change_set {
+            self.service
+                .report_notification(tuicore::Notification::info(
+                    "Ticket already added",
+                    "Ticket is already a part of the change set.",
+                ));
+            return;
+        }
         let presentation = TicketPresentation {
             work_item: ticket.work_item.clone(),
             story_points_configured: ticket.story_points_configured,
@@ -1627,18 +1664,16 @@ impl TicketEditor {
     ) {
         let leaving_key =
             matches!(event, TuiEvent::Key(key) if keybindings().focus().unfocus_matches(*key));
-        if !leaving_key || add_menu_was_open || description_reader_was_open {
+        if !leaving_key
+            || add_menu_was_open
+            || description_reader_was_open
+            || ctx.propagation() == tuicore::Propagation::Stopped
+        {
             return;
         }
         if ticket_dialog_was_open {
-            if ctx.propagation() == tuicore::Propagation::Stopped {
-                return;
-            }
             self.view.base_mut().set_active_with_context(false, ctx);
         } else if create_dialog_was_open {
-            if ctx.propagation() == tuicore::Propagation::Stopped {
-                return;
-            }
             self.view
                 .base_mut()
                 .base_mut()
@@ -1706,8 +1741,9 @@ fn description_reader(
     actions: PendingDescriptionActions,
     settings: SpeedReaderSettings,
 ) -> DescriptionReader {
+    let description = description.into();
     settings
-        .apply(SpeedReader::markdown(description).title("Description"))
+        .apply(SpeedReader::markdown(clean_for_speed_reader(&description)).title("Description"))
         .dialog(move |_| {
             actions
                 .borrow_mut()

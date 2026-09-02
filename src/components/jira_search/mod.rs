@@ -14,7 +14,8 @@ use ratatui::{
 };
 use tuicore::{
     AnimationSettings, AxisProposal, CellContext, ChildKey, Column, EventCtx, EventOutcome,
-    EventRoute, FocusCtx, FocusId, FocusRequest, FocusTarget, Key, KeyEvent, KeyModifiers, KeySpec,
+    EventRoute, FocusCtx, FocusId, FocusRequest, FocusTarget, HotkeyEvent, Key, KeyEvent,
+    KeyModifiers, KeySpec,
     LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, ListControl,
     ListControlKeyBindings, RenderCtx, Spinner, TextInput, TickResult, TuiEvent, TuiNode,
 };
@@ -232,6 +233,29 @@ impl JiraSearchMenu {
         true
     }
 
+    fn yank_url(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        if !matches!(event, TuiEvent::Hotkey(HotkeyEvent::Commit(sequence)) if sequence == "yu") {
+            return false;
+        }
+        let Some(key) = self.list.data_view().highlighted_id() else {
+            return false;
+        };
+        if let Some(url) = self
+            .service
+            .settings()
+            .read()
+            .ok()
+            .and_then(|settings| settings.jira_issue_url(&key))
+        {
+            ctx.copy_to_clipboard(url);
+        } else {
+            self.service
+                .report_error("Could not copy Jira URL: Jira URL is not configured".into());
+        }
+        ctx.stop_propagation();
+        true
+    }
+
     fn navigate_list(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> Option<EventOutcome> {
         let TuiEvent::Key(key) = event else {
             return None;
@@ -407,12 +431,19 @@ impl TuiNode for JiraSearchMenu {
             area.width,
             area.height.saturating_sub(self.input_area.height),
         );
-        ctx.push_slot(ChildKey::new("search"), self.input_area, |ctx| {
-            self.input.layout(self.input_area, ctx)
-        });
-        ctx.push_slot(ChildKey::new("list"), self.list_area, |ctx| {
-            self.list.layout(self.list_area, ctx)
-        });
+        ctx.with_focus_fallback_hotkey_sequences_status(
+            FocusId::new("input"),
+            area,
+            ["yu".to_owned()],
+            |ctx| {
+                ctx.push_slot(ChildKey::new("search"), self.input_area, |ctx| {
+                    self.input.layout(self.input_area, ctx)
+                });
+                ctx.push_slot(ChildKey::new("list"), self.list_area, |ctx| {
+                    self.list.layout(self.list_area, ctx)
+                });
+            },
+        );
         LayoutResult::new(area)
     }
 
@@ -444,7 +475,7 @@ impl TuiNode for JiraSearchMenu {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        if self.close(event, ctx) || self.open_highlighted_ticket(event, ctx) {
+        if self.yank_url(event, ctx) || self.close(event, ctx) || self.open_highlighted_ticket(event, ctx) {
             return EventOutcome::Handled;
         }
         if let Some(outcome) = self.navigate_list(event, ctx) {
@@ -465,7 +496,7 @@ impl TuiNode for JiraSearchMenu {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        if self.close(event, ctx) || self.open_highlighted_ticket(event, ctx) {
+        if self.yank_url(event, ctx) || self.close(event, ctx) || self.open_highlighted_ticket(event, ctx) {
             return EventOutcome::Handled;
         }
         if let Some(outcome) = self.navigate_list(event, ctx) {

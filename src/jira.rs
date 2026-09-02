@@ -24,7 +24,7 @@ mod mapping;
 
 use mapping::*;
 
-const ISSUE_FIELDS: [&str; 9] = [
+const ISSUE_FIELDS: [&str; 11] = [
     "summary",
     "description",
     "issuetype",
@@ -34,6 +34,8 @@ const ISSUE_FIELDS: [&str; 9] = [
     "project",
     "parent",
     "subtasks",
+    "labels",
+    "fixVersions",
 ];
 
 const BACKLOG_FIELDS: [&str; 9] = [
@@ -222,6 +224,25 @@ struct ProjectPage {
 }
 
 #[derive(Deserialize)]
+struct LabelPage {
+    values: Vec<String>,
+    #[serde(default, rename = "isLast")]
+    is_last: bool,
+    #[serde(default, rename = "startAt")]
+    start_at: usize,
+    #[serde(default, rename = "maxResults")]
+    max_results: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub(crate) struct JiraFixVersion {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    #[serde(default)]
+    archived: bool,
+}
+
+#[derive(Deserialize)]
 struct ProjectValue {
     key: String,
     name: String,
@@ -259,6 +280,7 @@ fn is_ticket_number_query(query: &str) -> bool {
             .all(|character| character.is_ascii_digit())
 }
 
+#[cfg(test)]
 pub(crate) fn fetch_tickets(
     settings: &AppSettings,
     keys: &[String],
@@ -267,7 +289,14 @@ pub(crate) fn fetch_tickets(
         return Ok(HashMap::new());
     }
     let (client, base_url, email, token) = configured_client(settings)?;
-    let tickets = bulk_fetch_tickets(&client, &base_url, &email, &token, keys)?;
+    let tickets = bulk_fetch_tickets(
+        &client,
+        &base_url,
+        &email,
+        &token,
+        keys,
+        story_points_field_for_load(settings, None),
+    )?;
     let missing = keys
         .iter()
         .filter(|key| !tickets.contains_key(*key))
@@ -567,6 +596,69 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         }
         report
     });
+    let active_sprint_ids = sprints.iter().map(|sprint| sprint.id).collect::<HashSet<_>>();
+    let mut velocity = velocity;
+    let velocity_sprint_warning = velocity.as_mut().ok().and_then(|report| {
+        let historical_sprint_ids = report
+            .sprints
+            .iter()
+            .filter(|sprint| !active_sprint_ids.contains(&sprint.id))
+            .map(|sprint| sprint.id)
+            .collect::<Vec<_>>();
+        let results = std::thread::scope(|scope| {
+            historical_sprint_ids
+                .iter()
+                .map(|&sprint_id| {
+                    let client = client.clone();
+                    let base_url = base_url.clone();
+                    let email = email.clone();
+                    let token = token.clone();
+                    let story_points_field_id = story_points_field_id.map(str::to_owned);
+                    scope.spawn(move || {
+                        sprint_issues(
+                            &client,
+                            &base_url,
+                            &email,
+                            &token,
+                            sprint_id,
+                            story_points_field_id.as_deref(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .zip(historical_sprint_ids)
+                .map(|(request, sprint_id)| {
+                    (
+                        sprint_id,
+                        request
+                            .join()
+                            .map_err(|_| "Jira velocity sprint request panicked".to_string())
+                            .and_then(|result| result),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut errors = Vec::new();
+        for (sprint_id, result) in results {
+            match result {
+                Ok(work_items) => report
+                    .sprints
+                    .iter_mut()
+                    .find(|sprint| sprint.id == sprint_id)
+                    .expect("historical velocity sprint must exist")
+                    .work_items = Some(work_items),
+                Err(error) => errors.push(error),
+            }
+        }
+        (!errors.is_empty()).then(|| {
+            format!(
+                "Could not load {} historical velocity sprint report(s): {}",
+                errors.len(),
+                errors.join("; ")
+            )
+        })
+    });
     let mut snapshot = BacklogSnapshot {
         board_name: board.name,
         story_points_configured: story_points_field_id.is_some(),
@@ -581,6 +673,9 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         snapshot.warnings.push(warning);
     }
     if let Some(warning) = sprint_hydration_warning {
+        snapshot.warnings.push(warning);
+    }
+    if let Some(warning) = velocity_sprint_warning {
         snapshot.warnings.push(warning);
     }
     if let Some(warning) = story_points_warning(&snapshot) {
@@ -890,6 +985,7 @@ fn velocity_report(chart: Value, sprint_count: usize) -> Result<VelocityReport, 
                         name: sprint.get("name")?.as_str()?.into(),
                         completed,
                         goal: None,
+                        work_items: None,
                     })
                 })
                 .collect::<Vec<_>>()
@@ -908,6 +1004,7 @@ fn velocity_report(chart: Value, sprint_count: usize) -> Result<VelocityReport, 
                         name: "Unknown sprint".into(),
                         completed,
                         goal: None,
+                        work_items: None,
                     })
                 })
                 .collect()
@@ -1218,7 +1315,14 @@ fn search_jql_for_query(settings: &AppSettings, query: &str) -> String {
 
 pub(crate) fn fetch(settings: &AppSettings, key: &str) -> Result<Ticket, String> {
     let (client, base_url, email, token) = configured_client(settings)?;
-    fetch_ticket(&client, &base_url, &email, &token, key)
+    fetch_ticket(
+        &client,
+        &base_url,
+        &email,
+        &token,
+        key,
+        story_points_field_for_load(settings, None),
+    )
 }
 
 pub(crate) fn field_options(
@@ -1288,6 +1392,57 @@ pub(crate) fn users(settings: &AppSettings, query: &str) -> Result<Vec<JiraAssig
             })
             .collect()
     })
+}
+
+pub(crate) fn labels(settings: &AppSettings, search: &str) -> Result<Vec<String>, String> {
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let search = search.trim().to_ascii_lowercase();
+    let mut start_at = 0;
+    let mut labels = Vec::new();
+    loop {
+        let response = client
+            .get(format!("{base_url}/rest/api/3/label"))
+            .basic_auth(&email, Some(&token))
+            .query(&[("startAt", start_at), ("maxResults", 1000)])
+            .send()
+            .map_err(|error| error.to_string())?;
+        let page = response_json::<LabelPage>(response)?;
+        labels.extend(
+            page.values
+                .into_iter()
+                .filter(|label| search.is_empty() || label.to_ascii_lowercase().contains(&search)),
+        );
+        if page.is_last || page.max_results == 0 {
+            break;
+        }
+        start_at = page.start_at.saturating_add(page.max_results);
+    }
+    labels.sort();
+    labels.dedup();
+    Ok(labels)
+}
+
+pub(crate) fn fix_versions(
+    settings: &AppSettings,
+    project_key: &str,
+    search: &str,
+) -> Result<Vec<JiraFixVersion>, String> {
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let search = search.trim().to_ascii_lowercase();
+    let response = client
+        .get(format!(
+            "{base_url}/rest/api/3/project/{project_key}/versions"
+        ))
+        .basic_auth(email, Some(token))
+        .send()
+        .map_err(|error| error.to_string())?;
+    let mut versions = response_json::<Vec<JiraFixVersion>>(response)?
+        .into_iter()
+        .filter(|version| !version.archived)
+        .filter(|version| search.is_empty() || version.name.to_ascii_lowercase().contains(&search))
+        .collect::<Vec<_>>();
+    versions.sort_by_cached_key(|version| version.name.to_ascii_lowercase());
+    Ok(versions)
 }
 
 fn create_issue_types(
@@ -1510,7 +1665,15 @@ pub(crate) fn submit_changes(
             .filter(|change| change.kind != ChangeKind::Added)
             .filter_map(|change| change.original.as_ref().map(|ticket| ticket.key.clone()))
             .collect::<Vec<_>>();
-        let current = bulk_fetch_tickets(&client, &base_url, &email, &token, &existing_keys)?;
+        let story_points_field_id = story_points_field_for_load(settings, None);
+        let current = bulk_fetch_tickets(
+            &client,
+            &base_url,
+            &email,
+            &token,
+            &existing_keys,
+            story_points_field_id,
+        )?;
         let conflicts = changes
             .iter()
             .filter(|change| change.kind != ChangeKind::Added)
@@ -1540,6 +1703,7 @@ pub(crate) fn submit_changes(
                 change,
                 &current,
                 allow_unsafe_description_overwrite,
+                story_points_field_id,
             )
         })
         .map(SubmitBatchOutcome::Completed)
@@ -1736,6 +1900,7 @@ fn submit_change(
     change: &TicketChange,
     current: &HashMap<String, Ticket>,
     allow_unsafe_description_overwrite: bool,
+    story_points_field_id: Option<&str>,
 ) -> Result<SubmissionSnapshot, SubmitFailure> {
     match change.kind {
         ChangeKind::Synced => {
@@ -1788,6 +1953,7 @@ fn submit_change(
                 current,
                 desired,
                 allow_unsafe_description_overwrite,
+                story_points_field_id,
             ) {
                 Ok(updated) => Ok(SubmissionSnapshot {
                     original: Some(current.clone()),
@@ -1801,16 +1967,23 @@ fn submit_change(
                     &original.key,
                     desired,
                     message,
+                    story_points_field_id,
                 )),
             }
         }
         ChangeKind::Added => {
             let desired = change.updated.as_ref().expect("added ticket has update");
-            create_issue(client, base_url, email, token, desired).map(|updated| {
-                SubmissionSnapshot {
-                    original: None,
-                    updated: Some(updated),
-                }
+            create_issue(
+                client,
+                base_url,
+                email,
+                token,
+                desired,
+                story_points_field_id,
+            )
+            .map(|updated| SubmissionSnapshot {
+                original: None,
+                updated: Some(updated),
             })
         }
     }
@@ -1822,15 +1995,17 @@ fn bulk_fetch_tickets(
     email: &str,
     token: &str,
     keys: &[String],
+    story_points_field_id: Option<&str>,
 ) -> Result<HashMap<String, Ticket>, String> {
     if keys.is_empty() {
         return Ok(HashMap::new());
     }
-    let response = request_bulk_fetch(client, base_url, email, token, keys, &ISSUE_FIELDS)?;
+    let fields = ticket_fields(story_points_field_id);
+    let response = request_bulk_fetch(client, base_url, email, token, keys, &fields)?;
     Ok(response
         .issues
         .into_iter()
-        .map(to_ticket)
+        .map(|issue| to_ticket_with_story_points(issue, story_points_field_id))
         .map(|ticket| (ticket.key.clone(), ticket))
         .collect())
 }
@@ -1859,14 +2034,24 @@ fn fetch_ticket(
     email: &str,
     token: &str,
     key: &str,
+    story_points_field_id: Option<&str>,
 ) -> Result<Ticket, String> {
     let response = client
         .get(format!("{base_url}/rest/api/3/issue/{key}"))
         .basic_auth(email, Some(token))
-        .query(&[("fields", ISSUE_FIELDS.join(","))])
+        .query(&[("fields", ticket_fields(story_points_field_id).join(","))])
         .send()
         .map_err(|error| error.to_string())?;
-    response_json::<JiraIssue>(response).map(to_ticket)
+    response_json::<JiraIssue>(response)
+        .map(|issue| to_ticket_with_story_points(issue, story_points_field_id))
+}
+
+fn ticket_fields(story_points_field_id: Option<&str>) -> Vec<&str> {
+    let mut fields = ISSUE_FIELDS.to_vec();
+    if let Some(field_id) = story_points_field_id.filter(|field_id| !field_id.trim().is_empty()) {
+        fields.push(field_id);
+    }
+    fields
 }
 
 fn create_issue(
@@ -1875,6 +2060,7 @@ fn create_issue(
     email: &str,
     token: &str,
     desired: &Ticket,
+    story_points_field_id: Option<&str>,
 ) -> Result<Ticket, SubmitFailure> {
     if desired.project_key.trim().is_empty() {
         return Err(SubmitFailure {
@@ -1905,7 +2091,12 @@ fn create_issue(
                 retry_blocked: false,
             }
         })?;
-    let fields = create_issue_fields(desired, account_id.as_deref(), &issue_type);
+    let fields = create_issue_fields(
+        desired,
+        account_id.as_deref(),
+        &issue_type,
+        story_points_field_id,
+    );
     let response = client
         .post(format!("{base_url}/rest/api/3/issue"))
         .basic_auth(email, Some(token))
@@ -1922,8 +2113,15 @@ fn create_issue(
     let created = response_json::<CreatedIssue>(response).map_err(ambiguous_create_failure)?;
     let mut created_desired = desired.clone();
     created_desired.key = created.key.clone();
-    let created_ticket = fetch_ticket(client, base_url, email, token, &created.key)
-        .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
+    let created_ticket = fetch_ticket(
+        client,
+        base_url,
+        email,
+        token,
+        &created.key,
+        story_points_field_id,
+    )
+    .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
     if created_ticket.status != desired.status
         && let Err(message) = transition_issue(
             client,
@@ -1942,10 +2140,18 @@ fn create_issue(
             &created.key,
             &created_desired,
             message,
+            story_points_field_id,
         ));
     }
-    fetch_ticket(client, base_url, email, token, &created.key)
-        .map_err(|message| created_issue_failure(message, created_desired, None))
+    fetch_ticket(
+        client,
+        base_url,
+        email,
+        token,
+        &created.key,
+        story_points_field_id,
+    )
+    .map_err(|message| created_issue_failure(message, created_desired, None))
 }
 
 fn update_issue(
@@ -1956,6 +2162,7 @@ fn update_issue(
     original: &Ticket,
     desired: &Ticket,
     allow_unsafe_description_overwrite: bool,
+    story_points_field_id: Option<&str>,
 ) -> Result<Ticket, String> {
     if desired.kind == TicketKind::Subtask && desired.parent_key.is_none() {
         return Err("A sub-task cannot be moved to Root in Jira".into());
@@ -1966,6 +2173,7 @@ fn update_issue(
         desired,
         account_id.as_deref(),
         allow_unsafe_description_overwrite,
+        story_points_field_id,
     )?;
     let response = client
         .put(format!("{base_url}/rest/api/3/issue/{}", original.key))
@@ -1985,7 +2193,14 @@ fn update_issue(
             &desired.status,
         )?;
     }
-    fetch_ticket(client, base_url, email, token, &original.key)
+    fetch_ticket(
+        client,
+        base_url,
+        email,
+        token,
+        &original.key,
+        story_points_field_id,
+    )
 }
 
 fn delete_issue(
@@ -2069,7 +2284,12 @@ fn resolve_assignee(
         .ok_or_else(|| format!("No assignable Jira user matches {}", ticket.assignee))
 }
 
-fn issue_fields(ticket: &Ticket, account_id: Option<&str>, include_project: bool) -> Value {
+fn issue_fields(
+    ticket: &Ticket,
+    account_id: Option<&str>,
+    include_project: bool,
+    story_points_field_id: Option<&str>,
+) -> Value {
     let mut fields = Map::new();
     if include_project {
         fields.insert("project".into(), json!({ "key": ticket.project_key }));
@@ -2090,6 +2310,20 @@ fn issue_fields(ticket: &Ticket, account_id: Option<&str>, include_project: bool
     if let Some(parent) = ticket.parent_key.as_deref() {
         fields.insert("parent".into(), json!({ "key": parent }));
     }
+    fields.insert("labels".into(), json!(ticket.labels));
+    fields.insert(
+        "fixVersions".into(),
+        json!(
+            ticket
+                .fix_versions
+                .iter()
+                .map(|name| json!({ "name": name }))
+                .collect::<Vec<_>>()
+        ),
+    );
+    if let Some(field_id) = story_points_field_id.filter(|field_id| !field_id.trim().is_empty()) {
+        fields.insert(field_id.into(), json!(ticket.story_points));
+    }
     Value::Object(fields)
 }
 
@@ -2097,8 +2331,9 @@ fn create_issue_fields(
     ticket: &Ticket,
     account_id: Option<&str>,
     issue_type: &JiraOption,
+    story_points_field_id: Option<&str>,
 ) -> Value {
-    let mut fields = issue_fields(ticket, account_id, true)
+    let mut fields = issue_fields(ticket, account_id, true, story_points_field_id)
         .as_object()
         .expect("issue fields must be an object")
         .clone();
@@ -2111,18 +2346,31 @@ fn update_payload(
     desired: &Ticket,
     account_id: Option<&str>,
     allow_unsafe_description_overwrite: bool,
+    story_points_field_id: Option<&str>,
 ) -> Result<Value, String> {
     if desired.kind == TicketKind::Subtask && desired.parent_key.is_none() {
         return Err("A sub-task cannot be moved to Root in Jira".into());
     }
     ensure_description_can_be_overwritten(original, desired, allow_unsafe_description_overwrite)?;
     let mut payload = Map::new();
-    let mut fields = issue_fields(desired, account_id, false)
+    let mut fields = issue_fields(desired, account_id, false, story_points_field_id)
         .as_object()
         .expect("issue fields must be an object")
         .clone();
     if original.description == desired.description {
         fields.remove("description");
+    }
+    if original.labels == desired.labels {
+        fields.remove("labels");
+    }
+    if original.fix_versions == desired.fix_versions {
+        fields.remove("fixVersions");
+    }
+    if original.story_points == desired.story_points {
+        if let Some(field_id) = story_points_field_id.filter(|field_id| !field_id.trim().is_empty())
+        {
+            fields.remove(field_id);
+        }
     }
     payload.insert("fields".into(), Value::Object(fields));
     if original.parent_key.is_some() && desired.parent_key.is_none() {
@@ -2162,8 +2410,9 @@ fn failed_with_refresh(
     key: &str,
     desired: &Ticket,
     message: String,
+    story_points_field_id: Option<&str>,
 ) -> SubmitFailure {
-    let refresh = fetch_ticket(client, base_url, email, token, key)
+    let refresh = fetch_ticket(client, base_url, email, token, key, story_points_field_id)
         .ok()
         .map(|current| {
             let mut desired = desired.clone();
@@ -2204,11 +2453,12 @@ fn failed_created_with_refresh(
     key: &str,
     desired: &Ticket,
     message: String,
+    story_points_field_id: Option<&str>,
 ) -> SubmitFailure {
     created_issue_failure(
         message,
         desired.clone(),
-        fetch_ticket(client, base_url, email, token, key).ok(),
+        fetch_ticket(client, base_url, email, token, key, story_points_field_id).ok(),
     )
 }
 
@@ -2236,6 +2486,9 @@ fn same_jira_content(left: &Ticket, right: &Ticket) -> bool {
         && left.priority == right.priority
         && left.assignee == right.assignee
         && left.assignee_account_id == right.assignee_account_id
+        && left.story_points == right.story_points
+        && left.fix_versions == right.fix_versions
+        && left.labels == right.labels
         && left.parent_key == right.parent_key
 }
 

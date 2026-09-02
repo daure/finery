@@ -55,6 +55,9 @@ fn ticket(key: &str) -> Ticket {
         priority: "Medium".into(),
         assignee: "Unassigned".into(),
         assignee_account_id: String::new(),
+        story_points: None,
+        fix_versions: Vec::new(),
+        labels: Vec::new(),
         parent_key: None,
         parent_title: None,
         parent_kind: None,
@@ -374,6 +377,9 @@ fn patch_persists_multiple_operations_as_one_revision() {
                         project_key: "FIN".into(),
                         kind: TicketKindView::Task,
                         description: "Draft detail".into(),
+                        story_points: None,
+                        fix_versions: Vec::new(),
+                        labels: Vec::new(),
                     },
                     parent_ticket_id: None,
                 },
@@ -403,6 +409,74 @@ fn patch_persists_multiple_operations_as_one_revision() {
         response.change_set.value.selected_ticket_ids,
         vec!["FIN-1", "NEW-1"]
     );
+}
+
+#[test]
+fn patch_rejects_invalid_descriptions_without_persisting_other_operations() {
+    let service = service();
+
+    let error = service
+        .apply_change_set_patch(
+            "CS-1",
+            1,
+            vec![
+                ChangeSetPatchOperation::UpdateDescription {
+                    ticket_id: "FIN-1".into(),
+                    description: "@mention(\"@Ada\", \"account-1\"".into(),
+                },
+                ChangeSetPatchOperation::StageJiraDeletion {
+                    ticket_id: "FIN-1".into(),
+                },
+                ChangeSetPatchOperation::SetCommitSelection {
+                    ticket_ids: vec!["FIN-1".into()],
+                },
+            ],
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, ServiceError::InvalidOperation { .. }));
+    assert_eq!(service.change_set("CS-1").unwrap().revision, 1);
+    let persisted = service.change_set("CS-1").unwrap().value;
+    assert!(persisted.selected_ticket_ids.is_empty());
+    assert_eq!(
+        persisted.tickets[0].kind,
+        super::composer_service::ChangeKindView::Synced
+    );
+    assert!(persisted.tickets[0].updated.is_none());
+}
+
+#[test]
+fn patch_updates_story_points_fix_versions_and_labels() {
+    let service = service();
+
+    let response = service
+        .apply_change_set_patch(
+            "CS-1",
+            1,
+            vec![
+                ChangeSetPatchOperation::UpdateStoryPoints {
+                    ticket_id: "FIN-1".into(),
+                    story_points: Some(3.0),
+                },
+                ChangeSetPatchOperation::UpdateFixVersions {
+                    ticket_id: "FIN-1".into(),
+                    fix_versions: vec!["1.2.0".into()],
+                },
+                ChangeSetPatchOperation::UpdateLabels {
+                    ticket_id: "FIN-1".into(),
+                    labels: vec!["frontend".into(), "release".into()],
+                },
+            ],
+        )
+        .unwrap();
+
+    let ticket = response.change_set.value.tickets[0]
+        .updated
+        .as_ref()
+        .unwrap();
+    assert_eq!(ticket.story_points, Some(3.0));
+    assert_eq!(ticket.fix_versions, ["1.2.0"]);
+    assert_eq!(ticket.labels, ["frontend", "release"]);
 }
 
 #[test]
@@ -649,6 +723,9 @@ fn submit_persists_create_marker_before_jira_and_reconciles_once() {
                     project_key: "FIN".into(),
                     kind: TicketKindView::Task,
                     description: String::new(),
+                    story_points: None,
+                    fix_versions: Vec::new(),
+                    labels: Vec::new(),
                 },
                 parent_ticket_id: None,
             }],

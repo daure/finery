@@ -13,9 +13,9 @@ use super::{
     backlog_page_complete, board_backlog, board_backlog_query, board_sprints, commit_order,
     composer_fields, create_available_statuses_from_value, create_issue_fields, create_issue_type,
     create_issue_types_from_value, create_response_failure, created_issue_failure,
-    discover_story_points, fetch_composer_issues, hydrate_sprint_subtasks, is_ticket_number_query,
-    issue_fields, issue_key_jql, move_payload, options_from_values, rank_payload,
-    same_jira_content, search_composer_issues, search_jql, select_backlog_board,
+    discover_story_points, fetch_composer_issues, fix_versions, hydrate_sprint_subtasks,
+    is_ticket_number_query, issue_fields, issue_key_jql, labels, move_payload, options_from_values,
+    rank_payload, same_jira_content, search_composer_issues, search_jql, select_backlog_board,
     should_discover_story_points, sprint_issues, story_points_field_for_load,
     story_points_field_id, story_points_warning, submit_failure, submit_ordered_changes, to_ticket,
     to_ticket_and_work_item, to_work_item, to_work_item_with_subtasks, update_payload,
@@ -43,6 +43,9 @@ fn ticket(key: &str, kind: TicketKind, parent_key: Option<&str>) -> Ticket {
         priority: "Medium".into(),
         assignee: "Unassigned".into(),
         assignee_account_id: String::new(),
+        story_points: None,
+        fix_versions: Vec::new(),
+        labels: Vec::new(),
         parent_key: parent_key.map(str::to_owned),
         parent_title: None,
         parent_kind: None,
@@ -88,6 +91,56 @@ fn moving_issues_uses_the_agile_batch_payload() {
         move_payload(&["FIN-1".into(), "FIN-2".into()]),
         json!({ "issues": ["FIN-1", "FIN-2"] })
     );
+}
+
+#[test]
+fn jira_label_lookup_filters_existing_labels() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let settings = jira_settings(format!("http://{}", listener.local_addr().unwrap()));
+    let server = one_request_server(
+        listener,
+        json!({
+            "isLast": true,
+            "startAt": 0,
+            "maxResults": 1000,
+            "values": ["backend", "frontend", "release"]
+        })
+        .to_string(),
+    );
+
+    assert_eq!(labels(&settings, "end").unwrap(), ["backend", "frontend"]);
+    let (request, extra_request) = server.join().unwrap();
+    assert!(request.starts_with("GET /rest/api/3/label?"));
+    assert!(request.contains("maxResults=1000"));
+    assert!(!extra_request);
+}
+
+#[test]
+fn jira_fix_version_lookup_returns_non_archived_project_versions() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let settings = jira_settings(format!("http://{}", listener.local_addr().unwrap()));
+    let server = one_request_server(
+        listener,
+        json!([
+            { "id": "3", "name": "Archived", "archived": true },
+            { "id": "2", "name": "Release 2" },
+            { "id": "1", "name": "Release 1" }
+        ])
+        .to_string(),
+    );
+
+    let versions = fix_versions(&settings, "FIN", "release").unwrap();
+    let (request, extra_request) = server.join().unwrap();
+
+    assert_eq!(
+        versions
+            .iter()
+            .map(|version| (version.id.as_str(), version.name.as_str()))
+            .collect::<Vec<_>>(),
+        [("1", "Release 1"), ("2", "Release 2")]
+    );
+    assert!(request.starts_with("GET /rest/api/3/project/FIN/versions HTTP/1.1"));
+    assert!(!extra_request);
 }
 
 fn added(key: &str, kind: TicketKind, parent_key: Option<&str>) -> TicketChange {
@@ -316,11 +369,11 @@ fn jira_parent_fields_and_update_payload_follow_cloud_v3_shape() {
     let desired = ticket("FIN-2", TicketKind::Task, Some("FIN-9"));
 
     assert_eq!(
-        issue_fields(&desired, None, true).pointer("/parent/key"),
+        issue_fields(&desired, None, true, None).pointer("/parent/key"),
         Some(&json!("FIN-9"))
     );
     assert_eq!(
-        update_payload(&original, &desired, None, false)
+        update_payload(&original, &desired, None, false, None)
             .unwrap()
             .pointer("/fields/parent/key"),
         Some(&json!("FIN-9"))
@@ -346,11 +399,11 @@ fn jira_create_subtask_uses_project_issue_type_id() {
     .unwrap();
 
     assert_eq!(
-        create_issue_fields(&desired, None, &issue_type).pointer("/issuetype/id"),
+        create_issue_fields(&desired, None, &issue_type, None).pointer("/issuetype/id"),
         Some(&json!("10003"))
     );
     assert_eq!(
-        create_issue_fields(&desired, None, &issue_type).pointer("/parent/key"),
+        create_issue_fields(&desired, None, &issue_type, None).pointer("/parent/key"),
         Some(&json!("KAN-49"))
     );
 }
@@ -362,13 +415,13 @@ fn jira_parent_removal_uses_update_operation_and_rejects_root_subtasks() {
     let root_subtask = ticket("FIN-2", TicketKind::Subtask, None);
 
     assert_eq!(
-        update_payload(&original, &root, None, false)
+        update_payload(&original, &root, None, false, None)
             .unwrap()
             .pointer("/update/parent/0/set"),
         Some(&json!(null))
     );
     assert!(
-        update_payload(&original, &root_subtask, None, false)
+        update_payload(&original, &root_subtask, None, false, None)
             .unwrap_err()
             .contains("cannot be moved to Root")
     );
@@ -381,7 +434,7 @@ fn jira_update_payload_omits_unchanged_description() {
     desired.title = "Updated title".into();
 
     assert!(
-        update_payload(&original, &desired, None, false)
+        update_payload(&original, &desired, None, false, None)
             .unwrap()
             .pointer("/fields/description")
             .is_none()
@@ -389,10 +442,52 @@ fn jira_update_payload_omits_unchanged_description() {
 
     desired.description = "Updated description".into();
     assert!(
-        update_payload(&original, &desired, None, false)
+        update_payload(&original, &desired, None, false, None)
             .unwrap()
             .pointer("/fields/description")
             .is_some()
+    );
+}
+
+#[test]
+fn jira_update_payload_omits_unchanged_ticket_properties() {
+    let mut original = ticket("FIN-2", TicketKind::Task, None);
+    original.story_points = Some(3.0);
+    original.fix_versions = vec!["invalid-old-version".into()];
+    original.labels = vec!["existing".into()];
+    let mut desired = original.clone();
+    desired.title = "Updated title".into();
+
+    let payload =
+        update_payload(&original, &desired, None, false, Some("customfield_10016")).unwrap();
+
+    assert!(payload.pointer("/fields/fixVersions").is_none());
+    assert!(payload.pointer("/fields/labels").is_none());
+    assert!(payload.pointer("/fields/customfield_10016").is_none());
+}
+
+#[test]
+fn jira_payload_uses_configured_story_points_field_and_ticket_properties() {
+    let original = ticket("FIN-2", TicketKind::Task, None);
+    let mut desired = original.clone();
+    desired.story_points = Some(5.0);
+    desired.fix_versions = vec!["1.2.0".into()];
+    desired.labels = vec!["frontend".into(), "release".into()];
+
+    let payload =
+        update_payload(&original, &desired, None, false, Some("customfield_10016")).unwrap();
+
+    assert_eq!(
+        payload.pointer("/fields/customfield_10016"),
+        Some(&json!(5.0))
+    );
+    assert_eq!(
+        payload.pointer("/fields/fixVersions/0/name"),
+        Some(&json!("1.2.0"))
+    );
+    assert_eq!(
+        payload.pointer("/fields/labels"),
+        Some(&json!(["frontend", "release"]))
     );
 }
 
@@ -434,13 +529,13 @@ fn jira_description_overwrite_safety_allows_supported_marks_and_guards_media() {
     let mut edited = unsupported_mark.clone();
     edited.description.push_str(" changed");
     assert!(
-        update_payload(&unsupported_mark, &edited, None, false)
+        update_payload(&unsupported_mark, &edited, None, false, None)
             .unwrap()
             .pointer("/fields/description")
             .is_some()
     );
     assert!(
-        update_payload(&unsupported_mark, &edited, None, true)
+        update_payload(&unsupported_mark, &edited, None, true, None)
             .unwrap()
             .pointer("/fields/description")
             .is_some()
@@ -449,7 +544,7 @@ fn jira_description_overwrite_safety_allows_supported_marks_and_guards_media() {
     let mut title_only = unsupported_mark.clone();
     title_only.title = "New title".into();
     assert!(
-        update_payload(&unsupported_mark, &title_only, None, false)
+        update_payload(&unsupported_mark, &title_only, None, false, None)
             .unwrap()
             .pointer("/fields/description")
             .is_none()

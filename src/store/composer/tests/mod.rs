@@ -688,6 +688,20 @@ fn jira_adf_validates_canonical_jira_syntax_and_rejects_legacy_tags() {
 }
 
 #[test]
+fn jira_adf_treats_file_line_references_as_literal_text() {
+    assert!(validate_markdown("`app.routes.ts:35`").is_ok());
+    assert!(validate_markdown("`some.component.ts:174/212`").is_ok());
+    assert!(validate_markdown("app.routes.ts:35").is_ok());
+}
+
+#[test]
+fn jira_adf_preserves_inline_code_contents_as_literal_text() {
+    let markdown = "`:rocket: @mention(\"@Ada\", \"account-1\") en.json:89-90`";
+
+    assert_eq!(adf_to_markdown(&markdown_to_adf(markdown)), markdown);
+}
+
+#[test]
 fn jira_adf_round_trips_escaped_literal_tag_openings() {
     let adf = json!({ "type": "doc", "version": 1, "content": [{
         "type": "paragraph", "content": [{

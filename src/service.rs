@@ -853,6 +853,7 @@ impl AppService {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn fetch_jira_tickets(
         &self,
         keys: &[String],
@@ -897,6 +898,28 @@ impl AppService {
             .map_err(|_| "settings lock is unavailable".to_string())?
             .clone();
         jira::users(&settings, query)
+    }
+
+    pub(crate) fn search_jira_labels(&self, search: &str) -> Result<Vec<String>, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::labels(&settings, search)
+    }
+
+    pub(crate) fn search_jira_fix_versions(
+        &self,
+        project_key: &str,
+        search: &str,
+    ) -> Result<Vec<jira::JiraFixVersion>, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::fix_versions(&settings, project_key, search)
     }
 
     pub(crate) fn take_errors(&self) -> Vec<String> {

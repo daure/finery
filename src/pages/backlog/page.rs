@@ -24,8 +24,8 @@ use crate::{
     app_settings::{BacklogFilter, BacklogRunwaySettings},
     service::AppService,
     store::work_items::{
-        BacklogSnapshot, RankPlan, VelocityReport, VelocitySprint, apply_capacity,
-        loaded_story_point_average, rank_plan,
+        BacklogSnapshot, RankPlan, Sprint, VelocityReport, VelocitySprint, WorkItem,
+        apply_capacity, loaded_story_point_average, rank_plan,
     },
 };
 
@@ -44,6 +44,8 @@ type BacklogView = DialogLayer<BacklogQuickMenuLayer, VelocityDialog>;
 struct VelocityRow {
     sprint: VelocitySprint,
     alternate_background: bool,
+    share_goal: String,
+    share_report: String,
 }
 
 enum BacklogResult {
@@ -656,6 +658,36 @@ impl BacklogPage {
                 BacklogSectionEvent::WebMenuClosed => self.focus_backlog_data(ctx),
                 BacklogSectionEvent::MoveLocked => self.report_move_locked(),
                 BacklogSectionEvent::OpenTicket { key } => self.service.open_jira_issue(&key),
+                BacklogSectionEvent::YankTicketUrl { key } => {
+                    self.copy_jira_url(&key, ctx);
+                }
+                BacklogSectionEvent::YankSprintGoal { goal } => {
+                    ctx.copy_to_clipboard(goal);
+                }
+                BacklogSectionEvent::YankSprintReport { sprint_id } => {
+                    let Some(sprint) = self.snapshot.as_ref().and_then(|snapshot| {
+                        snapshot
+                            .sprints
+                            .iter()
+                            .find(|sprint| sprint.id == sprint_id)
+                    }) else {
+                        continue;
+                    };
+                    let base_url = self
+                        .service
+                        .settings()
+                        .read()
+                        .ok()
+                        .map(|settings| {
+                            settings
+                                .jira_base_url
+                                .trim()
+                                .trim_end_matches('/')
+                                .to_owned()
+                        })
+                        .filter(|url| !url.is_empty());
+                    ctx.copy_to_clipboard(sprint_report(sprint, base_url.as_deref()));
+                }
                 BacklogSectionEvent::OpenQuickMenu {
                     section_id,
                     keys,
@@ -758,12 +790,19 @@ impl BacklogPage {
     fn open_velocity_dialog(&mut self, ctx: &mut EventCtx<()>) {
         let settings = self.service.settings();
         let settings = settings.read().expect("settings lock poisoned");
+        let jira_base_url = settings
+            .jira_base_url
+            .trim()
+            .trim_end_matches('/')
+            .to_owned();
         self.velocity_dialog_close_requested.set(false);
         self.view.replace_layer(
             velocity_dialog(
                 self.snapshot
                     .as_ref()
                     .and_then(|snapshot| snapshot.velocity.as_ref()),
+                self.snapshot.as_ref(),
+                (!jira_base_url.is_empty()).then_some(jira_base_url.as_str()),
                 &settings.backlog_runway,
                 self.snapshot.as_ref().and_then(loaded_story_point_average),
                 Rc::clone(&self.velocity_dialog_close_requested),
@@ -771,6 +810,21 @@ impl BacklogPage {
             ctx,
         );
         self.view.set_active_with_context(true, ctx);
+    }
+
+    fn copy_jira_url(&self, key: &str, ctx: &mut EventCtx<()>) {
+        let url = self
+            .service
+            .settings()
+            .read()
+            .ok()
+            .and_then(|settings| settings.jira_issue_url(key));
+        if let Some(url) = url {
+            ctx.copy_to_clipboard(url);
+        } else {
+            self.service
+                .report_error("Could not copy Jira URL: Jira URL is not configured".into());
+        }
     }
 
     fn close_velocity_dialog(&mut self, ctx: &mut EventCtx<()>) {
@@ -1400,6 +1454,8 @@ fn backlog_view(
         quick_menu,
         velocity_dialog(
             None,
+            None,
+            None,
             &BacklogRunwaySettings::default(),
             None,
             velocity_dialog_close_requested,
@@ -1413,6 +1469,8 @@ fn backlog_view(
 
 pub(super) fn velocity_dialog(
     report: Option<&VelocityReport>,
+    snapshot: Option<&BacklogSnapshot>,
+    jira_base_url: Option<&str>,
     settings: &BacklogRunwaySettings,
     dynamic_ticket_size: Option<f64>,
     close_requested: Rc<Cell<bool>>,
@@ -1437,6 +1495,8 @@ pub(super) fn velocity_dialog(
             .cloned()
             .enumerate()
             .map(|(index, sprint)| VelocityRow {
+                share_goal: sprint.goal.clone().unwrap_or_default(),
+                share_report: velocity_share_report(&sprint, snapshot, jira_base_url),
                 sprint,
                 alternate_background: index % 2 == 0,
             })
@@ -1461,6 +1521,8 @@ pub(super) fn velocity_dialog(
         .headers(true)
         .row_height(2)
         .wrap_cells()
+        .copy_hotkey("yg", |row| Some(row.share_goal.clone()))
+        .copy_hotkey("yv", |row| Some(row.share_report.clone()))
         .focused(true);
     table.set_row_style_by(|row| {
         row.alternate_background
@@ -1480,6 +1542,60 @@ pub(super) fn velocity_dialog(
         .host(content)
 }
 
+pub(super) fn velocity_share_report(
+    sprint: &VelocitySprint,
+    snapshot: Option<&BacklogSnapshot>,
+    jira_base_url: Option<&str>,
+) -> String {
+    if let Some(sprint) = snapshot.and_then(|snapshot| {
+        snapshot
+            .sprints
+            .iter()
+            .find(|candidate| candidate.id == sprint.id)
+    }) {
+        return sprint_report(sprint, jira_base_url);
+    }
+    if let Some(work_items) = &sprint.work_items {
+        return sprint_report(
+            &Sprint {
+                id: sprint.id,
+                name: sprint.name.clone(),
+                state: "closed".into(),
+                goal: sprint.goal.clone(),
+                start_date: None,
+                end_date: None,
+                work_items: work_items.clone(),
+                capacity: None,
+            },
+            jira_base_url,
+        );
+    }
+    velocity_sprint_report(sprint)
+}
+
+fn velocity_sprint_report(sprint: &VelocitySprint) -> String {
+    let mut lines = vec![sprint.name.clone()];
+    let has_goal = if let Some(goal) = sprint
+        .goal
+        .as_deref()
+        .filter(|goal| !goal.trim().is_empty())
+    {
+        lines.push(String::new());
+        lines.push(format!("Goal: {goal}"));
+        true
+    } else {
+        false
+    };
+    if !has_goal {
+        lines.push(String::new());
+    }
+    lines.push(format!(
+        "Completed: {} real points",
+        points_label(sprint.completed)
+    ));
+    lines.join("\n")
+}
+
 fn velocity_sprint_text(row: &VelocityRow) -> Text<'static> {
     let theme = tuicore::theme();
     Text::from(vec![
@@ -1497,6 +1613,112 @@ fn velocity_sprint_text(row: &VelocityRow) -> Text<'static> {
             Style::default().fg(theme.muted_fg()),
         )),
     ])
+}
+
+pub(super) fn sprint_report(sprint: &Sprint, base_url: Option<&str>) -> String {
+    let mut lines = vec![sprint.name.clone()];
+    let has_goal = if let Some(goal) = sprint
+        .goal
+        .as_deref()
+        .filter(|goal| !goal.trim().is_empty())
+    {
+        lines.push(String::new());
+        lines.push(format!("Goal: {goal}"));
+        true
+    } else {
+        false
+    };
+    let report_items = sprint
+        .work_items
+        .iter()
+        .filter(|item| !is_subtask(item))
+        .collect::<Vec<_>>();
+    let completed = report_items
+        .iter()
+        .copied()
+        .filter(|item| item.done)
+        .collect::<Vec<_>>();
+    let completed_points = completed
+        .iter()
+        .filter(|item| is_estimate_eligible(item))
+        .filter_map(|item| item.story_points)
+        .sum::<f64>();
+    let completed_unestimated = completed
+        .iter()
+        .filter(|item| is_estimate_eligible(item) && item.story_points.is_none())
+        .count();
+    let remaining = report_items.iter().filter(|item| !item.done).count();
+    if !has_goal {
+        lines.push(String::new());
+    }
+    lines.extend([
+        format!(
+            "Completed: {} points across {} tickets",
+            points_label(completed_points),
+            completed.len()
+        ),
+        format!(
+            "Unestimated: {completed_unestimated} completed tickets, {remaining} remaining tickets"
+        ),
+        String::new(),
+        "Tickets:".into(),
+    ]);
+    lines.extend(report_items.iter().copied().map(|item| {
+        let completion = if item.done { "✓" } else { "•" };
+        let reference = base_url
+            .map(|url| format!("{url}/browse/{}", item.key))
+            .unwrap_or_else(|| item.key.clone());
+        let marker = ticket_type_marker(item)
+            .map(|marker| format!(" {marker}"))
+            .unwrap_or_default();
+        let points = is_estimate_eligible(item).then(|| {
+            item.story_points
+                .map(points_label)
+                .map(|points| format!("{points}pts"))
+                .unwrap_or_else(|| "?pts".into())
+        });
+        let mut details = vec![item.title.clone()];
+        if let Some(points) = points {
+            details.push(points);
+        }
+        if !item.status.trim().is_empty() {
+            details.push(item.status.clone());
+        }
+        details.push(reference);
+        format!("{completion}{marker} {}", details.join(" - "))
+    }));
+    lines.join("\n")
+}
+
+fn points_label(points: f64) -> String {
+    if points.abs() < f64::EPSILON {
+        return "0".into();
+    }
+    if points.fract().abs() < f64::EPSILON {
+        format!("{points:.0}")
+    } else {
+        format!("{points:.1}")
+    }
+}
+
+fn is_estimate_eligible(item: &WorkItem) -> bool {
+    matches!(item.kind.to_ascii_lowercase().as_str(), "story" | "task")
+}
+
+fn is_subtask(item: &WorkItem) -> bool {
+    matches!(
+        item.kind.to_ascii_lowercase().as_str(),
+        "sub-task" | "subtask"
+    )
+}
+
+fn ticket_type_marker(item: &WorkItem) -> Option<&'static str> {
+    match item.kind.to_ascii_lowercase().as_str() {
+        "story" => Some("[S]"),
+        "task" => Some("[T]"),
+        "bug" => Some("[B]"),
+        _ => None,
+    }
 }
 
 fn velocity_status(

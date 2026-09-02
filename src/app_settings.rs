@@ -41,11 +41,15 @@ pub(crate) const COMPOSER_PROPERTIES_TAB_KEY_SETTING: &str = "composer.propertie
 pub(crate) const COMPOSER_DESCRIPTION_FOCUS_KEY_SETTING: &str = "composer.description_focus_key";
 pub(crate) const COMPOSER_DESCRIPTION_EDITOR_KEY_SETTING: &str = "composer.description_editor_key";
 pub(crate) const COMPOSER_DESCRIPTION_READER_KEY_SETTING: &str = "composer.description_reader_key";
+pub(crate) const COMPOSER_DESCRIPTION_INLINE_KEY_SETTING: &str = "composer.description_inline_key";
 pub(crate) const COMPOSER_ISSUE_TYPE_KEY_SETTING: &str = "composer.issue_type_key";
 pub(crate) const COMPOSER_PARENT_KEY_SETTING: &str = "composer.parent_key";
 pub(crate) const COMPOSER_STATUS_KEY_SETTING: &str = "composer.status_key";
 pub(crate) const COMPOSER_PRIORITY_KEY_SETTING: &str = "composer.priority_key";
 pub(crate) const COMPOSER_ASSIGNEE_KEY_SETTING: &str = "composer.assignee_key";
+pub(crate) const COMPOSER_STORY_POINTS_KEY_SETTING: &str = "composer.story_points_key";
+pub(crate) const COMPOSER_FIX_VERSIONS_KEY_SETTING: &str = "composer.fix_versions_key";
+pub(crate) const COMPOSER_LABELS_KEY_SETTING: &str = "composer.labels_key";
 pub(crate) const COMPOSER_CREATE_SUBMIT_KEY_SETTING: &str = "composer.create_submit_key";
 pub(crate) const COMPOSER_CREATE_CONFIRM_KEY_SETTING: &str = "composer.create_confirm_key";
 pub(crate) const COMPOSER_DIALOG_CANCEL_KEY_SETTING: &str = "composer.dialog_cancel_key";
@@ -139,11 +143,15 @@ pub(crate) struct ComposerKeyBindings {
     pub(crate) description_focus: ComposerSequenceBinding,
     pub(crate) description_editor: ComposerSequenceBinding,
     pub(crate) description_reader: ComposerSequenceBinding,
+    pub(crate) description_inline: ComposerKeyBinding,
     pub(crate) issue_type: ComposerSequenceBinding,
     pub(crate) parent: ComposerSequenceBinding,
     pub(crate) status: ComposerSequenceBinding,
     pub(crate) priority: ComposerSequenceBinding,
     pub(crate) assignee: ComposerSequenceBinding,
+    pub(crate) story_points: ComposerSequenceBinding,
+    pub(crate) fix_versions: ComposerSequenceBinding,
+    pub(crate) labels: ComposerSequenceBinding,
     pub(crate) create_submit: ComposerKeyBinding,
     pub(crate) create_confirm: ComposerKeyBinding,
     pub(crate) dialog_cancel: ComposerKeyBinding,
@@ -196,11 +204,15 @@ impl ComposerKeyBindings {
             description_focus: sequence_binding(COMPOSER_DESCRIPTION_FOCUS_KEY_SETTING, "dd")?,
             description_editor: sequence_binding(COMPOSER_DESCRIPTION_EDITOR_KEY_SETTING, "do")?,
             description_reader: sequence_binding(COMPOSER_DESCRIPTION_READER_KEY_SETTING, "ds")?,
+            description_inline: binding(COMPOSER_DESCRIPTION_INLINE_KEY_SETTING, "shift+i")?,
             issue_type: sequence_binding(COMPOSER_ISSUE_TYPE_KEY_SETTING, "it")?,
             parent: sequence_binding(COMPOSER_PARENT_KEY_SETTING, "pa")?,
             status: sequence_binding(COMPOSER_STATUS_KEY_SETTING, "st")?,
             priority: sequence_binding(COMPOSER_PRIORITY_KEY_SETTING, "pr")?,
             assignee: sequence_binding(COMPOSER_ASSIGNEE_KEY_SETTING, "ee")?,
+            story_points: sequence_binding(COMPOSER_STORY_POINTS_KEY_SETTING, "sp")?,
+            fix_versions: sequence_binding(COMPOSER_FIX_VERSIONS_KEY_SETTING, "fv")?,
+            labels: sequence_binding(COMPOSER_LABELS_KEY_SETTING, "be")?,
             create_submit: binding(COMPOSER_CREATE_SUBMIT_KEY_SETTING, "ctrl+enter")?,
             create_confirm: binding(COMPOSER_CREATE_CONFIRM_KEY_SETTING, "o")?,
             dialog_cancel: binding(COMPOSER_DIALOG_CANCEL_KEY_SETTING, "c")?,
@@ -228,11 +240,15 @@ impl ComposerKeyBindings {
             bindings.description_focus.sequence(),
             bindings.description_editor.sequence(),
             bindings.description_reader.sequence(),
+            bindings.description_inline.sequence(),
             bindings.issue_type.sequence(),
             bindings.parent.sequence(),
             bindings.status.sequence(),
             bindings.priority.sequence(),
             bindings.assignee.sequence(),
+            bindings.story_points.sequence(),
+            bindings.fix_versions.sequence(),
+            bindings.labels.sequence(),
         ])?;
         ensure_unambiguous(&[
             bindings.create_submit.sequence(),
@@ -631,6 +647,10 @@ impl AppSettings {
                 self.composer_keys.description_reader.sequence.clone(),
             ),
             (
+                COMPOSER_DESCRIPTION_INLINE_KEY_SETTING,
+                self.composer_keys.description_inline.sequence.clone(),
+            ),
+            (
                 COMPOSER_ISSUE_TYPE_KEY_SETTING,
                 self.composer_keys.issue_type.sequence.clone(),
             ),
@@ -649,6 +669,18 @@ impl AppSettings {
             (
                 COMPOSER_ASSIGNEE_KEY_SETTING,
                 self.composer_keys.assignee.sequence.clone(),
+            ),
+            (
+                COMPOSER_STORY_POINTS_KEY_SETTING,
+                self.composer_keys.story_points.sequence.clone(),
+            ),
+            (
+                COMPOSER_FIX_VERSIONS_KEY_SETTING,
+                self.composer_keys.fix_versions.sequence.clone(),
+            ),
+            (
+                COMPOSER_LABELS_KEY_SETTING,
+                self.composer_keys.labels.sequence.clone(),
             ),
             (
                 COMPOSER_CREATE_SUBMIT_KEY_SETTING,

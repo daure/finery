@@ -15,7 +15,7 @@ use ratatui::{
 use tuicore::{
     Animated, Button, CellContext, ChildKey, Column, DataViewTransformMode, Dropdown,
     DropdownLabelPosition, DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId,
-    FocusTarget, Key, KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult,
+    FocusTarget, HotkeyEvent, Key, KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult,
     LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlKeyBindings,
     MenuButton, MenuItem, RenderCtx, SearchMode, Spinner, TickResult, TreeAdapter, TuiEvent,
     TuiNode,
@@ -76,6 +76,15 @@ pub(in crate::pages::backlog) enum BacklogSectionEvent {
     MoveLocked,
     OpenTicket {
         key: String,
+    },
+    YankTicketUrl {
+        key: String,
+    },
+    YankSprintGoal {
+        goal: String,
+    },
+    YankSprintReport {
+        sprint_id: u64,
     },
     OpenQuickMenu {
         section_id: String,
@@ -478,6 +487,55 @@ impl BacklogTree {
         true
     }
 
+    fn handle_yank(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        let TuiEvent::Hotkey(HotkeyEvent::Commit(sequence)) = event else {
+            return false;
+        };
+        let Some(id) = self.control.data_view().highlighted_id() else {
+            return false;
+        };
+        let event = match sequence.as_str() {
+            "yu" => self
+                .control
+                .items()
+                .iter()
+                .find(|row| row.id == id)
+                .and_then(|row| match &row.content {
+                    BacklogRowContent::WorkItem(item) => Some(BacklogSectionEvent::YankTicketUrl {
+                        key: item.item.key.clone(),
+                    }),
+                    BacklogRowContent::Section { .. } => None,
+                }),
+            "yg" => self.sprint_for_section(&id).and_then(|sprint| {
+                sprint
+                    .goal
+                    .clone()
+                    .filter(|goal| !goal.trim().is_empty())
+                    .map(|goal| BacklogSectionEvent::YankSprintGoal { goal })
+            }),
+            "yv" => self
+                .sprint_for_section(&id)
+                .map(|sprint| BacklogSectionEvent::YankSprintReport {
+                    sprint_id: sprint.id,
+                }),
+            _ => None,
+        };
+        let Some(event) = event else {
+            return false;
+        };
+        let _ = self.events.send(event);
+        ctx.stop_propagation();
+        true
+    }
+
+    fn sprint_for_section(&self, id: &str) -> Option<&Sprint> {
+        let sprint_id = id.strip_prefix("section:sprint-")?.parse::<u64>().ok()?;
+        self.snapshot
+            .sprints
+            .iter()
+            .find(|sprint| sprint.id == sprint_id)
+    }
+
     fn handle_ticket_number_jump(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
         let TuiEvent::Key(key) = event else {
             return false;
@@ -633,6 +691,9 @@ impl BacklogTree {
         ctx: &mut EventCtx<()>,
         dispatch: impl FnOnce(&mut ListControl<BacklogRow, String>, &mut EventCtx<()>) -> EventOutcome,
     ) -> EventOutcome {
+        if self.handle_yank(event, ctx) {
+            return EventOutcome::Handled;
+        }
         if self.handle_ticket_number_jump(event, ctx) {
             return EventOutcome::Handled;
         }
@@ -844,7 +905,12 @@ impl TuiNode for BacklogTree {
             area.width,
             area.height.saturating_sub(header_height),
         );
-        let result = self.control.layout(self.control_area, ctx);
+        let (result, _) = ctx.with_focus_fallback_hotkey_sequences_status(
+            FocusId::new("data-view"),
+            self.control_area,
+            ["yu".to_owned(), "yg".to_owned(), "yv".to_owned()],
+            |ctx| self.control.layout(self.control_area, ctx),
+        );
         ctx.push_slot(ChildKey::new("refresh"), self.refresh_area, |ctx| {
             self.refresh.layout(self.refresh_area, ctx)
         });

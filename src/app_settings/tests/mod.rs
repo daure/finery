@@ -259,6 +259,10 @@ fn composer_keys_resolve_labels_and_reject_active_duplicates() {
     assert_eq!(settings.composer_keys.commit.label(), "⌃m");
     assert_eq!(settings.composer_keys.create_submit.label(), "⌃Enter");
     assert_eq!(settings.composer_keys.description_focus.label(), "dd");
+    assert_eq!(settings.composer_keys.description_inline.label(), "I");
+    assert_eq!(settings.composer_keys.story_points.label(), "sp");
+    assert_eq!(settings.composer_keys.fix_versions.label(), "fv");
+    assert_eq!(settings.composer_keys.labels.label(), "be");
 
     let duplicate = HashMap::from([
         (COMPOSER_ADD_SIBLING_KEY_SETTING.into(), "shift+s".into()),
