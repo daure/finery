@@ -312,11 +312,6 @@ impl BacklogPage {
     }
 
     #[cfg(test)]
-    pub(super) fn take_section_event_for_test(&self) -> Option<BacklogSectionEvent> {
-        self.section_receiver.try_recv().ok()
-    }
-
-    #[cfg(test)]
     pub(super) fn move_is_locked_for_test(&self) -> bool {
         self.move_locked.get()
     }
@@ -1384,12 +1379,6 @@ fn work_items_mut<'a>(
             .find(|sprint| sprint.id == sprint_id)
             .map(|sprint| &mut sprint.work_items)
     }
-}
-
-#[cfg(test)]
-pub(super) fn snapshot_view(snapshot: &BacklogSnapshot) -> BacklogTree {
-    let (sender, _) = mpsc::channel();
-    backlog_tree(snapshot, sender, Rc::new(Cell::new(false)))
 }
 
 fn backlog_view(

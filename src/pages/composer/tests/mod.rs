@@ -12,7 +12,7 @@ use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use tuicore::{
     AnimationSettings, CheckState, EventCtx, EventOutcome, EventRoute, ExternalEditorResponse,
     FocusCtx, FocusId, FocusRequest, HotkeyEvent, Key, KeyEvent, KeyModifiers, LayoutCtx,
-    RenderCtx, TabsBodyBorderStyle, TuiEvent, TuiNode, theme,
+    LifecycleCtx, RenderCtx, TabsBodyBorderStyle, TuiEvent, TuiNode, theme,
 };
 
 use super::page::ComposerPage;
@@ -37,7 +37,9 @@ const TEST_WIDTH: u16 = 96;
 fn composer_page() -> ComposerPage {
     let service = AppService::for_tests();
     let settings = service.settings();
-    ComposerPage::new(ComposerState::demo().change_sets, service, settings)
+    let mut page = ComposerPage::new(ComposerState::demo().change_sets, service, settings);
+    page.init(&mut LifecycleCtx::default());
+    page
 }
 
 fn render_text(page: &mut ComposerPage) -> String {
@@ -61,6 +63,12 @@ fn render_text_at(page: &mut ComposerPage, width: u16) -> String {
             (0..area.width).map(move |x| buffer.cell((x, y)).unwrap().symbol().to_owned())
         })
         .collect()
+}
+
+fn render_text_after_syntax(page: &mut ComposerPage, width: u16) -> String {
+    std::thread::sleep(Duration::from_millis(20));
+    page.tick(Duration::from_millis(100), AnimationSettings::default());
+    render_text_at(page, width)
 }
 
 fn render_property_dropdown(dropdown: &mut BoundPropertyDropdown) -> String {
@@ -276,7 +284,7 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
         }),
         &mut EventCtx::default(),
     );
-    assert!(render_text(&mut page).contains("Editor result"));
+    assert!(render_text_after_syntax(&mut page, TEST_WIDTH).contains("Editor result"));
 
     for sequence in ["dd", "do", "ds"] {
         let tabs = focus(&mut page, "tabs");
@@ -411,7 +419,7 @@ fn desktop_description_shortcuts_open_the_editor_and_speed_reader() {
         }),
         &mut EventCtx::default(),
     );
-    assert!(render_text_at(&mut page, 120).contains("Desktop editor result"));
+    assert!(render_text_after_syntax(&mut page, 120).contains("Desktop editor result"));
 
     page.dispatch_event(
         &EventRoute::new(description.path),
@@ -483,7 +491,7 @@ fn new_ticket_dialog_shows_title_guidance() {
 
     open_new_ticket(&mut page);
 
-    let text = render_text(&mut page);
+    let text = render_text_after_syntax(&mut page, TEST_WIDTH);
     assert!(text.contains("Create ticket"));
     assert!(text.contains("Issue type"));
     assert!(text.contains("Story"));
