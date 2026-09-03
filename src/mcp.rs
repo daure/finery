@@ -25,7 +25,7 @@ use crate::{
     store::work_items::{BacklogSnapshot, RankPlan, RunwayCapacitySource, WorkItem, rank_plan},
 };
 
-const MCP_INSTRUCTIONS: &str = "Read Composer change sets and Jira backlog order. Before mutating an existing change set, reread it and send its current revision as expected_revision. Call get_change_set_guidance before reading or writing a Composer ticket description. Call lookup_jira_user before creating an @mention unless the account ID is already known. Use lookup_jira_label to discover existing Jira labels and lookup_jira_fix_version to discover project fix versions. create_change_set, apply_change_set_patch, and delete_change_set persist local edits only; delete_change_set never deletes Jira tickets. Before Jira reordering, state the exact move and get explicit user confirmation; reread the workspace afterward. submit_change_set is the only Composer Jira submission path, requires explicit ticket IDs, and may set updateTitle to rename the change set as part of submission. Submitted tickets cannot be changed or resubmitted. If a description cannot round-trip safely, state the identified formatting risk and get explicit user confirmation before setting accept_unsafe_description_overwrite. Recover marked draft creates only with confirmed Jira keys; never retry ambiguous creates.";
+const MCP_INSTRUCTIONS: &str = "Read Composer change sets and Jira backlog order. Before mutating an existing change set, reread it and send its current revision as expected_revision. Call get_change_set_guidance before reading or writing a Composer ticket description. Call lookup_jira_user before creating an @mention unless the account ID is already known. Use lookup_jira_label to discover existing Jira labels and lookup_jira_fix_version to discover project fix versions. create_change_set, apply_change_set_patch, and delete_change_set persist local edits only; delete_change_set never deletes Jira tickets. Before Jira reordering, state the exact move and get explicit user confirmation; reread the workspace afterward. submit_change_set is the only Composer Jira submission path, requires explicit ticket IDs, and may set updateTitle to rename the change set as part of submission. Submitted tickets cannot be changed or resubmitted. If a description cannot round-trip safely, state the identified formatting risk and get explicit user confirmation before setting accept_unsafe_description_overwrite. Recover marked draft creates with a confirmed Jira key, or explicitly mark them absent only after verifying they did not reach Jira; never retry ambiguous creates.";
 // Agent-facing description contract. Any Jira ADF conversion, supported tag, validation, or
 // overwrite-safety change MUST update this guidance so MCP agents receive accurate instructions.
 const CHANGE_SET_GUIDANCE: &str = "Composer descriptions are Markdown transformed to and from Jira ADF. This is reference documentation, not a recommendation to add rich formatting. The syntax preserves Jira-specific source content when it is present.\n\nAvailable syntax: normal Markdown, nested ordered/bullet lists, basic tables (one header row; one paragraph per cell), underline (++text++), text colour ({color:#RRGGBB}text{/color}), emoji (:short_name:), UTC dates (@date(YYYY-MM-DD)), statuses (@status(\"Text\", color)), mentions (@mention(\"@Name\", \"ACCOUNT_ID\")), and cards (@card(https://example.com)). Jira background highlights are rejected because they break Jira's native editor. Status colors: green, blue, red, yellow, neutral, purple.\n\nJira blocks:\n- Panel: {{jira:panel {\"panelType\":\"info\"}}} … {{/jira:panel}}\n- Task list: {{jira:task-list}} with - [ ] or - [x] items … {{/jira:task-list}}\n- Decision list: {{jira:decision-list}} with plain - item entries … {{/jira:decision-list}}\n\nEscape literal {{ as \\{\\{ and any literal canonical inline opening with a leading backslash. Emoji syntax needs both colons, and content in inline code spans is literal. Old {{jira:mention ... /}} and {{jira:inline-card ... /}} forms are rejected. A patch with malformed Jira syntax is rejected atomically; malformed syntax also blocks a selected submission before Jira writes. For an unsafe existing Jira description, describe the formatting risk and get explicit approval before accept_unsafe_description_overwrite.";
@@ -142,6 +142,8 @@ struct RecoverSubmissionAttempt {
     expected_revision: i64,
     #[serde(default)]
     recovered_creates: Vec<RecoveredCreate>,
+    #[serde(default)]
+    abandoned_creates: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -967,7 +969,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Recover a durable abandoned submission attempt. Claimed attempts clear without contacting Jira. Marked draft creates require every local draft ID and its confirmed Jira key; Finery fetches those keys before reconciliation and never retries ambiguous creates."
+        description = "Recover a durable abandoned submission attempt. Claimed attempts clear without contacting Jira. For every marked draft create, provide either its confirmed Jira key or its local ID in abandoned_creates after verifying it did not reach Jira. Finery fetches confirmed keys and never retries ambiguous creates."
     )]
     async fn recover_submission_attempt(
         &self,
@@ -978,6 +980,7 @@ impl McpServer {
                 &input.change_set_id,
                 input.expected_revision,
                 input.recovered_creates,
+                input.abandoned_creates,
             )
         })
         .await

@@ -1636,35 +1636,43 @@ pub(super) fn sprint_report(sprint: &Sprint, base_url: Option<&str>) -> String {
     let completed = report_items
         .iter()
         .copied()
-        .filter(|item| item.done)
+        .filter(|item| crate::store::work_items::is_done_status(&item.status))
         .collect::<Vec<_>>();
+    let total_points = report_items
+        .iter()
+        .copied()
+        .filter(|item| is_estimate_eligible(item))
+        .filter_map(|item| item.story_points)
+        .sum::<f64>();
     let completed_points = completed
         .iter()
         .filter(|item| is_estimate_eligible(item))
         .filter_map(|item| item.story_points)
         .sum::<f64>();
-    let completed_unestimated = completed
+    let estimated_items = report_items
         .iter()
-        .filter(|item| is_estimate_eligible(item) && item.story_points.is_none())
+        .filter(|item| is_estimate_eligible(item) && item.story_points.is_some())
         .count();
-    let remaining = report_items.iter().filter(|item| !item.done).count();
+    let completed_estimated_items = completed
+        .iter()
+        .filter(|item| is_estimate_eligible(item) && item.story_points.is_some())
+        .count();
     if !has_goal {
         lines.push(String::new());
     }
     lines.extend([
         format!(
-            "Completed: {} points across {} tickets",
+            "Points: {}/{} pts completed",
             points_label(completed_points),
-            completed.len()
+            points_label(total_points)
         ),
-        format!(
-            "Unestimated: {completed_unestimated} completed tickets, {remaining} remaining tickets"
-        ),
+        format!("Tickets: {}/{} done", completed.len(), report_items.len()),
+        format!("Estimated stories/tasks: {completed_estimated_items}/{estimated_items}"),
         String::new(),
         "Tickets:".into(),
     ]);
     lines.extend(report_items.iter().copied().map(|item| {
-        let completion = if item.done { "✓" } else { "•" };
+        let completion = sprint_ticket_marker(item);
         let reference = base_url
             .map(|url| format!("{url}/browse/{}", item.key))
             .unwrap_or_else(|| item.key.clone());
@@ -1710,6 +1718,19 @@ fn is_subtask(item: &WorkItem) -> bool {
         item.kind.to_ascii_lowercase().as_str(),
         "sub-task" | "subtask"
     )
+}
+
+fn sprint_ticket_marker(item: &WorkItem) -> &'static str {
+    if crate::store::work_items::is_done_status(&item.status) {
+        "✓"
+    } else if matches!(
+        item.status.to_ascii_lowercase().as_str(),
+        "to do" | "selected for development"
+    ) {
+        "·"
+    } else {
+        "~"
+    }
 }
 
 fn ticket_type_marker(item: &WorkItem) -> Option<&'static str> {

@@ -619,6 +619,7 @@ impl ComposerService {
         change_set_id: &str,
         expected_revision: i64,
         recovered_creates: Vec<RecoveredCreate>,
+        abandoned_creates: Vec<String>,
     ) -> Result<ChangeSetPatchResponse, ServiceError> {
         let versioned = self.load_expected_change_set(change_set_id, expected_revision)?;
         let Some(attempt) = versioned.change_set.submission_attempt.clone() else {
@@ -650,19 +651,30 @@ impl ComposerService {
             .filter(|change| change.kind == ChangeKind::Added)
             .map(|change| change.id.clone())
             .collect::<Vec<_>>();
-        if recovered_creates.len() != creates.len()
+        let confirmed_create_ids = recovered_creates
+            .iter()
+            .map(|recovered| recovered.ticket_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let abandoned_create_ids = abandoned_creates
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        if confirmed_create_ids.len() != recovered_creates.len()
+            || abandoned_create_ids.len() != abandoned_creates.len()
+            || confirmed_create_ids
+                .intersection(&abandoned_create_ids)
+                .next()
+                .is_some()
+            || confirmed_create_ids.len() + abandoned_create_ids.len() != creates.len()
             || recovered_creates.iter().any(|recovered| {
                 !creates.contains(&recovered.ticket_id) || recovered.jira_key.trim().is_empty()
             })
-            || recovered_creates
+            || abandoned_creates
                 .iter()
-                .map(|recovered| &recovered.ticket_id)
-                .collect::<std::collections::HashSet<_>>()
-                .len()
-                != recovered_creates.len()
+                .any(|ticket_id| !creates.contains(ticket_id))
         {
             return Err(invalid(
-                "confirm every claimed draft create with its Jira key before recovery",
+                "confirm every claimed draft create with its Jira key or as absent before recovery",
             ));
         }
         let recovered_creates = recovered_creates
@@ -670,6 +682,17 @@ impl ComposerService {
             .map(|recovered| (recovered.ticket_id, recovered.jira_key))
             .collect::<HashMap<_, _>>();
         for change in claimed {
+            if change.kind == ChangeKind::Added && abandoned_create_ids.contains(change.id.as_str())
+            {
+                dispatch(
+                    &mut state,
+                    ComposerAction::ResolveCreateAttempt {
+                        change_set_id: change_set_id.into(),
+                        id: change.id,
+                    },
+                )?;
+                continue;
+            }
             let snapshot = match change.kind {
                 ChangeKind::Added => SubmissionSnapshot {
                     original: None,

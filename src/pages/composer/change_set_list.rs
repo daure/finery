@@ -18,7 +18,7 @@ use tuicore::{
 use crate::{
     app_settings::ComposerKeyBindings,
     service::AppService,
-    store::composer::{ChangeKind, ChangeSet, ComposerAction, ComposerState, Ticket, TicketChange},
+    store::composer::{ChangeKind, ChangeSet, ComposerAction, ComposerState, Ticket, TicketChange, TicketKind},
 };
 
 #[derive(Clone)]
@@ -784,16 +784,29 @@ fn escape_reference(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn change_set_share_text(change_set: &ChangeSet, base_url: Option<&str>) -> String {
-    let aliases = change_set
+pub(super) fn change_set_share_text(change_set: &ChangeSet, base_url: Option<&str>) -> String {
+    let includes_non_subtask_change = change_set.tickets.iter().any(|change| {
+        change.kind != ChangeKind::Synced
+            && ticket_for_change(change).is_some_and(|ticket| ticket.kind != TicketKind::Subtask)
+    });
+    let changes = change_set
         .tickets
+        .iter()
+        .filter(|change| {
+            ticket_for_change(change)
+                .is_some_and(|ticket| {
+                    !includes_non_subtask_change || ticket.kind != TicketKind::Subtask
+                })
+        })
+        .collect::<Vec<_>>();
+    let aliases = changes
         .iter()
         .filter_map(|change| {
             ticket_for_change(change).map(|ticket| (ticket.key.as_str(), change.id.as_str()))
         })
         .collect::<std::collections::HashMap<_, _>>();
     let mut children = std::collections::HashMap::<Option<&str>, Vec<&TicketChange>>::new();
-    for change in &change_set.tickets {
+    for change in &changes {
         let parent = ticket_for_change(change)
             .and_then(|ticket| ticket.parent_key.as_deref())
             .and_then(|parent| aliases.get(parent).copied());
@@ -802,7 +815,10 @@ fn change_set_share_text(change_set: &ChangeSet, base_url: Option<&str>) -> Stri
     for siblings in children.values_mut() {
         siblings.sort_by_key(|change| (change.sibling_order, change.id.as_str()));
     }
-    let mut lines = vec![change_set.name.clone()];
+    let mut lines = Vec::new();
+    if children.get(&None).is_some_and(|roots| roots.len() > 1) {
+        lines.push(change_set.name.clone());
+    }
     let mut visited = std::collections::HashSet::new();
     append_share_children(
         None,
@@ -813,7 +829,7 @@ fn change_set_share_text(change_set: &ChangeSet, base_url: Option<&str>) -> Stri
         change_set,
         base_url,
     );
-    for change in &change_set.tickets {
+    for change in changes {
         if visited.insert(change.id.as_str()) {
             append_share_line(change, "", &mut lines, change_set, base_url);
         }
@@ -841,13 +857,32 @@ fn append_share_children<'a>(
         let branch = parent
             .map(|_| if last { "└─ " } else { "├─ " })
             .unwrap_or("");
-        append_share_line(
-            change,
-            &format!("{prefix}{branch}"),
-            lines,
-            change_set,
-            base_url,
-        );
+        let line_prefix = format!("{prefix}{branch}");
+        if share_omits_story_heading(change, children) {
+            let child = children
+                .get(&Some(change.id.as_str()))
+                .and_then(|children| children.first())
+                .expect("story heading is omitted only when it has one child");
+            if visited.insert(child.id.as_str()) {
+                append_share_line(child, &line_prefix, lines, change_set, base_url);
+                let next_prefix = match parent {
+                    Some(_) if last => format!("{prefix}   "),
+                    Some(_) => format!("{prefix}│  "),
+                    None => String::new(),
+                };
+                append_share_children(
+                    Some(child.id.as_str()),
+                    &next_prefix,
+                    children,
+                    visited,
+                    lines,
+                    change_set,
+                    base_url,
+                );
+            }
+            continue;
+        }
+        append_share_line(change, &line_prefix, lines, change_set, base_url);
         let next_prefix = match parent {
             Some(_) if last => format!("{prefix}   "),
             Some(_) => format!("{prefix}│  "),
@@ -865,6 +900,16 @@ fn append_share_children<'a>(
     }
 }
 
+fn share_omits_story_heading(
+    change: &TicketChange,
+    children: &std::collections::HashMap<Option<&str>, Vec<&TicketChange>>,
+) -> bool {
+    ticket_for_change(change).is_some_and(|ticket| ticket.kind == TicketKind::Story)
+        && children
+            .get(&Some(change.id.as_str()))
+            .is_some_and(|children| children.len() == 1)
+}
+
 fn append_share_line(
     change: &TicketChange,
     prefix: &str,
@@ -875,17 +920,25 @@ fn append_share_line(
     let Some(ticket) = ticket_for_change(change) else {
         return;
     };
-    let action = match change.kind {
-        ChangeKind::Added => "Created",
-        ChangeKind::Modified => "Updated",
-        ChangeKind::Deleted => "Deleted",
-        ChangeKind::Synced => "Unchanged",
-    };
     let reference = (!ticket.key.starts_with("NEW-"))
         .then(|| base_url.map(|url| format!("{url}/browse/{}", ticket.key)))
         .flatten()
         .unwrap_or_else(|| format!("Draft {}/{}", change_set.id, change.id));
-    lines.push(format!("{prefix}{action} - {reference} - {}", ticket.title));
+    lines.push(format!(
+        "{prefix}{} {} - {reference}",
+        share_ticket_type_marker(ticket.kind),
+        ticket.title
+    ));
+}
+
+fn share_ticket_type_marker(kind: TicketKind) -> &'static str {
+    match kind {
+        TicketKind::Epic => "[E]",
+        TicketKind::Story => "[S]",
+        TicketKind::Task => "[T]",
+        TicketKind::Bug => "[B]",
+        TicketKind::Subtask => "[ST]",
+    }
 }
 
 fn ticket_for_change(change: &TicketChange) -> Option<&Ticket> {

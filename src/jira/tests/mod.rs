@@ -718,6 +718,36 @@ fn failed_parent_skips_descendant_and_created_key_replaces_local_parent_referenc
 }
 
 #[test]
+fn created_parent_with_failed_follow_up_still_submits_descendants() {
+    let changes = vec![
+        added("NEW-2", TicketKind::Subtask, Some("NEW-1")),
+        added("NEW-1", TicketKind::Story, None),
+    ];
+    let mut submitted_parent = None;
+
+    let outcomes = submit_ordered_changes(&changes, |change| {
+        if change.id == "NEW-1" {
+            Err(created_issue_failure(
+                "transition failed".into(),
+                ticket("FIN-101", TicketKind::Story, None),
+                Some(ticket("FIN-101", TicketKind::Story, None)),
+            ))
+        } else {
+            submitted_parent = change.updated.as_ref().unwrap().parent_key.clone();
+            Ok(crate::store::composer::SubmissionSnapshot {
+                original: None,
+                updated: Some(ticket("FIN-102", TicketKind::Subtask, Some("FIN-101"))),
+            })
+        }
+    })
+    .unwrap();
+
+    assert!(outcomes[0].result.is_err());
+    assert!(outcomes[1].result.is_ok());
+    assert_eq!(submitted_parent.as_deref(), Some("FIN-101"));
+}
+
+#[test]
 fn deleted_descendants_commit_before_parents_even_when_parent_delete_fails() {
     let parent = TicketChange {
         id: "FIN-1".into(),

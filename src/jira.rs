@@ -1763,6 +1763,7 @@ fn submit_ordered_changes(
         if let Some(parent) = parent.as_deref()
             && parent.starts_with("NEW-")
             && failed.contains(parent)
+            && !created_keys.contains_key(parent)
         {
             failed.insert(change.id.clone());
             outcomes.push(TicketSubmitOutcome {
@@ -1786,6 +1787,12 @@ fn submit_ordered_changes(
             && change.id.starts_with("NEW-")
         {
             created_keys.insert(change.id.clone(), ticket.key.clone());
+        }
+        if let Err(failure) = &result
+            && change.id.starts_with("NEW-")
+            && let Some((created, _)) = failure.refresh.as_deref()
+        {
+            created_keys.insert(change.id.clone(), created.key.clone());
         }
         if result.is_err() {
             failed.insert(change.id.clone());

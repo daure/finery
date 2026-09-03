@@ -15,6 +15,7 @@ use tuicore::{
     LifecycleCtx, RenderCtx, TabsBodyBorderStyle, TuiEvent, TuiNode, theme,
 };
 
+use super::change_set_list::change_set_share_text;
 use super::page::ComposerPage;
 use super::property_fields::BoundPropertyDropdown;
 use super::source::SourceController;
@@ -25,8 +26,8 @@ use crate::{
     jira::JiraOption,
     service::{AppService, composer_service::ChangeSetPatchOperation},
     store::composer::{
-        ComposerAction, ComposerState, ComposerViewMode, PlacementTarget, SubmissionSnapshot,
-        TicketKind, TicketPresentation,
+        ChangeKind, ChangeSet, ComposerAction, ComposerState, ComposerViewMode, PlacementTarget,
+        SubmissionSnapshot, Ticket, TicketChange, TicketKind, TicketPresentation,
     },
     store::work_items::{SubtaskProgress, WorkItem},
 };
@@ -34,6 +35,188 @@ use crate::{
 use super::title_guidance::{TitleLevel, evaluate_title, format_title};
 
 const TEST_WIDTH: u16 = 96;
+
+fn share_ticket(key: &str, title: &str, kind: TicketKind, parent_key: Option<&str>) -> Ticket {
+    Ticket {
+        key: key.into(),
+        project_key: "FIN".into(),
+        title: title.into(),
+        description: String::new(),
+        description_safe_to_overwrite: true,
+        description_overwrite_warning: None,
+        kind,
+        status: "To Do".into(),
+        priority: "Medium".into(),
+        assignee: String::new(),
+        assignee_account_id: String::new(),
+        story_points: None,
+        fix_versions: Vec::new(),
+        labels: Vec::new(),
+        parent_key: parent_key.map(str::to_owned),
+        parent_title: None,
+        parent_kind: None,
+        has_children: false,
+    }
+}
+
+fn share_change(id: &str, ticket: Ticket) -> TicketChange {
+    TicketChange {
+        id: id.into(),
+        original: None,
+        updated: Some(ticket),
+        kind: ChangeKind::Modified,
+        submitted: None,
+        retry_blocked: false,
+        create_attempt: false,
+        sibling_order: 0,
+    }
+}
+
+fn share_set(tickets: Vec<TicketChange>) -> ChangeSet {
+    ChangeSet {
+        id: "CS-12".into(),
+        name: "Change set name".into(),
+        tickets,
+        selected_ticket_ids: Vec::new(),
+        closed: false,
+        submission_attempt: None,
+    }
+}
+
+#[test]
+fn sharing_one_story_ticket_omits_the_change_set_and_story() {
+    let text = change_set_share_text(
+        &share_set(vec![
+            share_change(
+                "story",
+                share_ticket("FIN-100", "Story title", TicketKind::Story, None),
+            ),
+            share_change(
+                "ticket",
+                share_ticket("FIN-101", "Ticket title", TicketKind::Task, Some("FIN-100")),
+            ),
+        ]),
+        Some("https://jira.example"),
+    );
+
+    assert_eq!(
+        text,
+        "[T] Ticket title - https://jira.example/browse/FIN-101"
+    );
+}
+
+#[test]
+fn sharing_multiple_story_tickets_keeps_the_story_heading() {
+    let mut second_ticket = share_change(
+        "second-ticket",
+        share_ticket("FIN-102", "Second ticket", TicketKind::Task, Some("FIN-100")),
+    );
+    second_ticket.sibling_order = 1;
+    let text = change_set_share_text(
+        &share_set(vec![
+            share_change(
+                "story",
+                share_ticket("FIN-100", "Story title", TicketKind::Story, None),
+            ),
+            share_change(
+                "first-ticket",
+                share_ticket("FIN-101", "First ticket", TicketKind::Task, Some("FIN-100")),
+            ),
+            second_ticket,
+        ]),
+        Some("https://jira.example"),
+    );
+
+    assert_eq!(
+        text,
+        "[S] Story title - https://jira.example/browse/FIN-100\n├─ [T] First ticket - https://jira.example/browse/FIN-101\n└─ [T] Second ticket - https://jira.example/browse/FIN-102"
+    );
+}
+
+#[test]
+fn sharing_omits_subtasks_when_a_non_subtask_changed() {
+    let text = change_set_share_text(
+        &share_set(vec![
+            share_change(
+                "story",
+                share_ticket("FIN-100", "Story title", TicketKind::Story, None),
+            ),
+            share_change(
+                "ticket",
+                share_ticket("FIN-101", "Ticket title", TicketKind::Task, Some("FIN-100")),
+            ),
+            share_change(
+                "subtask",
+                share_ticket(
+                    "FIN-102",
+                    "Subtask title",
+                    TicketKind::Subtask,
+                    Some("FIN-101"),
+                ),
+            ),
+        ]),
+        Some("https://jira.example"),
+    );
+
+    assert_eq!(
+        text,
+        "[T] Ticket title - https://jira.example/browse/FIN-101"
+    );
+}
+
+#[test]
+fn sharing_multiple_story_groups_includes_the_change_set_name_and_markers() {
+    let mut first_story = share_change(
+        "story",
+        share_ticket("FIN-100", "First story", TicketKind::Story, None),
+    );
+    first_story.sibling_order = 1;
+    let mut second_bug = share_change(
+        "bug",
+        share_ticket("FIN-200", "Second bug", TicketKind::Bug, None),
+    );
+    second_bug.sibling_order = 2;
+    let text = change_set_share_text(
+        &share_set(vec![
+            first_story,
+            share_change(
+                "ticket",
+                share_ticket("FIN-101", "Its ticket", TicketKind::Task, Some("FIN-100")),
+            ),
+            second_bug,
+        ]),
+        Some("https://jira.example"),
+    );
+
+    assert_eq!(
+        text,
+        "Change set name\n[T] Its ticket - https://jira.example/browse/FIN-101\n[B] Second bug - https://jira.example/browse/FIN-200"
+    );
+}
+
+#[test]
+fn sharing_only_subtasks_keeps_them_and_uses_the_subtask_marker() {
+    let mut story = share_change(
+        "story",
+        share_ticket("FIN-100", "Story title", TicketKind::Story, None),
+    );
+    story.kind = ChangeKind::Synced;
+    let text = change_set_share_text(
+        &share_set(vec![
+            story,
+            share_change(
+                "subtask",
+                share_ticket("FIN-102", "Subtask title", TicketKind::Subtask, Some("FIN-100")),
+            ),
+        ]),
+        Some("https://jira.example"),
+    );
+
+    assert_eq!(
+        text,
+        "[ST] Subtask title - https://jira.example/browse/FIN-102"
+    );
+}
 
 #[test]
 fn speed_reader_removes_jira_adf_syntax_and_preserves_its_meaning() {

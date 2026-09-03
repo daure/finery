@@ -179,14 +179,14 @@ fn recovery_clears_claimed_attempt_after_process_loss() {
         .block_on(storage.save_change_set(&abandoned))
         .unwrap();
     let recovered = test_service(storage, runtime, Arc::new(|key: &str| Ok(ticket(key))))
-        .recover_submission_attempt("CS-1", 1, Vec::new())
+        .recover_submission_attempt("CS-1", 1, Vec::new(), Vec::new())
         .unwrap();
     assert_eq!(recovered.change_set.revision, 2);
     assert!(!recovered.change_set.value.tickets[0].submission_claimed);
 }
 
 #[test]
-fn recovery_requires_confirmed_jira_keys_for_marked_creates() {
+fn recovery_releases_marked_creates_confirmed_absent_from_jira() {
     let mut state = ComposerState::from_change_sets(vec![change_set()]);
     state
         .dispatch(ComposerAction::OpenChangeSet("CS-1".into()))
@@ -216,6 +216,12 @@ fn recovery_requires_confirmed_jira_keys_for_marked_creates() {
             owner_id: "lost-process".into(),
         })
         .unwrap();
+    state
+        .dispatch(ComposerAction::MarkSubmissionJiraStarted {
+            change_set_id: "CS-1".into(),
+            owner_id: "lost-process".into(),
+        })
+        .unwrap();
     let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
     let storage = runtime.block_on(Storage::connect_for_tests()).unwrap();
     runtime
@@ -223,9 +229,11 @@ fn recovery_requires_confirmed_jira_keys_for_marked_creates() {
         .unwrap();
     let service = test_service(storage, runtime, Arc::new(|key: &str| Ok(ticket(key))));
     let recovered = service
-        .recover_submission_attempt("CS-1", 1, Vec::new())
+        .recover_submission_attempt("CS-1", 1, Vec::new(), vec!["NEW-1".into()])
         .unwrap();
     assert!(!recovered.change_set.value.tickets[1].submission_claimed);
+    assert!(!recovered.change_set.value.tickets[1].create_attempt);
+    assert!(!recovered.change_set.value.tickets[1].submitted);
 }
 
 #[test]
@@ -294,6 +302,7 @@ fn recovery_reconciles_started_update_delete_and_create_attempts() {
             ticket_id: "NEW-1".into(),
             jira_key: "FIN-3".into(),
         }],
+        Vec::new(),
     )
     .unwrap();
 
@@ -329,7 +338,7 @@ fn recovery_reconciles_a_started_update_only_attempt() {
         runtime,
         Arc::new(move |_: &str| Ok(desired.clone())),
     )
-    .recover_submission_attempt("CS-1", 1, Vec::new())
+    .recover_submission_attempt("CS-1", 1, Vec::new(), Vec::new())
     .unwrap();
 
     assert!(recovered.change_set.value.tickets[0].submitted);
@@ -355,7 +364,7 @@ fn recovery_reconciles_a_started_delete_only_attempt() {
         runtime,
         Arc::new(|_: &str| Err("404 not found".into())),
     )
-    .recover_submission_attempt("CS-1", 1, Vec::new())
+    .recover_submission_attempt("CS-1", 1, Vec::new(), Vec::new())
     .unwrap();
 
     assert!(recovered.change_set.value.tickets[0].submitted);

@@ -48,11 +48,20 @@ fn work_item(key: &str, title: &str) -> WorkItem {
 fn sprint_report_uses_compact_ticket_points_without_dates() {
     let mut estimated = work_item("FIN-8", "Estimate this work");
     estimated.story_points = Some(8.0);
+    estimated.done = true;
+    estimated.status = "Done".into();
     let mut unestimated_bug = work_item("FIN-9", "Fix a bug");
     unestimated_bug.kind = "Bug".into();
     unestimated_bug.done = true;
+    unestimated_bug.status = "Done".into();
     let mut unestimated_story = work_item("FIN-10", "Unestimated story");
     unestimated_story.done = true;
+    unestimated_story.status = "Done".into();
+    let mut in_review = work_item("FIN-12", "Review report format");
+    in_review.status = "In Review".into();
+    in_review.story_points = Some(5.0);
+    let mut selected = work_item("FIN-13", "Select report release");
+    selected.status = "Selected for Development".into();
     let mut subtask = work_item("FIN-11", "Hidden subtask");
     subtask.kind = "Sub-task".into();
     subtask.done = true;
@@ -63,27 +72,42 @@ fn sprint_report_uses_compact_ticket_points_without_dates() {
         goal: Some("Ship it".into()),
         start_date: Some("2026-07-02T09:00:00.000Z".into()),
         end_date: Some("2026-07-16T17:00:00.000Z".into()),
-        work_items: vec![estimated, unestimated_bug, unestimated_story, subtask],
+        work_items: vec![
+            estimated,
+            unestimated_bug,
+            unestimated_story,
+            in_review,
+            selected,
+            subtask,
+        ],
         capacity: None,
     };
 
     let report = sprint_report(&sprint, Some("https://jira.example"));
 
-    assert!(report.starts_with(
-        "Sprint 1\n\nGoal: Ship it\nCompleted: 0 points across 2 tickets"
-    ));
+    assert!(report.starts_with("Sprint 1\n\nGoal: Ship it\nPoints: 8/13 pts completed"));
     assert!(!report.contains("2026-07-02"));
-    assert!(report.contains("Completed: 0 points across 2 tickets"));
-    assert!(report.contains("Unestimated: 1 completed tickets, 1 remaining tickets"));
+    assert!(report.contains("Points: 8/13 pts completed"));
+    assert!(report.contains("Tickets: 3/5 done"));
+    assert!(report.contains("Estimated stories/tasks: 1/2"));
     assert!(
         report.contains(
-            "• [S] Estimate this work - 8pts - To Do - https://jira.example/browse/FIN-8"
+            "✓ [S] Estimate this work - 8pts - Done - https://jira.example/browse/FIN-8"
         )
     );
-    assert!(report.contains("✓ [B] Fix a bug - To Do - https://jira.example/browse/FIN-9"));
+    assert!(report.contains("✓ [B] Fix a bug - Done - https://jira.example/browse/FIN-9"));
+    assert!(
+        report
+            .contains("✓ [S] Unestimated story - ?pts - Done - https://jira.example/browse/FIN-10")
+    );
     assert!(
         report.contains(
-            "✓ [S] Unestimated story - ?pts - To Do - https://jira.example/browse/FIN-10"
+            "~ [S] Review report format - 5pts - In Review - https://jira.example/browse/FIN-12"
+        )
+    );
+    assert!(
+        report.contains(
+            "· [S] Select report release - ?pts - Selected for Development - https://jira.example/browse/FIN-13"
         )
     );
     assert!(!report.contains("Hidden subtask"));
@@ -93,6 +117,7 @@ fn sprint_report_uses_compact_ticket_points_without_dates() {
 fn velocity_report_uses_loaded_historical_sprint_tickets() {
     let mut item = work_item("FIN-12", "Ship the report");
     item.done = true;
+    item.status = "Done".into();
     item.story_points = Some(3.0);
     let sprint = VelocitySprint {
         id: 12,
@@ -104,8 +129,10 @@ fn velocity_report_uses_loaded_historical_sprint_tickets() {
 
     let report = velocity_share_report(&sprint, None, Some("https://jira.example"));
 
-    assert!(report.contains("Completed: 3 points across 1 tickets"));
-    assert!(report.contains("✓ [S] Ship the report - 3pts - To Do - https://jira.example/browse/FIN-12"));
+    assert!(report.contains("Points: 3/3 pts completed"));
+    assert!(report.contains("Tickets: 1/1 done"));
+    assert!(report.contains("Estimated stories/tasks: 1/1"));
+    assert!(report.contains("✓ [S] Ship the report - 3pts - Done - https://jira.example/browse/FIN-12"));
 }
 
 fn snapshot() -> BacklogSnapshot {
