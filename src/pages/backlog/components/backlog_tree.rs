@@ -15,10 +15,10 @@ use ratatui::{
 use tuicore::{
     Animated, Button, CellContext, ChildKey, Column, DataViewTransformMode, Dropdown,
     DropdownLabelPosition, DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId,
-    FocusTarget, HotkeyEvent, Key, KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult,
-    LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlKeyBindings,
-    MenuButton, MenuItem, RenderCtx, SearchMode, Spinner, TickResult, TreeAdapter, TuiEvent,
-    TuiNode,
+    FocusRequest, FocusTarget, HotkeyEvent, Key, KeyModifiers, KeySpec, LayoutCtx, LayoutProposal,
+    LayoutResult, LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent,
+    ListControlKeyBindings, MenuButton, MenuItem, RenderCtx, SearchMode, Spinner, TickResult,
+    TreeAdapter, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -818,6 +818,18 @@ impl BacklogTree {
             let _ = self.events.send(BacklogSectionEvent::FiltersSubmitted);
         }
     }
+
+    fn refocus_data_view_after_unfocus(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        let TuiEvent::Key(key) = event else {
+            return false;
+        };
+        if !tuicore::keybindings().focus().unfocus_matches(*key) {
+            return false;
+        }
+        ctx.focus(FocusRequest::Target(FocusId::new("data-view")));
+        ctx.stop_propagation();
+        true
+    }
 }
 
 impl TuiNode for BacklogTree {
@@ -972,14 +984,22 @@ impl TuiNode for BacklogTree {
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
         if let Some(refresh_path) = route.path.without_first_if(&ChildKey::new("refresh")) {
-            return self
+            let outcome = self
                 .refresh
                 .dispatch_event(&EventRoute::new(refresh_path), event, ctx);
+            return self
+                .refocus_data_view_after_unfocus(event, ctx)
+                .then_some(EventOutcome::Handled)
+                .unwrap_or(outcome);
         }
         if let Some(velocity_path) = route.path.without_first_if(&ChildKey::new("velocity")) {
-            return self
+            let outcome = self
                 .velocity
                 .dispatch_event(&EventRoute::new(velocity_path), event, ctx);
+            return self
+                .refocus_data_view_after_unfocus(event, ctx)
+                .then_some(EventOutcome::Handled)
+                .unwrap_or(outcome);
         }
         if let Some(filters_path) = route.path.without_first_if(&ChildKey::new("filters")) {
             let filters_was_open = self.filters.is_open();
@@ -987,7 +1007,10 @@ impl TuiNode for BacklogTree {
                 .filters
                 .dispatch_event(&EventRoute::new(filters_path), event, ctx);
             self.drain_filter_close(filters_was_open);
-            return outcome;
+            return self
+                .refocus_data_view_after_unfocus(event, ctx)
+                .then_some(EventOutcome::Handled)
+                .unwrap_or(outcome);
         }
         if let Some(web_path) = route.path.without_first_if(&ChildKey::new("web")) {
             let web_was_open = self.web.is_open();
@@ -995,11 +1018,25 @@ impl TuiNode for BacklogTree {
                 .web
                 .dispatch_event(&EventRoute::new(web_path), event, ctx);
             self.drain_web_menu(web_was_open);
-            return outcome;
+            return self
+                .refocus_data_view_after_unfocus(event, ctx)
+                .then_some(EventOutcome::Handled)
+                .unwrap_or(outcome);
         }
-        self.handle_event(event, ctx, |control, ctx| {
+        let keeps_data_focus = route
+            .path
+            .without_first_if(&ChildKey::new("data"))
+            .is_some()
+            && matches!(event, TuiEvent::Key(key) if tuicore::keybindings().focus().unfocus_matches(*key));
+        let outcome = self.handle_event(event, ctx, |control, ctx| {
             control.dispatch_event(route, event, ctx)
-        })
+        });
+        if keeps_data_focus && outcome == EventOutcome::Ignored {
+            ctx.stop_propagation();
+            EventOutcome::Handled
+        } else {
+            outcome
+        }
     }
     fn tick(&mut self, dt: Duration, settings: tuicore::AnimationSettings) -> TickResult {
         let number_jump = {

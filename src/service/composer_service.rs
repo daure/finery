@@ -61,6 +61,7 @@ pub struct TicketView {
     pub status: String,
     pub priority: String,
     pub assignee: String,
+    pub assignee_account_id: String,
     pub story_points: Option<f64>,
     pub fix_versions: Vec<String>,
     pub labels: Vec<String>,
@@ -102,6 +103,14 @@ pub struct DraftTicketInput {
     pub fix_versions: Vec<String>,
     #[serde(default)]
     pub labels: Vec<String>,
+    #[serde(default)]
+    pub assignee: Option<AssigneeInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AssigneeInput {
+    pub name: String,
+    pub account_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -138,6 +147,10 @@ pub enum ChangeSetPatchOperation {
     UpdateLabels {
         ticket_id: String,
         labels: Vec<String>,
+    },
+    UpdateAssignee {
+        ticket_id: String,
+        assignee: Option<AssigneeInput>,
     },
     MoveTicket {
         ticket_id: String,
@@ -741,11 +754,21 @@ impl ComposerService {
         change_set_id: &str,
         expected_revision: i64,
         selected_ticket_ids: Vec<String>,
+        update_title: Option<String>,
         allow_unsafe_description_overwrite: bool,
     ) -> Result<SubmitChangeSetResponse, ServiceError> {
         validate_submit_selection(&selected_ticket_ids)?;
+        if update_title
+            .as_ref()
+            .is_some_and(|title| title.trim().is_empty())
+        {
+            return Err(invalid("change set name must not be empty"));
+        }
         let versioned = self.load_expected_change_set(change_set_id, expected_revision)?;
         let mut state = open_state(versioned.change_set);
+        if let Some(title) = update_title {
+            dispatch(&mut state, ComposerAction::RenameChangeSet(title))?;
+        }
         for ticket_id in &selected_ticket_ids {
             if change(&state, ticket_id)?.is_submitted() {
                 return Err(ServiceError::SubmittedTicket {
@@ -1001,6 +1024,9 @@ impl ComposerService {
                 update_story_points(state, &ticket_id, draft.story_points)?;
                 update_fix_versions(state, &ticket_id, draft.fix_versions)?;
                 update_labels(state, &ticket_id, draft.labels)?;
+                if let Some(assignee) = draft.assignee {
+                    update_assignee(state, &ticket_id, Some(assignee))?;
+                }
                 Ok(vec![ticket_id])
             }
             ChangeSetPatchOperation::IncludeJiraTicket {
@@ -1071,6 +1097,13 @@ impl ComposerService {
             }
             ChangeSetPatchOperation::UpdateLabels { ticket_id, labels } => {
                 update_labels(state, &ticket_id, labels)?;
+                Ok(vec![ticket_id])
+            }
+            ChangeSetPatchOperation::UpdateAssignee {
+                ticket_id,
+                assignee,
+            } => {
+                update_assignee(state, &ticket_id, assignee)?;
                 Ok(vec![ticket_id])
             }
             ChangeSetPatchOperation::MoveTicket {
@@ -1408,6 +1441,25 @@ fn update_labels(
     select(state, ticket_id)?;
     dispatch(state, ComposerAction::UpdateLabels(clean_values(labels)))
 }
+fn update_assignee(
+    state: &mut ComposerState,
+    ticket_id: &str,
+    assignee: Option<AssigneeInput>,
+) -> Result<(), ServiceError> {
+    let (name, account_id) = match assignee {
+        Some(assignee) => {
+            let name = assignee.name.trim();
+            let account_id = assignee.account_id.trim();
+            if name.is_empty() || account_id.is_empty() {
+                return Err(invalid("assignee name and account ID must not be empty"));
+            }
+            (name.into(), account_id.into())
+        }
+        None => ("Unassigned".into(), String::new()),
+    };
+    select(state, ticket_id)?;
+    dispatch(state, ComposerAction::UpdateAssignee { name, account_id })
+}
 fn clean_values(values: Vec<String>) -> Vec<String> {
     values
         .into_iter()
@@ -1571,6 +1623,7 @@ impl From<Ticket> for TicketView {
             status: value.status,
             priority: value.priority,
             assignee: value.assignee,
+            assignee_account_id: value.assignee_account_id,
             story_points: value.story_points,
             fix_versions: value.fix_versions,
             labels: value.labels,

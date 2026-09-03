@@ -2321,8 +2321,11 @@ fn issue_fields(
                 .collect::<Vec<_>>()
         ),
     );
-    if let Some(field_id) = story_points_field_id.filter(|field_id| !field_id.trim().is_empty()) {
-        fields.insert(field_id.into(), json!(ticket.story_points));
+    if let (Some(field_id), Some(story_points)) = (
+        story_points_field_id.filter(|field_id| !field_id.trim().is_empty()),
+        ticket.story_points,
+    ) {
+        fields.insert(field_id.into(), json!(story_points));
     }
     Value::Object(fields)
 }
@@ -2366,10 +2369,11 @@ fn update_payload(
     if original.fix_versions == desired.fix_versions {
         fields.remove("fixVersions");
     }
-    if original.story_points == desired.story_points {
-        if let Some(field_id) = story_points_field_id.filter(|field_id| !field_id.trim().is_empty())
-        {
+    if let Some(field_id) = story_points_field_id.filter(|field_id| !field_id.trim().is_empty()) {
+        if original.story_points == desired.story_points {
             fields.remove(field_id);
+        } else if desired.story_points.is_none() {
+            fields.insert(field_id.into(), Value::Null);
         }
     }
     payload.insert("fields".into(), Value::Object(fields));

@@ -492,6 +492,34 @@ fn jira_payload_uses_configured_story_points_field_and_ticket_properties() {
 }
 
 #[test]
+fn jira_create_payload_omits_unset_story_points() {
+    let desired = ticket("NEW-2", TicketKind::Task, None);
+    let issue_type = super::JiraOption {
+        id: "10001".into(),
+        label: "Task".into(),
+    };
+
+    let fields = create_issue_fields(&desired, None, &issue_type, Some("customfield_10016"));
+
+    assert!(fields.pointer("/customfield_10016").is_none());
+}
+
+#[test]
+fn jira_update_payload_clears_removed_story_points() {
+    let mut original = ticket("FIN-2", TicketKind::Task, None);
+    original.story_points = Some(3.0);
+    let desired = ticket("FIN-2", TicketKind::Task, None);
+
+    let payload =
+        update_payload(&original, &desired, None, false, Some("customfield_10016")).unwrap();
+
+    assert_eq!(
+        payload.pointer("/fields/customfield_10016"),
+        Some(&json!(null))
+    );
+}
+
+#[test]
 fn created_ticket_recovery_keeps_the_created_key_when_refresh_fails() {
     let created = ticket("FIN-201", TicketKind::Task, None);
     let failure = created_issue_failure("transition failed".into(), created.clone(), None);

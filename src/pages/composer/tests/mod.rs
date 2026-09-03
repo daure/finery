@@ -529,6 +529,7 @@ fn change_set_list_is_borderless_and_opens_the_new_change_set_dialog() {
 
     let list = render_text(&mut page);
     assert!(list.contains("New change set"));
+    assert!(list.contains("Open"));
     assert!(list.contains("Search..."));
     assert!(!list.contains("Change sets"));
 
@@ -558,6 +559,24 @@ fn change_set_list_is_borderless_and_opens_the_new_change_set_dialog() {
         control_bracket.focus_request(),
         Some(&FocusRequest::Target(FocusId::new("data-view")))
     );
+
+    let filter = filter_button(&mut page);
+    page.dispatch_focus(&filter, true, &mut FocusCtx::default());
+    for event in [
+        TuiEvent::Key(KeyEvent::from(Key::Esc)),
+        TuiEvent::Key(KeyEvent {
+            code: Key::Char('['),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+    ] {
+        let mut ctx = EventCtx::default();
+        let outcome = page.dispatch_event(&EventRoute::new(filter.path.clone()), &event, &mut ctx);
+        assert_eq!(outcome, EventOutcome::Handled);
+        assert_eq!(
+            ctx.focus_request(),
+            Some(&FocusRequest::Target(FocusId::new("data-view")))
+        );
+    }
 
     let data_view = focus(&mut page, "data-view");
     for event in [
@@ -616,6 +635,17 @@ fn change_set_list_is_borderless_and_opens_the_new_change_set_dialog() {
         page.overview_highlighted_change_set().as_deref(),
         Some("CS-3")
     );
+}
+
+fn filter_button(page: &mut ComposerPage) -> tuicore::FocusTarget {
+    let mut layout = LayoutCtx::new();
+    page.layout(Rect::new(0, 0, TEST_WIDTH, 40), &mut layout);
+    layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id == FocusId::new("button") && target.area.x > TEST_WIDTH / 2)
+        .unwrap()
+        .clone()
 }
 
 #[test]

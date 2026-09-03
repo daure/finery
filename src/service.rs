@@ -438,6 +438,7 @@ impl AppService {
             &change_set_id,
             expected_revision,
             selected_ticket_ids,
+            None,
             false,
         );
         let catalog = self

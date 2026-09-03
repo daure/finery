@@ -16,7 +16,7 @@ use crate::{
     service::{
         AppService,
         composer_service::{
-            ChangeSetPatchOperation, ComposerService, DraftTicketInput, ServiceError,
+            AssigneeInput, ChangeSetPatchOperation, ComposerService, DraftTicketInput, ServiceError,
             SubmitChangeSetOutcome, TicketKindView, test_service, test_service_with_submit,
         },
     },
@@ -380,6 +380,10 @@ fn patch_persists_multiple_operations_as_one_revision() {
                         story_points: None,
                         fix_versions: Vec::new(),
                         labels: Vec::new(),
+                        assignee: Some(AssigneeInput {
+                            name: "Ada Mensah".into(),
+                            account_id: "ada".into(),
+                        }),
                     },
                     parent_ticket_id: None,
                 },
@@ -408,6 +412,14 @@ fn patch_persists_multiple_operations_as_one_revision() {
     assert_eq!(
         response.change_set.value.selected_ticket_ids,
         vec!["FIN-1", "NEW-1"]
+    );
+    assert_eq!(
+        response.change_set.value.tickets[1]
+            .updated
+            .as_ref()
+            .unwrap()
+            .assignee_account_id,
+        "ada"
     );
 }
 
@@ -446,7 +458,7 @@ fn patch_rejects_invalid_descriptions_without_persisting_other_operations() {
 }
 
 #[test]
-fn patch_updates_story_points_fix_versions_and_labels() {
+fn patch_updates_ticket_metadata_and_assignee() {
     let service = service();
 
     let response = service
@@ -466,6 +478,13 @@ fn patch_updates_story_points_fix_versions_and_labels() {
                     ticket_id: "FIN-1".into(),
                     labels: vec!["frontend".into(), "release".into()],
                 },
+                ChangeSetPatchOperation::UpdateAssignee {
+                    ticket_id: "FIN-1".into(),
+                    assignee: Some(AssigneeInput {
+                        name: "Ada Mensah".into(),
+                        account_id: "ada".into(),
+                    }),
+                },
             ],
         )
         .unwrap();
@@ -477,6 +496,8 @@ fn patch_updates_story_points_fix_versions_and_labels() {
     assert_eq!(ticket.story_points, Some(3.0));
     assert_eq!(ticket.fix_versions, ["1.2.0"]);
     assert_eq!(ticket.labels, ["frontend", "release"]);
+    assert_eq!(ticket.assignee, "Ada Mensah");
+    assert_eq!(ticket.assignee_account_id, "ada");
 }
 
 #[test]
@@ -726,6 +747,7 @@ fn submit_persists_create_marker_before_jira_and_reconciles_once() {
                     story_points: None,
                     fix_versions: Vec::new(),
                     labels: Vec::new(),
+                    assignee: None,
                 },
                 parent_ticket_id: None,
             }],
@@ -733,7 +755,13 @@ fn submit_persists_create_marker_before_jira_and_reconciles_once() {
         .unwrap();
 
     let response = service
-        .submit_change_set("CS-1", 2, vec!["NEW-1".into()], false)
+        .submit_change_set(
+            "CS-1",
+            2,
+            vec!["NEW-1".into()],
+            Some("Submitted plan".into()),
+            false,
+        )
         .unwrap();
 
     assert!(marker_seen.load(Ordering::SeqCst));
@@ -742,6 +770,7 @@ fn submit_persists_create_marker_before_jira_and_reconciles_once() {
         response.outcome,
         SubmitChangeSetOutcome::Completed { .. }
     ));
+    assert_eq!(response.change_set.value.name, "Submitted plan");
     assert!(response.change_set.value.tickets[1].submitted);
 }
 
@@ -780,8 +809,9 @@ fn submission_claim_blocks_patch_and_refresh_until_jira_reconciliation() {
         }),
     );
     let submitting = service.clone();
-    let submitted =
-        thread::spawn(move || submitting.submit_change_set("CS-1", 1, vec!["FIN-1".into()], false));
+    let submitted = thread::spawn(move || {
+        submitting.submit_change_set("CS-1", 1, vec!["FIN-1".into()], None, false)
+    });
     jira_started_receiver
         .recv_timeout(Duration::from_secs(1))
         .unwrap();

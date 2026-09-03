@@ -1,17 +1,18 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use ratatui::{
-    Frame,
     layout::{Constraint, Rect},
     style::{Modifier, Style},
     text::{Line, Text},
+    Frame,
 };
 use tuicore::{
-    ActivationMode, AnimationSettings, Button, CellContext, ChildKey, Column, Dialog, DialogAction,
-    DialogBackdrop, DialogLayer, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId,
-    FocusRequest, FocusTarget, HotkeyEvent, InputChrome, Key, KeyModifiers, KeySpec, LayoutCtx,
-    LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent,
-    ListControlKeyBindings, RenderCtx, TextInput, TickResult, TuiEvent, TuiNode, keybindings,
+    keybindings, ActivationMode, AnimationSettings, Button, CellContext, ChildKey, Column, Dialog,
+    DialogAction, DialogBackdrop, DialogLayer, EventCtx, EventOutcome, EventRoute, FocusCtx,
+    FocusId, FocusRequest, FocusTarget, HotkeyEvent, HotkeyLabelMode, InputChrome, Key,
+    KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
+    ListControl, ListControlEvent, ListControlKeyBindings, MenuButton, MenuItem, RenderCtx,
+    TextInput, TickResult, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -27,10 +28,50 @@ struct ChangeSetRow {
     subtitle: String,
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum ChangeSetFilter {
+    All,
+    Open,
+    Closed,
+}
+
+impl ChangeSetFilter {
+    const OPTIONS: [Self; 3] = [Self::All, Self::Open, Self::Closed];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Open => "Open",
+            Self::Closed => "Closed",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::All => "",
+            Self::Open => "",
+            Self::Closed => "",
+        }
+    }
+
+    fn menu_label(self) -> String {
+        format!("{} {}", self.icon(), self.label())
+    }
+
+    fn contains(self, change_set: &ChangeSet) -> bool {
+        match self {
+            Self::All => true,
+            Self::Open => !change_set.closed,
+            Self::Closed => change_set.closed,
+        }
+    }
+}
+
 pub(super) struct ChangeSetListView {
     state: Rc<RefCell<ComposerState>>,
     service: AppService,
     view: ChangeSetView,
+    filter: ChangeSetFilter,
     new_change_set_requested: Rc<RefCell<Option<String>>>,
     dialog_close_requested: Rc<RefCell<bool>>,
 }
@@ -122,31 +163,49 @@ impl TuiNode for WideTextInput {
 
 struct ChangeSetContent {
     new_button: Button<()>,
+    filter_menu: MenuButton<ChangeSetFilter, ()>,
     control: ChangeSetControl,
     button_area: Rect,
+    filter_area: Rect,
     control_area: Rect,
 }
 
 impl ChangeSetContent {
-    fn new(new_button: Button<()>, control: ChangeSetControl) -> Self {
+    fn new(
+        new_button: Button<()>,
+        filter_menu: MenuButton<ChangeSetFilter, ()>,
+        control: ChangeSetControl,
+    ) -> Self {
         Self {
             new_button,
+            filter_menu,
             control,
             button_area: Rect::default(),
+            filter_area: Rect::default(),
             control_area: Rect::default(),
         }
+    }
+
+    fn take_filter(&mut self) -> Option<ChangeSetFilter> {
+        self.filter_menu.take_activated().into_iter().last()
     }
 }
 
 impl TuiNode for ChangeSetContent {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
         let button = self.new_button.measure(proposal);
+        let filter = self.filter_menu.measure(proposal);
         let control = self.control.measure(proposal);
         LayoutSizeHint::content(
-            button.preferred.width.max(control.preferred.width),
+            button
+                .preferred
+                .width
+                .saturating_add(filter.preferred.width)
+                .max(control.preferred.width),
             button
                 .preferred
                 .height
+                .max(filter.preferred.height)
                 .saturating_add(control.preferred.height),
         )
         .normalized(proposal)
@@ -158,8 +217,33 @@ impl TuiNode for ChangeSetContent {
             .measure(LayoutProposal::unbounded())
             .preferred
             .height
+            .max(
+                self.filter_menu
+                    .measure(LayoutProposal::unbounded())
+                    .preferred
+                    .height,
+            )
             .min(area.height);
-        self.button_area = Rect::new(area.x, area.y, area.width, button_height);
+        let filter_width = self
+            .filter_menu
+            .measure(LayoutProposal::unbounded())
+            .preferred
+            .width
+            .min(area.width);
+        let button_width = self
+            .new_button
+            .measure(LayoutProposal::unbounded())
+            .preferred
+            .width
+            .min(area.width.saturating_sub(filter_width));
+        self.button_area = Rect::new(area.x, area.y, button_width, button_height);
+        self.filter_area = Rect::new(
+            area.x
+                .saturating_add(area.width.saturating_sub(filter_width)),
+            area.y,
+            filter_width,
+            button_height,
+        );
         self.control_area = Rect::new(
             area.x,
             area.y.saturating_add(button_height),
@@ -176,6 +260,13 @@ impl TuiNode for ChangeSetContent {
                 });
             },
         );
+        ctx.push_slot(
+            ChildKey::new("change-set-filter"),
+            self.filter_area,
+            |ctx| {
+                self.filter_menu.layout(self.filter_area, ctx);
+            },
+        );
         ctx.push_slot(ChildKey::new("new-change-set"), self.button_area, |ctx| {
             self.new_button.layout(self.button_area, ctx);
         });
@@ -184,6 +275,7 @@ impl TuiNode for ChangeSetContent {
 
     fn render<'a>(&'a self, frame: &mut Frame, _area: Rect, ctx: &mut RenderCtx<'a>) {
         self.new_button.render(frame, self.button_area);
+        self.filter_menu.render(frame, self.filter_area, ctx);
         self.control.render(frame, self.control_area, ctx);
     }
 
@@ -192,7 +284,12 @@ impl TuiNode for ChangeSetContent {
         if outcome == EventOutcome::Handled {
             outcome
         } else {
-            self.control.event(event, ctx)
+            let outcome = self.filter_menu.event(event, ctx);
+            if outcome == EventOutcome::Handled {
+                outcome
+            } else {
+                self.control.event(event, ctx)
+            }
         }
     }
 
@@ -230,10 +327,30 @@ impl TuiNode for ChangeSetContent {
                 .control
                 .dispatch_event(&EventRoute::new(path), event, ctx);
             return if outcome == EventOutcome::Ignored {
-                self.new_button.event(event, ctx)
+                let outcome = self.new_button.event(event, ctx);
+                if outcome == EventOutcome::Ignored {
+                    self.filter_menu.event(event, ctx)
+                } else {
+                    outcome
+                }
             } else {
                 outcome
             };
+        }
+        if let Some(path) = route
+            .path
+            .without_first_if(&ChildKey::new("change-set-filter"))
+        {
+            let outcome = self
+                .filter_menu
+                .dispatch_event(&EventRoute::new(path), event, ctx);
+            if matches!(event, TuiEvent::Key(key) if keybindings().focus().unfocus_matches(*key))
+            {
+                ctx.focus(FocusRequest::Target(FocusId::new("data-view")));
+                ctx.stop_propagation();
+                return EventOutcome::Handled;
+            }
+            return outcome;
         }
         EventOutcome::Ignored
     }
@@ -241,11 +358,13 @@ impl TuiNode for ChangeSetContent {
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         self.new_button
             .tick(dt, settings)
+            .merge(self.filter_menu.tick(dt, settings))
             .merge(self.control.tick(dt, settings))
     }
 
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
         self.new_button.focus(target, focused, ctx);
+        self.filter_menu.focus(target, focused, ctx);
         self.control.focus(target, focused, ctx);
     }
 
@@ -256,25 +375,32 @@ impl TuiNode for ChangeSetContent {
         if let Some(target) = target.for_child(&ChildKey::new("change-sets")) {
             self.control.dispatch_focus(&target, focused, ctx);
         }
+        if let Some(target) = target.for_child(&ChildKey::new("change-set-filter")) {
+            self.filter_menu.dispatch_focus(&target, focused, ctx);
+        }
     }
 
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.new_button.init(ctx);
+        self.filter_menu.init(ctx);
         self.control.init(ctx);
     }
 
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.new_button.mount(ctx);
+        self.filter_menu.mount(ctx);
         self.control.mount(ctx);
     }
 
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.new_button.unmount(ctx);
+        self.filter_menu.unmount(ctx);
         self.control.unmount(ctx);
     }
 
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.new_button.destroy(ctx);
+        self.filter_menu.destroy(ctx);
         self.control.destroy(ctx);
     }
 }
@@ -285,7 +411,8 @@ impl ChangeSetListView {
         service: AppService,
         keys: ComposerKeyBindings,
     ) -> Self {
-        let rows = rows(&state.borrow());
+        let filter = ChangeSetFilter::Open;
+        let rows = rows(&state.borrow(), filter);
         let control = ListControl::new(
             rows,
             |row: &ChangeSetRow| row.id.clone(),
@@ -359,6 +486,7 @@ impl ChangeSetListView {
                         *reset_input_value.borrow_mut() = String::new();
                         *request_new_change_set.borrow_mut() = Some(String::new());
                     }),
+                change_set_filter_menu(filter, &keys.change_set_filter),
                 control,
             ),
             dialog,
@@ -371,6 +499,7 @@ impl ChangeSetListView {
             state,
             service,
             view,
+            filter,
             new_change_set_requested,
             dialog_close_requested,
         }
@@ -381,7 +510,7 @@ impl ChangeSetListView {
             .base_mut()
             .control
             .data_view_mut()
-            .set_rows(rows(&self.state.borrow()));
+            .set_rows(rows(&self.state.borrow(), self.filter));
     }
 
     fn create_change_set(&mut self, name: String, ctx: &mut EventCtx<()>) {
@@ -430,6 +559,17 @@ impl ChangeSetListView {
     }
 
     fn drain_events(&mut self, ctx: &mut EventCtx<()>) {
+        if let Some(filter) = self.view.base_mut().take_filter() {
+            self.filter = filter;
+            self.view
+                .base_mut()
+                .filter_menu
+                .set_label(filter.menu_label());
+            self.sync();
+            ctx.focus(FocusRequest::Target(FocusId::new("data-view")));
+            ctx.request_layout();
+            ctx.request_redraw();
+        }
         let new_change_set = self.new_change_set_requested.borrow_mut().take();
         if let Some(name) = new_change_set {
             if name.is_empty() {
@@ -526,10 +666,11 @@ impl ChangeSetListView {
     }
 }
 
-fn rows(state: &ComposerState) -> Vec<ChangeSetRow> {
+fn rows(state: &ComposerState, filter: ChangeSetFilter) -> Vec<ChangeSetRow> {
     let mut rows: Vec<_> = state
         .change_sets
         .iter()
+        .filter(|set| filter.contains(set))
         .map(|set| {
             let submitted = set.submitted_count();
             let state = if set.closed { "closed" } else { "open" };
@@ -542,6 +683,20 @@ fn rows(state: &ComposerState) -> Vec<ChangeSetRow> {
         .collect();
     rows.reverse();
     rows
+}
+
+fn change_set_filter_menu(
+    filter: ChangeSetFilter,
+    key: &crate::app_settings::ComposerKeyBinding,
+) -> MenuButton<ChangeSetFilter, ()> {
+    MenuButton::new(
+        filter.menu_label(),
+        ChangeSetFilter::OPTIONS.map(|option| MenuItem::new(option, option.menu_label())),
+    )
+    .visible_items(ChangeSetFilter::OPTIONS.len() as u16)
+    .min_popup_width(12)
+    .hotkey(key.sequence())
+    .hotkey_label_mode(HotkeyLabelMode::Inline)
 }
 
 fn change_set_column() -> Column<ChangeSetRow, String> {

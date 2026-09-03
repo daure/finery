@@ -230,6 +230,7 @@ pub(crate) enum ComposerAction {
     DeleteChangeSet(String),
     OpenChangeSet(String),
     CloseChangeSet,
+    RenameChangeSet(String),
     SelectTicket(Option<String>),
     SetSelectedTickets(Vec<String>),
     SetViewMode(ComposerViewMode),
@@ -828,6 +829,11 @@ impl ComposerState {
                     .map(|change| change.id.clone());
             }
             ComposerAction::CloseChangeSet => self.close_change_set(),
+            ComposerAction::RenameChangeSet(name) => {
+                if let Some(change_set) = self.active_set_mut() {
+                    change_set.name = name;
+                }
+            }
             ComposerAction::SelectTicket(id) => self.selected_ticket = id,
             ComposerAction::SetSelectedTickets(ids) => self.set_selected_tickets(ids),
             ComposerAction::SetViewMode(mode) => self.view_mode = mode,
@@ -1867,7 +1873,8 @@ impl ComposerAction {
     fn mutates_active_change_set(&self) -> bool {
         matches!(
             self,
-            Self::CreateTicket { .. }
+            Self::RenameChangeSet(_)
+                | Self::CreateTicket { .. }
                 | Self::CreateTicketAt { .. }
                 | Self::CreateTicketWithId { .. }
                 | Self::IncludeTicket(_)
@@ -1893,7 +1900,8 @@ impl ComposerAction {
     pub(crate) fn affects_persistence(&self) -> bool {
         matches!(
             self,
-            Self::CreateTicket { .. }
+            Self::RenameChangeSet(_)
+                | Self::CreateTicket { .. }
                 | Self::CreateTicketAt { .. }
                 | Self::CreateTicketWithId { .. }
                 | Self::IncludeTicket(_)

@@ -3,7 +3,8 @@ use std::{cell::Cell, rc::Rc, sync::mpsc};
 use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Modifier};
 use tuicore::{
     AnimationSettings, ChildKey, EventCtx, EventRoute, FocusCtx, FocusId, FocusRequest,
-    FocusTarget, Key, KeyEvent, KeyModifiers, LayoutCtx, RenderCtx, TreePath, TuiEvent, TuiNode,
+    FocusTarget, Key, KeyEvent, KeyModifiers, LayoutCtx, Propagation, RenderCtx, TreePath,
+    TuiEvent, TuiNode,
 };
 
 use super::{
@@ -368,6 +369,64 @@ fn backlog_refresh_is_focusable_with_shift_r() {
         receiver.try_recv(),
         Ok(super::components::BacklogSectionEvent::Refresh)
     ));
+}
+
+#[test]
+fn backlog_data_view_retains_focus_when_unfocused() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot(), sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+
+    for key in [
+        KeyEvent::from(Key::Esc),
+        KeyEvent {
+            code: Key::Char('['),
+            modifiers: KeyModifiers::CONTROL,
+        },
+    ] {
+        let mut ctx = EventCtx::new(AnimationSettings::default());
+
+        assert_eq!(
+            view.dispatch_event(&route, &TuiEvent::Key(key), &mut ctx),
+            tuicore::EventOutcome::Handled
+        );
+        assert_eq!(ctx.propagation(), Propagation::Stopped);
+        assert_eq!(ctx.focus_request(), None);
+    }
+}
+
+#[test]
+fn backlog_header_controls_return_focus_to_the_data_view_when_unfocused() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot(), sender, Default::default());
+
+    for control in ["refresh", "velocity", "filters", "web"] {
+        for key in [
+            KeyEvent::from(Key::Esc),
+            KeyEvent {
+                code: Key::Char('['),
+                modifiers: KeyModifiers::CONTROL,
+            },
+        ] {
+            let mut ctx = EventCtx::new(AnimationSettings::default());
+
+            assert_eq!(
+                view.dispatch_event(
+                    &EventRoute::new(TreePath::from_keys([ChildKey::new(control)])),
+                    &TuiEvent::Key(key),
+                    &mut ctx,
+                ),
+                tuicore::EventOutcome::Handled
+            );
+            assert_eq!(
+                ctx.focus_request(),
+                Some(&FocusRequest::Target(FocusId::new("data-view")))
+            );
+            assert_eq!(ctx.propagation(), Propagation::Stopped);
+        }
+    }
 }
 
 #[test]
