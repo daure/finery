@@ -10,22 +10,25 @@ use serde_json::json;
 use super::{
     AgileBoard, AgileIssuePage, BACKLOG_FIELDS, BACKLOG_JQL, COMPOSER_FIELDS, ISSUE_FIELDS,
     JiraIssue, JiraSprint, MAX_VELOCITY_GOAL_LOOKUPS, SubmitBatchOutcome, ambiguous_create_failure,
-    backlog_page_complete, board_backlog, board_backlog_query, board_sprints, commit_order,
-    composer_fields, create_available_statuses_from_value, create_issue_fields, create_issue_type,
-    create_issue_types_from_value, create_response_failure, created_issue_failure,
-    discover_story_points, fetch_composer_issues, fix_versions, hydrate_sprint_subtasks,
-    is_ticket_number_query, issue_fields, issue_key_jql, labels, move_payload, options_from_values,
-    rank_payload, same_jira_content, search_composer_issues, search_jql, select_backlog_board,
-    should_discover_story_points, sprint_issues, story_points_field_for_load,
-    story_points_field_id, story_points_warning, submit_failure, submit_ordered_changes, to_ticket,
-    to_ticket_and_work_item, to_work_item, to_work_item_with_subtasks, update_payload,
-    velocity_average, velocity_report, velocity_sprint_goals,
+    apply_attachment_changes, backlog_page_complete, board_backlog, board_backlog_query,
+    board_sprints, commit_order, composer_fields, create_available_statuses_from_value,
+    create_issue_fields, create_issue_type, create_issue_types_from_value, create_response_failure,
+    created_issue_failure, discover_story_points, fetch_composer_issues, fix_versions,
+    hydrate_sprint_subtasks, is_ticket_number_query, issue_fields, issue_key_jql, labels,
+    move_payload, options_from_values, rank_payload, same_jira_content, search_composer_issues,
+    search_jql, select_backlog_board, should_discover_story_points, sprint_issues,
+    story_points_field_for_load, story_points_field_id, story_points_warning, submit_failure,
+    submit_ordered_changes, to_ticket, to_ticket_and_work_item, to_work_item,
+    to_work_item_with_subtasks, update_payload, velocity_average, velocity_report,
+    velocity_sprint_goals,
 };
 use crate::{
     app_settings::AppSettings,
     jira::submit_changes,
     store::{
-        composer::{ChangeKind, Ticket, TicketChange, TicketKind},
+        composer::{
+            AttachmentChangeKind, ChangeKind, Ticket, TicketAttachment, TicketChange, TicketKind,
+        },
         work_items::RankPlan,
     },
 };
@@ -50,6 +53,7 @@ fn ticket(key: &str, kind: TicketKind, parent_key: Option<&str>) -> Ticket {
         parent_title: None,
         parent_kind: None,
         has_children: false,
+        attachments: Vec::new(),
     }
 }
 
@@ -91,6 +95,64 @@ fn moving_issues_uses_the_agile_batch_payload() {
         move_payload(&["FIN-1".into(), "FIN-2".into()]),
         json!({ "issues": ["FIN-1", "FIN-2"] })
     );
+}
+
+#[test]
+fn applying_attachment_changes_deletes_synced_files_and_uploads_local_files() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 8192];
+            let size = stream.read(&mut request).unwrap();
+            requests.push(String::from_utf8_lossy(&request[..size]).into_owned());
+            write!(
+                stream,
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        }
+        requests
+    });
+    let mut desired = ticket("FIN-1", TicketKind::Task, None);
+    desired.attachments = vec![
+        TicketAttachment {
+            id: "10000".into(),
+            filename: "old.png".into(),
+            created: String::new(),
+            size: 3,
+            content_url: None,
+            change: AttachmentChangeKind::Deleted,
+            local_data: None,
+        },
+        TicketAttachment {
+            id: "local-1".into(),
+            filename: "new.png".into(),
+            created: String::new(),
+            size: 3,
+            content_url: None,
+            change: AttachmentChangeKind::Added,
+            local_data: Some(vec![1, 2, 3]),
+        },
+    ];
+
+    apply_attachment_changes(
+        &reqwest::blocking::Client::new(),
+        &base_url,
+        "user@example.com",
+        "token",
+        "FIN-1",
+        &desired,
+    )
+    .unwrap();
+
+    let requests = server.join().unwrap();
+    assert!(requests[0].starts_with("DELETE /rest/api/3/attachment/10000 HTTP/1.1"));
+    assert!(requests[1].starts_with("POST /rest/api/3/issue/FIN-1/attachments HTTP/1.1"));
+    assert!(requests[1].contains("x-atlassian-token: no-check"));
+    assert!(requests[1].contains("filename=\"new.png\""));
 }
 
 #[test]
@@ -576,6 +638,33 @@ fn jira_description_overwrite_safety_allows_supported_marks_and_guards_media() {
             .unwrap()
             .pointer("/fields/description")
             .is_none()
+    );
+}
+
+#[test]
+fn jira_ticket_maps_attachment_metadata() {
+    let ticket = to_ticket(JiraIssue {
+        key: "FIN-7".into(),
+        fields: json!({
+            "attachment": [{
+                "filename": "image-20260904-161404.png",
+                "created": "2026-09-04T16:14:04.000+0000",
+                "size": 21_504,
+                "content": "https://jira.example/attachment/image.png"
+            }]
+        }),
+    });
+
+    assert_eq!(ticket.attachments.len(), 1);
+    assert_eq!(ticket.attachments[0].filename, "image-20260904-161404.png");
+    assert_eq!(
+        ticket.attachments[0].created,
+        "2026-09-04T16:14:04.000+0000"
+    );
+    assert_eq!(ticket.attachments[0].size, 21_504);
+    assert_eq!(
+        ticket.attachments[0].content_url.as_deref(),
+        Some("https://jira.example/attachment/image.png")
     );
 }
 

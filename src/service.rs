@@ -68,6 +68,11 @@ pub(crate) struct ComposerSourceTicket {
     pub presentation: TicketPresentation,
 }
 
+pub(crate) struct ClipboardImage {
+    pub filename: String,
+    pub data: Vec<u8>,
+}
+
 #[cfg(test)]
 pub(crate) type TestJiraSubmit =
     Arc<dyn Fn(&[TicketChange], bool) -> jira::SubmitBatchOutcome + Send + Sync>;
@@ -854,6 +859,84 @@ impl AppService {
         }
     }
 
+    pub(crate) fn load_jira_attachment_image(
+        &self,
+        content_url: &str,
+    ) -> Result<tuicore::Image, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?;
+        let (_, email, token) = settings.configured_jira().ok_or_else(|| {
+            "Jira is not configured; add URL, email, and API token in Settings".to_string()
+        })?;
+        tuicore::Image::from_url_with_basic_auth(content_url, email, token)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn read_clipboard_image(&self) -> Result<Option<ClipboardImage>, String> {
+        let data = clipboard_image_bytes()?;
+        let Some((extension, data)) = data
+            .and_then(|data| image_extension(&data).map(|extension| (extension.to_owned(), data)))
+        else {
+            return Ok(None);
+        };
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_millis();
+        Ok(Some(ClipboardImage {
+            filename: format!("clipboard-{timestamp}.{extension}"),
+            data,
+        }))
+    }
+
+    pub(crate) fn open_attachment(
+        &self,
+        attachment: &crate::store::composer::TicketAttachment,
+    ) -> Result<(), String> {
+        let data = match attachment.local_data.clone() {
+            Some(data) => data,
+            None => {
+                let url = attachment
+                    .content_url
+                    .as_deref()
+                    .ok_or_else(|| "Attachment content URL is unavailable".to_string())?;
+                self.download_jira_attachment(url)?
+            }
+        };
+        let directory = std::env::temp_dir().join("finery");
+        std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        let filename = std::path::Path::new(&attachment.filename)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("attachment");
+        let path = directory.join(format!("{}-{filename}", std::process::id()));
+        std::fs::write(&path, data).map_err(|error| error.to_string())?;
+        open_external_file(&path)
+    }
+
+    fn download_jira_attachment(&self, content_url: &str) -> Result<Vec<u8>, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?;
+        let (_, email, token) = settings.configured_jira().ok_or_else(|| {
+            "Jira is not configured; add URL, email, and API token in Settings".to_string()
+        })?;
+        reqwest::blocking::Client::new()
+            .get(content_url)
+            .basic_auth(email, Some(token))
+            .send()
+            .map_err(|error| error.to_string())?
+            .error_for_status()
+            .map_err(|error| error.to_string())?
+            .bytes()
+            .map(|bytes| bytes.to_vec())
+            .map_err(|error| error.to_string())
+    }
+
     #[cfg(test)]
     pub(crate) fn fetch_jira_tickets(
         &self,
@@ -1118,6 +1201,103 @@ fn browser_command(url: &str) -> Command {
     {
         xdg_open_command(url)
     }
+}
+
+fn image_extension(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if data.starts_with(b"\xff\xd8\xff") {
+        Some("jpg")
+    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if data.starts_with(b"BM") {
+        Some("bmp")
+    } else if data.starts_with(b"RIFF") && data.get(8..12) == Some(b"WEBP") {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+fn clipboard_image_bytes() -> Result<Option<Vec<u8>>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        return clipboard_command(
+            "powershell.exe",
+            &[
+                "-NoProfile",
+                "-STA",
+                "-Command",
+                "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $i=[System.Windows.Forms.Clipboard]::GetImage(); if($null -ne $i){$m=New-Object IO.MemoryStream; $i.Save($m,[Drawing.Imaging.ImageFormat]::Png); [Console]::OpenStandardOutput().Write($m.ToArray(),0,$m.Length)}",
+            ],
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        for mime_type in [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp",
+            "image/bmp",
+        ] {
+            for (program, arguments) in [
+                ("wl-paste", vec!["--no-newline", "--type", mime_type]),
+                (
+                    "xclip",
+                    vec!["-selection", "clipboard", "-t", mime_type, "-o"],
+                ),
+            ] {
+                if let Ok(Some(data)) = clipboard_command(program, &arguments) {
+                    return Ok(Some(data));
+                }
+            }
+        }
+        if let Ok(Some(data)) = clipboard_command(
+            "powershell.exe",
+            &[
+                "-NoProfile",
+                "-STA",
+                "-Command",
+                "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $i=[System.Windows.Forms.Clipboard]::GetImage(); if($null -ne $i){$m=New-Object IO.MemoryStream; $i.Save($m,[Drawing.Imaging.ImageFormat]::Png); [Console]::OpenStandardOutput().Write($m.ToArray(),0,$m.Length)}",
+            ],
+        ) {
+            return Ok(Some(data));
+        }
+        Ok(None)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        Ok(None)
+    }
+}
+
+fn clipboard_command(program: &str, arguments: &[&str]) -> Result<Option<Vec<u8>>, String> {
+    let output = Command::new(program)
+        .args(arguments)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(output.stdout))
+}
+
+fn open_external_file(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WSL_DISTRO_NAME").is_some() || std::env::var_os("WSL_INTEROP").is_some() {
+        let output = Command::new("wslpath")
+            .args(["-w", &path.to_string_lossy()])
+            .output()
+            .map_err(|error| error.to_string())?;
+        if output.status.success() {
+            let windows_path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            let mut command = Command::new("cmd.exe");
+            command.args(["/C", "start", "", &windows_path]);
+            return spawn_browser(command).map_err(|error| error.to_string());
+        }
+    }
+    spawn_browser(browser_command(&path.to_string_lossy())).map_err(|error| error.to_string())
 }
 
 #[cfg(unix)]

@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use crate::store::{
     composer::{
-        Ticket, TicketKind,
+        AttachmentChangeKind, Ticket, TicketAttachment, TicketKind,
         jira_adf::{adf_is_safe_to_overwrite, adf_overwrite_warning, adf_to_markdown},
     },
     work_items::{BacklogSnapshot, SubtaskProgress, WorkItem, is_done_status},
@@ -53,6 +53,7 @@ pub(super) fn to_ticket(issue: JiraIssue) -> Ticket {
         has_children: field("subtasks")
             .as_array()
             .is_some_and(|subtasks| !subtasks.is_empty()),
+        attachments: attachments(field("attachment")),
     }
 }
 
@@ -171,6 +172,39 @@ fn labels(value: &Value) -> Vec<String> {
         .flatten()
         .filter_map(Value::as_str)
         .map(str::to_owned)
+        .collect()
+}
+
+fn attachments(value: &Value) -> Vec<TicketAttachment> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|attachment| {
+            Some(TicketAttachment {
+                id: attachment
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                filename: attachment.get("filename")?.as_str()?.to_owned(),
+                created: attachment
+                    .get("created")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                size: attachment
+                    .get("size")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default(),
+                content_url: attachment
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                change: AttachmentChangeKind::Synced,
+                local_data: None,
+            })
+        })
         .collect()
 }
 

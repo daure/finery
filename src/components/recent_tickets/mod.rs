@@ -15,10 +15,9 @@ use ratatui::{
 use tuicore::{
     AnimationSettings, AxisProposal, CellContext, ChildKey, Column, EventCtx, EventOutcome,
     EventRoute, FocusCtx, FocusId, FocusRequest, FocusTarget, HotkeyEvent, Key, KeyEvent,
-    KeyModifiers, KeySpec,
-    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, ListControl,
-    ListControlKeyBindings, RenderCtx, SearchMode, Spinner, TextInput, TickResult, TuiEvent,
-    TuiNode, search_match,
+    KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
+    ListControl, ListControlKeyBindings, RenderCtx, SearchMode, Spinner, TextInput, TickResult,
+    TuiEvent, TuiNode, search_match,
 };
 
 use crate::{
@@ -486,7 +485,10 @@ impl TuiNode for RecentTicketsMenu {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        if self.yank_url(event, ctx) || self.close(event, ctx) || self.open_highlighted_ticket(event, ctx) {
+        if self.yank_url(event, ctx)
+            || self.close(event, ctx)
+            || self.open_highlighted_ticket(event, ctx)
+        {
             return EventOutcome::Handled;
         }
         if let Some(outcome) = self.navigate_list(event, ctx) {
@@ -506,7 +508,10 @@ impl TuiNode for RecentTicketsMenu {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        if self.yank_url(event, ctx) || self.close(event, ctx) || self.open_highlighted_ticket(event, ctx) {
+        if self.yank_url(event, ctx)
+            || self.close(event, ctx)
+            || self.open_highlighted_ticket(event, ctx)
+        {
             return EventOutcome::Handled;
         }
         if let Some(outcome) = self.navigate_list(event, ctx) {

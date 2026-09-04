@@ -1,24 +1,26 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Rect},
     style::{Modifier, Style},
     text::{Line, Text},
-    Frame,
 };
 use tuicore::{
-    keybindings, ActivationMode, AnimationSettings, Button, CellContext, ChildKey, Column, Dialog,
-    DialogAction, DialogBackdrop, DialogLayer, EventCtx, EventOutcome, EventRoute, FocusCtx,
-    FocusId, FocusRequest, FocusTarget, HotkeyEvent, HotkeyLabelMode, InputChrome, Key,
-    KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    ListControl, ListControlEvent, ListControlKeyBindings, MenuButton, MenuItem, RenderCtx,
-    TextInput, TickResult, TuiEvent, TuiNode,
+    ActivationMode, AnimationSettings, Button, CellContext, ChildKey, Column, Dialog, DialogAction,
+    DialogBackdrop, DialogLayer, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId,
+    FocusRequest, FocusTarget, HotkeyEvent, HotkeyLabelMode, InputChrome, Key, KeyModifiers,
+    KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, ListControl,
+    ListControlEvent, ListControlKeyBindings, MenuButton, MenuItem, RenderCtx, TextInput,
+    TickResult, TuiEvent, TuiNode, keybindings,
 };
 
 use crate::{
     app_settings::ComposerKeyBindings,
     service::AppService,
-    store::composer::{ChangeKind, ChangeSet, ComposerAction, ComposerState, Ticket, TicketChange, TicketKind},
+    store::composer::{
+        ChangeKind, ChangeSet, ComposerAction, ComposerState, Ticket, TicketChange, TicketKind,
+    },
 };
 
 #[derive(Clone)]
@@ -344,8 +346,7 @@ impl TuiNode for ChangeSetContent {
             let outcome = self
                 .filter_menu
                 .dispatch_event(&EventRoute::new(path), event, ctx);
-            if matches!(event, TuiEvent::Key(key) if keybindings().focus().unfocus_matches(*key))
-            {
+            if matches!(event, TuiEvent::Key(key) if keybindings().focus().unfocus_matches(*key)) {
                 ctx.focus(FocusRequest::Target(FocusId::new("data-view")));
                 ctx.stop_propagation();
                 return EventOutcome::Handled;
@@ -793,10 +794,9 @@ pub(super) fn change_set_share_text(change_set: &ChangeSet, base_url: Option<&st
         .tickets
         .iter()
         .filter(|change| {
-            ticket_for_change(change)
-                .is_some_and(|ticket| {
-                    !includes_non_subtask_change || ticket.kind != TicketKind::Subtask
-                })
+            ticket_for_change(change).is_some_and(|ticket| {
+                !includes_non_subtask_change || ticket.kind != TicketKind::Subtask
+            })
         })
         .collect::<Vec<_>>();
     let aliases = changes

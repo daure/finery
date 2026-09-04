@@ -1,7 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, mpsc::Receiver},
     time::Duration,
 };
 
@@ -13,7 +13,7 @@ use tuicore::{
     AnimationSettings, ChildKey, CrossAlign, DataView, DataViewTypedEvent, Dialog, DialogAction,
     DialogBackdrop, DialogLayer, Dropdown, DropdownPopupDirection, EventCtx, EventOutcome,
     EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, Key, KeyEvent,
-    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, MainAlign,
+    KeyModifiers, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, MainAlign,
     Panel, PanelHost, Paragraph, RenderCtx, ScrollAxes, ScrollContainer, SpeedReader, Spinner,
     Split, TextInput, TextInputKeyBindings, TickResult, TuiEvent, TuiNode, keybindings,
 };
@@ -56,6 +56,13 @@ type DescriptionReader = tuicore::DialogHost<SpeedReader, ()>;
 const TITLE_INPUT_SLOT: &str = "title-input";
 const ISSUE_TYPE_SLOT: &str = "issue-type";
 type EditorView = DialogLayer<TicketEditorView, DescriptionReader>;
+
+pub(super) fn selected_ticket_ids(row_ids: Vec<String>) -> Vec<String> {
+    row_ids
+        .into_iter()
+        .filter(|id| !id.contains(":attachment:"))
+        .collect()
+}
 
 struct CreateTicketForm {
     input: TextInput<()>,
@@ -341,6 +348,7 @@ pub(super) struct TicketEditor {
     opening_loading: bool,
     pending_focus_tickets: bool,
     number_jump: Rc<RefCell<TicketNumberJump>>,
+    clipboard_image: Option<Receiver<Result<Option<crate::service::ClipboardImage>, String>>>,
 }
 
 impl TicketEditor {
@@ -541,6 +549,7 @@ impl TicketEditor {
             opening_loading: false,
             pending_focus_tickets: false,
             number_jump,
+            clipboard_image: None,
         }
     }
 
@@ -1115,7 +1124,7 @@ impl TicketEditor {
         if self.submission.is_submitting() {
             return;
         }
-        let selected = self.table().selected_ids();
+        let selected = selected_ticket_ids(self.table().selected_ids());
         let changes = match self.state.borrow().commit_changes(&selected) {
             Ok(changes) => changes,
             Err(error) => {
@@ -1134,7 +1143,7 @@ impl TicketEditor {
         }
         self.ticket_dialog_close_requested.set(false);
         self.submit_confirmation_requested.set(false);
-        let selected = self.table().selected_ids();
+        let selected = selected_ticket_ids(self.table().selected_ids());
         let changes = match self.state.borrow().commit_changes(&selected) {
             Ok(changes) => changes,
             Err(error) => {
@@ -1405,6 +1414,96 @@ impl TicketEditor {
         Some(EventOutcome::Handled)
     }
 
+    fn handle_clipboard_image(
+        &mut self,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> Option<EventOutcome> {
+        let is_paste = matches!(
+            event,
+            TuiEvent::Key(KeyEvent {
+                code: Key::Char('v'),
+                modifiers: KeyModifiers::CONTROL,
+            })
+        );
+        if !is_paste
+            || self.clipboard_image.is_some()
+            || !self.state.borrow().selected_can_add_attachment()
+            || self.view.is_active()
+            || self.view.base().is_active()
+            || self.view.base().base().is_active()
+            || self.view.base().base().base().is_active()
+        {
+            return None;
+        }
+        let service = self.service.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(service.read_clipboard_image());
+        });
+        self.clipboard_image = Some(receiver);
+        ctx.request_tick();
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
+    }
+
+    fn poll_clipboard_image(&mut self) -> bool {
+        let Some(receiver) = self.clipboard_image.as_ref() else {
+            return false;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("Clipboard image read stopped".into())
+            }
+        };
+        self.clipboard_image = None;
+        match result {
+            Ok(Some(image)) => {
+                let result = self
+                    .state
+                    .borrow_mut()
+                    .dispatch(ComposerAction::AddAttachment {
+                        filename: image.filename,
+                        data: image.data,
+                    });
+                match result {
+                    Ok(()) => {
+                        if let Some(set) = self.state.borrow().active_set().cloned() {
+                            self.service.save_change_set(set);
+                        }
+                        self.sync();
+                    }
+                    Err(error) => {
+                        self.service
+                            .report_notification(tuicore::Notification::error(
+                                "Could not add attachment",
+                                error.to_string(),
+                            ));
+                    }
+                }
+                true
+            }
+            Ok(None) => {
+                self.service
+                    .report_notification(tuicore::Notification::info(
+                        "Clipboard",
+                        "No supported image found in the clipboard",
+                    ));
+                true
+            }
+            Err(error) => {
+                self.service
+                    .report_notification(tuicore::Notification::error(
+                        "Clipboard image failed",
+                        error,
+                    ));
+                true
+            }
+        }
+    }
+
     fn handle_ticket_number_jump(
         &mut self,
         event: &TuiEvent,
@@ -1487,6 +1586,9 @@ impl TicketEditor {
     }
 
     fn open_ticket_action_dialog(&mut self, ctx: &mut EventCtx<()>) -> bool {
+        if self.state.borrow().selected_attachment().is_some() {
+            return self.open_attachment_action_dialog(ctx);
+        }
         let Some(change) = self.state.borrow().selected_change().cloned() else {
             return false;
         };
@@ -1552,6 +1654,109 @@ impl TicketEditor {
         dialog.set_content(removal_content);
         self.view.base_mut().set_active_with_context(true, ctx);
         true
+    }
+
+    fn open_attachment_action_dialog(&mut self, ctx: &mut EventCtx<()>) -> bool {
+        let attachment = self.state.borrow().selected_attachment().cloned();
+        let Some(attachment) = attachment else {
+            return false;
+        };
+        let keys = self.composer_keys();
+        let mut actions = Vec::new();
+        let service = self.service.clone();
+        let open_attachment = attachment.clone();
+        actions.push(DialogAction::new("Open").on_trigger(move || {
+            let service = service.clone();
+            let attachment = open_attachment.clone();
+            std::thread::spawn(move || {
+                if let Err(error) = service.open_attachment(&attachment) {
+                    service.report_notification(tuicore::Notification::error(
+                        "Could not open attachment",
+                        error,
+                    ));
+                }
+            });
+        }));
+        let message = match attachment.change {
+            crate::store::composer::AttachmentChangeKind::Added => {
+                let sink = Rc::clone(&self.pending);
+                actions.push(
+                    DialogAction::new("Remove")
+                        .hotkey(keys.remove.spec())
+                        .on_trigger(move || {
+                            sink.borrow_mut()
+                                .push(ComposerAction::RemoveSelectedAttachment);
+                        }),
+                );
+                "Remove this locally added attachment from the change set."
+            }
+            crate::store::composer::AttachmentChangeKind::Deleted => {
+                let sink = Rc::clone(&self.pending);
+                actions.push(
+                    DialogAction::new("Restore")
+                        .hotkey(keys.restore.spec())
+                        .on_trigger(move || {
+                            sink.borrow_mut()
+                                .push(ComposerAction::RestoreSelectedAttachment);
+                        }),
+                );
+                "Restore this attachment to cancel its staged Jira deletion."
+            }
+            crate::store::composer::AttachmentChangeKind::Synced
+            | crate::store::composer::AttachmentChangeKind::Modified => {
+                let sink = Rc::clone(&self.pending);
+                actions.push(
+                    DialogAction::new("Delete")
+                        .hotkey(keys.delete.spec())
+                        .on_trigger(move || {
+                            sink.borrow_mut()
+                                .push(ComposerAction::DeleteSelectedAttachment);
+                        }),
+                );
+                "Delete this attachment from Jira when the change set is submitted."
+            }
+        };
+        let cancel = Rc::clone(&self.ticket_dialog_close_requested);
+        actions.push(
+            DialogAction::new("Cancel")
+                .hotkey(keys.dialog_cancel.spec())
+                .on_trigger(move || cancel.set(true)),
+        );
+        self.ticket_dialog_close_requested.set(false);
+        let dialog = self.view.base_mut().layer_mut();
+        dialog.set_top_left("Attachment action");
+        dialog.set_content([message]);
+        dialog.set_actions(actions);
+        self.view.base_mut().set_active_with_context(true, ctx);
+        true
+    }
+
+    fn handle_open_attachment(
+        &mut self,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> Option<EventOutcome> {
+        if !matches!(
+            event,
+            TuiEvent::Key(KeyEvent {
+                code: Key::Enter,
+                modifiers: KeyModifiers::CONTROL,
+            })
+        ) {
+            return None;
+        }
+        let attachment = self.state.borrow().selected_attachment()?.clone();
+        let service = self.service.clone();
+        std::thread::spawn(move || {
+            if let Err(error) = service.open_attachment(&attachment) {
+                service.report_notification(tuicore::Notification::error(
+                    "Could not open attachment",
+                    error,
+                ));
+            }
+        });
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
     }
 
     fn open_restore_reset_dialog(&mut self, ctx: &mut EventCtx<()>) -> bool {
@@ -1805,6 +2010,12 @@ impl TuiNode for TicketEditor {
         if let Some(outcome) = self.handle_ticket_number_jump(event, ctx) {
             return outcome;
         }
+        if let Some(outcome) = self.handle_clipboard_image(event, ctx) {
+            return outcome;
+        }
+        if let Some(outcome) = self.handle_open_attachment(event, ctx) {
+            return outcome;
+        }
         let outcome = self.view.event(event, ctx);
         self.drain_outputs(ctx);
         self.handle_exit(
@@ -1861,6 +2072,12 @@ impl TuiNode for TicketEditor {
         if let Some(outcome) = self.handle_ticket_number_jump(event, ctx) {
             return outcome;
         }
+        if let Some(outcome) = self.handle_clipboard_image(event, ctx) {
+            return outcome;
+        }
+        if let Some(outcome) = self.handle_open_attachment(event, ctx) {
+            return outcome;
+        }
         let outcome = self.view.dispatch_event(route, event, ctx);
         self.drain_outputs(ctx);
         self.handle_exit(
@@ -1889,7 +2106,7 @@ impl TuiNode for TicketEditor {
     }
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let was_loading = self.source.is_loading() || self.submission.is_submitting();
-        let changed = self.poll_submission(None);
+        let changed = self.poll_submission(None) || self.poll_clipboard_image();
         self.source.ensure_selected();
         let source_changed = self.source.drain();
         if changed || source_changed {
@@ -1921,7 +2138,11 @@ impl TuiNode for TicketEditor {
                     TickResult::IDLE
                 })
                 .merge(
-                    if self.opening_loading || was_loading || self.source.is_loading() {
+                    if self.opening_loading
+                        || was_loading
+                        || self.source.is_loading()
+                        || self.clipboard_image.is_some()
+                    {
                         TickResult::scheduled_after(Duration::from_millis(50))
                     } else {
                         TickResult::IDLE
@@ -1945,7 +2166,11 @@ impl TuiNode for TicketEditor {
                 TickResult::IDLE
             })
             .merge(
-                if was_loading || self.submission.is_submitting() || self.source.is_loading() {
+                if was_loading
+                    || self.submission.is_submitting()
+                    || self.source.is_loading()
+                    || self.clipboard_image.is_some()
+                {
                     TickResult::scheduled_after(Duration::from_millis(50))
                 } else {
                     TickResult::IDLE

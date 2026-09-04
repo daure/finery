@@ -16,8 +16,9 @@ use crate::{
     service::{
         AppService,
         composer_service::{
-            AssigneeInput, ChangeSetPatchOperation, ComposerService, DraftTicketInput, ServiceError,
-            SubmitChangeSetOutcome, TicketKindView, test_service, test_service_with_submit,
+            AssigneeInput, ChangeSetPatchOperation, ComposerService, DraftTicketInput,
+            ServiceError, SubmitChangeSetOutcome, TicketKindView, test_service,
+            test_service_with_submit,
         },
     },
     storage::Storage,
@@ -42,6 +43,19 @@ fn browser_launcher_uses_the_desktop_default_browser() {
     );
 }
 
+#[test]
+fn clipboard_image_format_detection_covers_supported_formats() {
+    assert_eq!(
+        super::image_extension(b"\x89PNG\r\n\x1a\nrest"),
+        Some("png")
+    );
+    assert_eq!(super::image_extension(b"\xff\xd8\xffrest"), Some("jpg"));
+    assert_eq!(super::image_extension(b"GIF89arest"), Some("gif"));
+    assert_eq!(super::image_extension(b"BMrest"), Some("bmp"));
+    assert_eq!(super::image_extension(b"RIFF0000WEBPrest"), Some("webp"));
+    assert_eq!(super::image_extension(b"plain text"), None);
+}
+
 fn ticket(key: &str) -> Ticket {
     Ticket {
         key: key.into(),
@@ -62,6 +76,7 @@ fn ticket(key: &str) -> Ticket {
         parent_title: None,
         parent_kind: None,
         has_children: false,
+        attachments: Vec::new(),
     }
 }
 

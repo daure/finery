@@ -8,10 +8,10 @@ use std::{
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
     AnimationSettings, BorderKind, DiffStyle, DiffViewer, Dropdown, DropdownLabelPosition,
-    DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget,
-    FocusRequest, HotkeyEvent, InputChrome, Language, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
-    LifecycleCtx, Panel, PanelHost, RenderCtx, TagInput, TagInputEvent, TextInput, TextareaInput,
-    TickResult, Toggle, TuiEvent, TuiNode,
+    DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusRequest,
+    FocusTarget, HotkeyEvent, InputChrome, Language, LayoutCtx, LayoutProposal, LayoutResult,
+    LayoutSizeHint, LifecycleCtx, Panel, PanelHost, RenderCtx, TagInput, TagInputEvent, TextInput,
+    TextareaInput, TickResult, Toggle, TuiEvent, TuiNode,
 };
 
 use crate::{

@@ -1,14 +1,23 @@
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::mpsc::{self, Receiver},
+    thread,
+    time::Duration,
+};
 
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
+    style::Style,
+    widgets::Paragraph as RatatuiParagraph,
 };
 use tuicore::{
     AnimationSettings, AxisProposal, BorderKind, EventCtx, EventOutcome, EventRoute, Flex,
-    FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, LayoutCtx, LayoutProposal,
-    LayoutResult, LayoutSizeHint, LifecycleCtx, Panel, PanelHost, RenderCtx, SeasonalEmptyState,
-    Split, Tab, Tabs, TabsBodyBorderStyle, TabsVariant, TickResult, TuiEvent, TuiNode,
+    FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, Image, ImageProtocol, LayoutCtx,
+    LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, Panel, PanelHost, RenderCtx,
+    SeasonalEmptyState, Split, Tab, Tabs, TabsBodyBorderStyle, TabsVariant, TickResult, TuiEvent,
+    TuiNode, theme,
 };
 
 use crate::{
@@ -29,6 +38,8 @@ type WideProperties = PanelHost<PropertyFields, ()>;
 type WideDetails = Split<WideDescription, WideProperties>;
 type TicketFields = Split<BoundTextField, ResponsiveDetails>;
 type TicketDetail = Split<Flex<()>, TicketFields>;
+type FileFields = Split<AttachmentFilename, Tabs<()>>;
+type FileDetail = Split<Flex<()>, FileFields>;
 
 const WIDE_BREAKPOINT: u16 = 100;
 
@@ -41,6 +52,20 @@ struct ResponsiveDetails {
     description_reader_key: String,
 }
 
+struct FileContent {
+    state: Rc<RefCell<ComposerState>>,
+    service: AppService,
+    content_url: Option<String>,
+    image: Option<Image>,
+    loading: Option<Receiver<Result<Image, String>>>,
+    error: Option<String>,
+}
+
+struct AttachmentFilename {
+    state: Rc<RefCell<ComposerState>>,
+    input: tuicore::TextInput<()>,
+}
+
 pub(super) struct DetailPane {
     state: Rc<RefCell<ComposerState>>,
     description_actions: PendingDescriptionActions,
@@ -48,6 +73,7 @@ pub(super) struct DetailPane {
     external_editor_pending: bool,
     service: AppService,
     detail: TicketDetail,
+    file: FileDetail,
     empty: SeasonalEmptyState,
 }
 
@@ -176,6 +202,35 @@ impl DetailPane {
                 ),
                 FlexItem::fit_content(),
             );
+        let file_tabs = Tabs::new(vec![Tab::new(
+            "File",
+            FileContent::new(Rc::clone(&state), service.clone()),
+        )])
+        .variant(TabsVariant::Underline)
+        .bordered(true);
+        let file_mode = Flex::row()
+            .gap(2)
+            .child(
+                "mode",
+                BoundViewMode::new(Rc::clone(&state), Rc::clone(&pending), keys.view.clone()),
+                FlexItem::fit_content(),
+            )
+            .child(
+                "description-diff-style",
+                BoundDescriptionDiffStyle::new(
+                    Rc::clone(&state),
+                    Rc::clone(&pending),
+                    keys.description_inline.clone(),
+                ),
+                FlexItem::fit_content(),
+            );
+        let file_fields = Split::vertical(
+            AttachmentFilename::new(Rc::clone(&state), Rc::clone(&pending)),
+            file_tabs,
+        )
+        .constraints(Constraint::Length(3), Constraint::Fill(1));
+        let file = Split::vertical(file_mode, file_fields)
+            .constraints(Constraint::Length(1), Constraint::Fill(1));
         Self {
             state,
             description_actions,
@@ -184,12 +239,16 @@ impl DetailPane {
             service,
             detail: Split::vertical(mode, fields)
                 .constraints(Constraint::Length(1), Constraint::Fill(1)),
+            file,
             empty: SeasonalEmptyState::new("No tickets added"),
         }
     }
 
     fn active(&self) -> &dyn TuiNode<()> {
-        if self.state.borrow().selected_ticket.is_some() {
+        let state = self.state.borrow();
+        if state.selected_attachment().is_some() {
+            &self.file
+        } else if state.selected_ticket.is_some() {
             &self.detail
         } else {
             &self.empty
@@ -197,7 +256,10 @@ impl DetailPane {
     }
 
     fn active_mut(&mut self) -> &mut dyn TuiNode<()> {
-        if self.state.borrow().selected_ticket.is_some() {
+        let selected_attachment = self.state.borrow().selected_attachment().is_some();
+        if selected_attachment {
+            &mut self.file
+        } else if self.state.borrow().selected_ticket.is_some() {
             &mut self.detail
         } else {
             &mut self.empty
@@ -257,6 +319,9 @@ impl DetailPane {
     }
 
     fn sync(&mut self) {
+        if self.state.borrow().selected_attachment().is_some() {
+            return;
+        }
         let fields = self.detail.second_mut();
         let title_height = fields.first().height();
         fields.set_constraints(Constraint::Length(title_height), Constraint::Fill(1));
@@ -383,6 +448,244 @@ impl ResponsiveDetails {
     fn narrow_border_style(&self) -> TabsBodyBorderStyle {
         self.narrow.current_body_border_style()
     }
+}
+
+impl AttachmentFilename {
+    fn new(state: Rc<RefCell<ComposerState>>, pending: PendingActions) -> Self {
+        let input = tuicore::TextInput::new()
+            .panel("File name")
+            .on_edit_end(move |value| {
+                pending
+                    .borrow_mut()
+                    .push(ComposerAction::RenameSelectedAttachment(value));
+            });
+        Self { state, input }
+    }
+
+    fn sync(&mut self) -> bool {
+        let state = self.state.borrow();
+        let value = state
+            .selected_attachment()
+            .map(|attachment| attachment.filename.clone())
+            .unwrap_or_default();
+        let editable = state.selected_attachment_is_editable();
+        let value_changed =
+            (!self.input.insert_mode() || !editable) && self.input.current_value() != value;
+        if value_changed {
+            self.input.set_value(value);
+            self.input.move_cursor_to_end();
+        }
+        let disabled_changed = self.input.is_disabled() == editable;
+        self.input.set_disabled(!editable);
+        value_changed || disabled_changed
+    }
+}
+
+impl TuiNode for AttachmentFilename {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        self.input.measure(proposal)
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.sync();
+        self.input.layout(area, ctx)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, _ctx: &mut RenderCtx<'a>) {
+        self.input.render(frame, area);
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        self.input.event(event, ctx)
+    }
+
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> EventOutcome {
+        self.input.dispatch_event(route, event, ctx)
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.input.tick(dt, settings).merge(if self.sync() {
+            TickResult::CHANGED
+        } else {
+            TickResult::IDLE
+        })
+    }
+
+    fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.input.focus(target, focused, ctx);
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.input.dispatch_focus(target, focused, ctx);
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.input.destroy(ctx);
+    }
+}
+
+impl FileContent {
+    fn new(state: Rc<RefCell<ComposerState>>, service: AppService) -> Self {
+        Self {
+            state,
+            service,
+            content_url: None,
+            image: None,
+            loading: None,
+            error: None,
+        }
+    }
+
+    fn sync(&mut self) {
+        let state = self.state.borrow();
+        let Some(attachment) = state.selected_attachment() else {
+            return;
+        };
+        let is_image = is_image_file(&attachment.filename);
+        if is_image && let Some(data) = attachment.local_data.as_ref() {
+            let identity = format!(
+                "local:{}:{}:{}",
+                attachment.id,
+                attachment.filename,
+                data.len()
+            );
+            if self.content_url.as_deref() != Some(&identity) {
+                self.content_url = Some(identity);
+                self.loading = None;
+                match Image::from_bytes(data) {
+                    Ok(image) => {
+                        self.image = Some(image.protocol(ImageProtocol::Kitty));
+                        self.error = None;
+                    }
+                    Err(error) => {
+                        self.image = None;
+                        self.error = Some(error.to_string());
+                    }
+                }
+            }
+            return;
+        }
+        let Some(url) = attachment.content_url.as_deref().filter(|_| is_image) else {
+            self.content_url = None;
+            self.image = None;
+            self.loading = None;
+            self.error = None;
+            return;
+        };
+        if self.content_url.as_deref() == Some(url) {
+            return;
+        }
+        self.content_url = Some(url.to_owned());
+        self.image = None;
+        self.error = None;
+        let (sender, receiver) = mpsc::channel();
+        let service = self.service.clone();
+        let url = url.to_owned();
+        thread::spawn(move || {
+            let _ = sender.send(service.load_jira_attachment_image(&url));
+        });
+        self.loading = Some(receiver);
+    }
+
+    fn text(&self) -> String {
+        let state = self.state.borrow();
+        let Some(attachment) = state.selected_attachment() else {
+            return "File unavailable".into();
+        };
+        if is_image_file(&attachment.filename) {
+            if let Some(error) = self.error.as_deref() {
+                return format!("Could not load image: {error}");
+            }
+            if self.loading.is_some() {
+                return "Loading image...".into();
+            }
+        }
+        format!("{}\n{} bytes", attachment.filename, attachment.size)
+    }
+}
+
+impl TuiNode for FileContent {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        LayoutSizeHint::content(32, 16).normalized(proposal)
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.sync();
+        if let Some(image) = self.image.as_mut() {
+            <Image as TuiNode<()>>::layout(image, area, ctx);
+        }
+        LayoutResult::new(area)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        if let Some(image) = self.image.as_ref() {
+            <Image as TuiNode<()>>::render(image, frame, area, ctx);
+        } else {
+            frame.render_widget(
+                RatatuiParagraph::new(self.text()).style(Style::default().fg(theme().text_fg())),
+                area,
+            );
+        }
+    }
+
+    fn tick(&mut self, _dt: Duration, _settings: AnimationSettings) -> TickResult {
+        self.sync();
+        if let Some(receiver) = self.loading.as_ref() {
+            match receiver.try_recv() {
+                Ok(Ok(image)) => {
+                    self.image = Some(image.protocol(ImageProtocol::Kitty));
+                    self.loading = None;
+                    return TickResult {
+                        changed: true,
+                        layout: true,
+                        active: true,
+                        next_tick: None,
+                    };
+                }
+                Ok(Err(error)) => {
+                    self.error = Some(error);
+                    self.loading = None;
+                    return TickResult::CHANGED;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.error = Some("image download stopped".into());
+                    self.loading = None;
+                    return TickResult::CHANGED;
+                }
+                Err(mpsc::TryRecvError::Empty) => return TickResult::ACTIVE,
+            }
+        }
+        self.image
+            .as_mut()
+            .map(Image::tick)
+            .unwrap_or(TickResult::IDLE)
+    }
+}
+
+fn is_image_file(filename: &str) -> bool {
+    filename.rsplit_once('.').is_some_and(|(_, extension)| {
+        matches!(
+            extension.to_ascii_lowercase().as_str(),
+            "apng" | "avif" | "bmp" | "gif" | "ico" | "jpeg" | "jpg" | "png" | "webp"
+        )
+    })
 }
 
 fn panel_description_action(
@@ -552,7 +855,7 @@ impl TuiNode for DetailPane {
             );
             <SeasonalEmptyState as TuiNode<()>>::render(&self.empty, frame, shifted, ctx);
         } else {
-            self.detail.render(frame, area, ctx);
+            self.active().render(frame, area, ctx);
         }
     }
 
@@ -581,7 +884,13 @@ impl TuiNode for DetailPane {
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         self.sync();
-        self.active_mut().tick(dt, settings)
+        if self.state.borrow().selected_attachment().is_some() {
+            self.file.tick(dt, settings)
+        } else {
+            self.active_mut()
+                .tick(dt, settings)
+                .merge(self.file.tick(dt, settings))
+        }
     }
 
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
@@ -594,21 +903,125 @@ impl TuiNode for DetailPane {
 
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.detail.init(ctx);
+        self.file.init(ctx);
         self.empty.init(ctx);
     }
 
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.detail.mount(ctx);
+        self.file.mount(ctx);
         self.empty.mount(ctx);
     }
 
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.empty.unmount(ctx);
+        self.file.unmount(ctx);
         self.detail.unmount(ctx);
     }
 
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.empty.destroy(ctx);
+        self.file.destroy(ctx);
         self.detail.destroy(ctx);
+    }
+}
+
+#[cfg(test)]
+mod file_content_tests {
+    use super::*;
+    use crate::store::composer::{
+        AttachmentChangeKind, ChangeKind, ChangeSet, Ticket, TicketAttachment, TicketChange,
+        TicketKind,
+    };
+
+    const TEST_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAGAAAAAwCAIAAABhdOiYAAAAf0lEQVR42u3RMRGAQBADwBdBTU1NjTDkvAhcffMSMJFrbjYTA9mM47wjvd4v0j2fSFcoAxAgQIAAAQIECBAgQIAKgLoOSx0PCBAgQIAAAQIECBAgQBVAXYeljgcECBAgQIAAAQIECBCgCqCuw1LHAwIECBAgQIAAAQIECFAB0A/Lrzglvf/PRwAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn downloaded_image_requests_layout_before_rendering() {
+        let attachment = TicketAttachment {
+            id: "10000".into(),
+            filename: "design.png".into(),
+            created: String::new(),
+            size: 1,
+            content_url: Some("https://jira.example/design.png".into()),
+            change: AttachmentChangeKind::Synced,
+            local_data: None,
+        };
+        let ticket = Ticket {
+            key: "FIN-1".into(),
+            project_key: "FIN".into(),
+            title: "Image ticket".into(),
+            description: String::new(),
+            description_safe_to_overwrite: true,
+            description_overwrite_warning: None,
+            kind: TicketKind::Task,
+            status: "To Do".into(),
+            priority: "Medium".into(),
+            assignee: String::new(),
+            assignee_account_id: String::new(),
+            story_points: None,
+            fix_versions: Vec::new(),
+            labels: Vec::new(),
+            parent_key: None,
+            parent_title: None,
+            parent_kind: None,
+            has_children: false,
+            attachments: vec![attachment],
+        };
+        let mut state = ComposerState::from_change_sets(vec![ChangeSet {
+            id: "CS-1".into(),
+            name: "Images".into(),
+            tickets: vec![TicketChange {
+                id: "FIN-1".into(),
+                original: Some(ticket.clone()),
+                updated: Some(ticket),
+                kind: ChangeKind::Synced,
+                submitted: None,
+                retry_blocked: false,
+                create_attempt: false,
+                sibling_order: 0,
+            }],
+            selected_ticket_ids: Vec::new(),
+            closed: false,
+            submission_attempt: None,
+        }]);
+        state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+        state.dispatch(ComposerAction::SelectTicket(Some(
+            "FIN-1:attachment:0".into(),
+        )));
+        let mut content = FileContent::new(Rc::new(RefCell::new(state)), AppService::for_tests());
+        content.content_url = Some("https://jira.example/design.png".into());
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(Image::from_base64(TEST_PNG).unwrap()))
+            .unwrap();
+        content.loading = Some(receiver);
+
+        let result = content.tick(Duration::ZERO, AnimationSettings::default());
+
+        assert!(content.image.is_some());
+        assert_eq!(
+            content.image.as_ref().map(Image::graphics_protocol),
+            Some(ImageProtocol::Kitty),
+            "downloaded Composer previews use direct Kitty placements"
+        );
+        assert!(
+            result.layout,
+            "an image loaded after layout must request a new layout"
+        );
+        content
+            .state
+            .borrow_mut()
+            .dispatch(ComposerAction::SelectTicket(Some("FIN-1".into())));
+        content.tick(Duration::ZERO, AnimationSettings::default());
+
+        assert!(
+            content.image.is_some(),
+            "leaving the attachment should keep its image cached"
+        );
+        assert_eq!(
+            content.content_url.as_deref(),
+            Some("https://jira.example/design.png")
+        );
     }
 }

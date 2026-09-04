@@ -49,6 +49,7 @@ fn existing_jira_search_uses_centered_dropdown_popup_without_trigger_field() {
         parent_title: None,
         parent_kind: None,
         has_children: false,
+        attachments: Vec::new(),
     })]));
     let mut open_layout = LayoutCtx::new();
     open_layout.with_overlay_bounds(area, |ctx| {
@@ -130,6 +131,7 @@ fn existing_search_keeps_legal_result_beyond_first_ten() {
             parent_title: None,
             parent_kind: None,
             has_children: false,
+            attachments: Vec::new(),
         })
         .collect::<Vec<_>>();
     tickets.push(Ticket {
@@ -151,6 +153,7 @@ fn existing_search_keeps_legal_result_beyond_first_ten() {
         parent_title: None,
         parent_kind: None,
         has_children: false,
+        attachments: Vec::new(),
     });
 
     menu.apply_search_result(Ok(tickets.into_iter().map(search_ticket).collect()));

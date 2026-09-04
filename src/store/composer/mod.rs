@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -47,6 +48,32 @@ pub(crate) struct Ticket {
     pub parent_kind: Option<TicketKind>,
     #[serde(default)]
     pub has_children: bool,
+    #[serde(default)]
+    pub attachments: Vec<TicketAttachment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TicketAttachment {
+    #[serde(default)]
+    pub id: String,
+    pub filename: String,
+    pub created: String,
+    pub size: u64,
+    #[serde(default)]
+    pub content_url: Option<String>,
+    #[serde(default)]
+    pub change: AttachmentChangeKind,
+    #[serde(default)]
+    pub local_data: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) enum AttachmentChangeKind {
+    #[default]
+    Synced,
+    Added,
+    Modified,
+    Deleted,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -287,6 +314,14 @@ pub(crate) enum ComposerAction {
         name: String,
         account_id: String,
     },
+    AddAttachment {
+        filename: String,
+        data: Vec<u8>,
+    },
+    RenameSelectedAttachment(String),
+    DeleteSelectedAttachment,
+    RestoreSelectedAttachment,
+    RemoveSelectedAttachment,
     CompleteSubmission {
         change_set_id: String,
         id: String,
@@ -501,6 +536,56 @@ impl ComposerState {
 
     pub(crate) fn selected_ticket(&self) -> Option<&Ticket> {
         self.ticket_for_change(self.selected_change()?)
+    }
+
+    pub(crate) fn selected_attachment(&self) -> Option<&TicketAttachment> {
+        let selected = self.selected_ticket.as_deref()?;
+        let (ticket_id, index) = selected.rsplit_once(":attachment:")?;
+        let index = index.parse::<usize>().ok()?;
+        let change = self
+            .active_set()?
+            .tickets
+            .iter()
+            .find(|change| change.id == ticket_id)?;
+        self.ticket_for_change(change)?.attachments.get(index)
+    }
+
+    pub(crate) fn selected_attachment_is_editable(&self) -> bool {
+        let Some((ticket_id, index)) = self.attachment_target() else {
+            return false;
+        };
+        self.view_mode == ComposerViewMode::Changes
+            && !self.active_change_set_is_submitting()
+            && self.active_set().is_some_and(|set| {
+                set.tickets
+                    .iter()
+                    .find(|change| change.id == ticket_id)
+                    .is_some_and(|change| {
+                        !change.is_submitted()
+                            && change.kind != ChangeKind::Deleted
+                            && self
+                                .ticket_for_change(change)
+                                .and_then(|ticket| ticket.attachments.get(index))
+                                .is_some_and(|attachment| {
+                                    attachment.change == AttachmentChangeKind::Added
+                                })
+                    })
+            })
+    }
+
+    pub(crate) fn selected_can_add_attachment(&self) -> bool {
+        let Some(selected) = self.selected_ticket.as_deref() else {
+            return false;
+        };
+        let ticket_id = selected
+            .rsplit_once(":attachment:")
+            .map_or(selected, |(ticket_id, _)| ticket_id);
+        self.view_mode == ComposerViewMode::Changes
+            && !self.active_change_set_is_submitting()
+            && self
+                .active_set()
+                .and_then(|set| set.tickets.iter().find(|change| change.id == ticket_id))
+                .is_some_and(|change| change.can_edit(true))
     }
 
     pub(crate) fn selected_existing_ticket_key(&self) -> Option<String> {
@@ -903,6 +988,31 @@ impl ComposerState {
                 ticket.assignee = name;
                 ticket.assignee_account_id = account_id;
             }),
+            ComposerAction::AddAttachment { filename, data } => self.add_attachment(filename, data),
+            ComposerAction::RenameSelectedAttachment(filename) => {
+                if !filename.trim().is_empty() {
+                    self.edit_selected_attachment(|attachment| {
+                        if attachment.change == AttachmentChangeKind::Added {
+                            attachment.filename = filename;
+                        }
+                    })
+                }
+            }
+            ComposerAction::DeleteSelectedAttachment => {
+                self.edit_selected_attachment(|attachment| {
+                    if attachment.change != AttachmentChangeKind::Added {
+                        attachment.change = AttachmentChangeKind::Deleted;
+                    }
+                })
+            }
+            ComposerAction::RestoreSelectedAttachment => {
+                self.edit_selected_attachment(|attachment| {
+                    if attachment.change == AttachmentChangeKind::Deleted {
+                        attachment.change = AttachmentChangeKind::Synced;
+                    }
+                })
+            }
+            ComposerAction::RemoveSelectedAttachment => self.remove_selected_attachment(),
             ComposerAction::CompleteSubmission {
                 change_set_id,
                 id,
@@ -1068,6 +1178,7 @@ impl ComposerState {
             parent_title: None,
             parent_kind: None,
             has_children: false,
+            attachments: Vec::new(),
         };
         self.validate_new_placement(ticket.kind, &placement, None)?;
         ticket.parent_key = self.resolved_parent_key(&placement);
@@ -1485,6 +1596,74 @@ impl ComposerState {
         edit(ticket);
     }
 
+    fn attachment_target(&self) -> Option<(String, usize)> {
+        let selected = self.selected_ticket.as_deref()?;
+        let (ticket_id, index) = selected.rsplit_once(":attachment:")?;
+        Some((ticket_id.to_owned(), index.parse().ok()?))
+    }
+
+    fn add_attachment(&mut self, filename: String, data: Vec<u8>) {
+        let selected = self.selected_ticket.clone();
+        let ticket_id = selected
+            .as_deref()
+            .and_then(|selected| selected.rsplit_once(":attachment:").map(|(id, _)| id))
+            .or(selected.as_deref())
+            .map(str::to_owned);
+        let Some(ticket_id) = ticket_id else {
+            return;
+        };
+        let size = data.len() as u64;
+        self.selected_ticket = Some(ticket_id.clone());
+        self.edit_selected(|ticket| {
+            ticket.attachments.push(TicketAttachment {
+                id: local_attachment_id(),
+                filename,
+                created: String::new(),
+                size,
+                content_url: None,
+                change: AttachmentChangeKind::Added,
+                local_data: Some(data),
+            });
+        });
+        let Some(index) = self
+            .selected_ticket()
+            .map(|ticket| ticket.attachments.len().saturating_sub(1))
+        else {
+            return;
+        };
+        self.selected_ticket = Some(format!("{ticket_id}:attachment:{index}"));
+    }
+
+    fn edit_selected_attachment(&mut self, edit: impl FnOnce(&mut TicketAttachment)) {
+        let Some((ticket_id, index)) = self.attachment_target() else {
+            return;
+        };
+        self.selected_ticket = Some(ticket_id.clone());
+        self.edit_selected(|ticket| {
+            if let Some(attachment) = ticket.attachments.get_mut(index) {
+                edit(attachment);
+            }
+        });
+        self.selected_ticket = Some(format!("{ticket_id}:attachment:{index}"));
+    }
+
+    fn remove_selected_attachment(&mut self) {
+        let Some((ticket_id, index)) = self.attachment_target() else {
+            return;
+        };
+        self.selected_ticket = Some(ticket_id.clone());
+        self.edit_selected(|ticket| {
+            if ticket
+                .attachments
+                .get(index)
+                .is_some_and(|attachment| attachment.change == AttachmentChangeKind::Added)
+            {
+                ticket.attachments.remove(index);
+            }
+        });
+        self.selected_ticket = Some(ticket_id);
+    }
+
     fn update_selected_kind(&mut self, kind: TicketKind) -> Result<(), PlacementError> {
         let Some(selected) = self.selected_ticket.clone() else {
             return Err(PlacementError::UnknownTicket);
@@ -1765,6 +1944,15 @@ impl ComposerState {
     }
 }
 
+fn local_attachment_id() -> String {
+    static NEXT_ATTACHMENT: AtomicU64 = AtomicU64::new(1);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let sequence = NEXT_ATTACHMENT.fetch_add(1, Ordering::Relaxed);
+    format!("local-{timestamp}-{sequence}")
+}
+
 pub(crate) fn change_parent(change: &TicketChange) -> Option<String> {
     let ticket = if change.kind == ChangeKind::Deleted {
         change.original.as_ref()
@@ -1813,6 +2001,9 @@ pub(crate) fn rebase_ticket(original: &Ticket, updated: &Ticket, refreshed: &Tic
         rebased.parent_key = updated.parent_key.clone();
         rebased.parent_title = updated.parent_title.clone();
         rebased.parent_kind = updated.parent_kind;
+    }
+    if original.attachments != updated.attachments {
+        rebased.attachments = updated.attachments.clone();
     }
     rebased
 }
@@ -1952,6 +2143,7 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             parent_title: None,
             parent_kind: None,
             has_children: false,
+            attachments: Vec::new(),
         },
         Ticket {
             key: "FIN-157".into(),
@@ -1972,6 +2164,7 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             parent_title: None,
             parent_kind: None,
             has_children: false,
+            attachments: Vec::new(),
         },
         Ticket {
             key: "FIN-131".into(),
@@ -1992,6 +2185,7 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             parent_title: None,
             parent_kind: None,
             has_children: false,
+            attachments: Vec::new(),
         },
         Ticket {
             key: "FIN-166".into(),
@@ -2012,6 +2206,7 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             parent_title: None,
             parent_kind: None,
             has_children: false,
+            attachments: Vec::new(),
         },
     ]
 }

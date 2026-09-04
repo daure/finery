@@ -1,8 +1,9 @@
 use ratatui::style::Modifier;
 
 use super::{
-    ChangeBadge, TicketRowDetails, WorkItemKind, WorkItemRow, story_points_label,
-    ticket_menu_max_height, ticket_summary_text, work_item_title_with_key_line_with_match,
+    ChangeBadge, TicketRowDetails, WorkItemKind, WorkItemRow, attachment_summary_text,
+    story_points_label, ticket_menu_max_height, ticket_summary_text,
+    work_item_title_with_key_line_with_match,
 };
 
 #[test]
@@ -217,4 +218,47 @@ fn long_labels_use_a_tight_chip_with_an_overflow_count_after_status() {
 
     assert!(metadata.contains("backlog-r…|+3"));
     assert!(metadata.find("To Do") < metadata.find("backlog-r…|+3"));
+}
+
+#[test]
+fn attachment_rows_show_filename_date_and_size() {
+    tuicore::init();
+
+    let text = attachment_summary_text(
+        crate::store::composer::AttachmentChangeKind::Synced,
+        "image-20260904-161404.png",
+        "2026-09-04T16:14:04.000+0000",
+        21_504,
+        false,
+    );
+    let rendered = text.lines[0]
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+
+    assert!(rendered.contains("S "));
+    assert!(rendered.contains("image-20260904-161404.png"));
+    assert!(rendered.contains("Sep 04, 2026"));
+    assert!(rendered.contains("21 KB"));
+}
+
+#[test]
+fn highlighted_attachment_rows_use_the_selected_foreground() {
+    tuicore::init();
+
+    let text = attachment_summary_text(
+        crate::store::composer::AttachmentChangeKind::Synced,
+        "design.png",
+        "2026-09-04T16:14:04.000+0000",
+        21_504,
+        true,
+    );
+
+    assert!(
+        text.lines[0]
+            .spans
+            .iter()
+            .all(|span| span.style.fg == Some(tuicore::theme().selected_fg()))
+    );
 }

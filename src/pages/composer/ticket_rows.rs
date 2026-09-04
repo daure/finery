@@ -10,8 +10,8 @@ use crate::{
     components::{
         ticket_number_jump::TicketNumberJump,
         work_item_rows::{
-            ChangeBadge, TicketRowDetails, WorkItemKind, WorkItemRow, ticket_summary_text,
-            work_item_title_prefix_width,
+            ChangeBadge, TicketRowDetails, WorkItemKind, WorkItemRow, attachment_summary_text,
+            ticket_summary_text, work_item_title_prefix_width,
         },
     },
     store::{
@@ -29,6 +29,8 @@ pub(super) struct TicketRow {
     subtask_progress: Option<(usize, usize)>,
     fix_versions: Vec<String>,
     epic_name: Option<String>,
+    attachments: Vec<crate::store::composer::TicketAttachment>,
+    attachment: Option<crate::store::composer::TicketAttachment>,
 }
 
 #[cfg(test)]
@@ -49,13 +51,14 @@ pub(super) fn ticket_data_view_with_number_jump(
         .headers(false)
         .columns(ticket_columns(number_jump))
         .wrap_cells()
-        .row_height(2)
+        .row_height_by(|row| row.row_height())
         .activation_mode(ActivationMode::OnNavigate)
         .selection_mode(SelectionMode::Multi)
         .selection_propagation(SelectionPropagation::CascadeDescendants)
         .selection_trigger(SelectionTrigger::OnActivate)
         .selection_glyphs(SelectionGlyphs::NERD_FONT)
         .selection_disabled_by(|row| row.item.submitted)
+        .selection_glyph_hidden_by(|row| row.attachment.is_some())
         .selection_disabled_glyph("󱋭")
         .tree(TreeAdapter::parent_id(|row: &TicketRow| {
             row.parent_id.clone()
@@ -107,6 +110,17 @@ pub(super) fn ticket_rows(state: &ComposerState) -> Vec<TicketRow> {
     let mut rows = changes
         .into_iter()
         .filter_map(|change| ticket_row(state, change, temporary_keys.get(&change.id)))
+        .flat_map(|row| {
+            let mut attachment_rows = row
+                .attachments
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, attachment)| TicketRow::attachment_child(&row, attachment, index))
+                .collect::<Vec<_>>();
+            attachment_rows.insert(0, row);
+            attachment_rows
+        })
         .collect::<Vec<_>>();
     let parents = rows
         .iter()
@@ -235,6 +249,8 @@ fn ticket_row(
         }),
         fix_versions: ticket.fix_versions.clone(),
         epic_name: presentation.and_then(|presentation| presentation.work_item.epic_name.clone()),
+        attachments: ticket.attachments.clone(),
+        attachment: None,
     })
 }
 
@@ -244,7 +260,16 @@ fn ticket_columns(number_jump: Rc<RefCell<TicketNumberJump>>) -> Vec<Column<Tick
             "ticket",
             "",
             Constraint::Percentage(100),
-            move |row: &TicketRow, _: &CellContext<String>| {
+            move |row: &TicketRow, context: &CellContext<String>| {
+                if let Some(attachment) = row.attachment.as_ref() {
+                    return attachment_summary_text(
+                        attachment.change,
+                        &attachment.filename,
+                        &attachment.created,
+                        attachment.size,
+                        context.highlighted,
+                    );
+                }
                 ticket_summary_text(
                     &row.item,
                     number_jump.borrow().query(),
@@ -268,6 +293,46 @@ fn ticket_columns(number_jump: Rc<RefCell<TicketNumberJump>>) -> Vec<Column<Tick
                 .saturating_add(work_item_title_prefix_width(&row.item))
         }),
     ]
+}
+
+impl TicketRow {
+    fn attachment_child(
+        parent: &Self,
+        attachment: crate::store::composer::TicketAttachment,
+        index: usize,
+    ) -> Self {
+        Self {
+            item: WorkItemRow {
+                id: format!("{}:attachment:{index}", parent.item.id),
+                key: String::new(),
+                title: String::new(),
+                kind: WorkItemKind::Other,
+                priority: String::new(),
+                status: String::new(),
+                done: false,
+                assignee: String::new(),
+                labels: Vec::new(),
+                story_points: None,
+                show_story_points: false,
+                story_points_estimated: false,
+                story_points_from_average: false,
+                change_badge: None,
+                submitted: false,
+            },
+            parent_id: Some(parent.item.id.clone()),
+            depth: 0,
+            parent_delta: None,
+            subtask_progress: None,
+            fix_versions: Vec::new(),
+            epic_name: None,
+            attachments: Vec::new(),
+            attachment: Some(attachment),
+        }
+    }
+
+    fn row_height(&self) -> u16 {
+        if self.attachment.is_some() { 1 } else { 2 }
+    }
 }
 
 fn ticket_kind(kind: TicketKind) -> WorkItemKind {

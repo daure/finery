@@ -173,6 +173,7 @@ fn snapshot_set(name: &str) -> ChangeSet {
                 parent_title: None,
                 parent_kind: None,
                 has_children: false,
+                attachments: Vec::new(),
             }),
             updated: None,
             kind: ChangeKind::Synced,

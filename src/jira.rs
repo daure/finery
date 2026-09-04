@@ -11,8 +11,8 @@ use serde_json::{Map, Value, json};
 use crate::{
     app_settings::AppSettings,
     store::composer::{
-        ChangeKind, SubmissionSnapshot, Ticket, TicketChange, TicketKind, change_parent,
-        jira_adf::markdown_to_adf,
+        AttachmentChangeKind, ChangeKind, SubmissionSnapshot, Ticket, TicketChange, TicketKind,
+        change_parent, jira_adf::markdown_to_adf,
     },
     store::work_items::{
         BacklogSnapshot, RankPlan, RunwayCapacitySource, Sprint, VelocityReport, VelocitySprint,
@@ -24,7 +24,7 @@ mod mapping;
 
 use mapping::*;
 
-const ISSUE_FIELDS: [&str; 11] = [
+const ISSUE_FIELDS: [&str; 12] = [
     "summary",
     "description",
     "issuetype",
@@ -36,6 +36,7 @@ const ISSUE_FIELDS: [&str; 11] = [
     "subtasks",
     "labels",
     "fixVersions",
+    "attachment",
 ];
 
 const BACKLOG_FIELDS: [&str; 9] = [
@@ -49,7 +50,7 @@ const BACKLOG_FIELDS: [&str; 9] = [
     "labels",
     "fixVersions",
 ];
-const COMPOSER_FIELDS: [&str; 11] = [
+const COMPOSER_FIELDS: [&str; 12] = [
     "summary",
     "description",
     "issuetype",
@@ -61,6 +62,7 @@ const COMPOSER_FIELDS: [&str; 11] = [
     "subtasks",
     "labels",
     "fixVersions",
+    "attachment",
 ];
 const BACKLOG_JQL: &str = "";
 const MAX_VELOCITY_GOAL_LOOKUPS: usize = 10;
@@ -596,7 +598,10 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         }
         report
     });
-    let active_sprint_ids = sprints.iter().map(|sprint| sprint.id).collect::<HashSet<_>>();
+    let active_sprint_ids = sprints
+        .iter()
+        .map(|sprint| sprint.id)
+        .collect::<HashSet<_>>();
     let mut velocity = velocity;
     let velocity_sprint_warning = velocity.as_mut().ok().and_then(|report| {
         let historical_sprint_ids = report
@@ -642,12 +647,14 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         let mut errors = Vec::new();
         for (sprint_id, result) in results {
             match result {
-                Ok(work_items) => report
-                    .sprints
-                    .iter_mut()
-                    .find(|sprint| sprint.id == sprint_id)
-                    .expect("historical velocity sprint must exist")
-                    .work_items = Some(work_items),
+                Ok(work_items) => {
+                    report
+                        .sprints
+                        .iter_mut()
+                        .find(|sprint| sprint.id == sprint_id)
+                        .expect("historical velocity sprint must exist")
+                        .work_items = Some(work_items)
+                }
                 Err(error) => errors.push(error),
             }
         }
@@ -2150,6 +2157,8 @@ fn create_issue(
             story_points_field_id,
         ));
     }
+    apply_attachment_changes(client, base_url, email, token, &created.key, desired)
+        .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
     fetch_ticket(
         client,
         base_url,
@@ -2200,6 +2209,7 @@ fn update_issue(
             &desired.status,
         )?;
     }
+    apply_attachment_changes(client, base_url, email, token, &original.key, desired)?;
     fetch_ticket(
         client,
         base_url,
@@ -2208,6 +2218,60 @@ fn update_issue(
         &original.key,
         story_points_field_id,
     )
+}
+
+fn apply_attachment_changes(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    issue_key: &str,
+    desired: &Ticket,
+) -> Result<(), String> {
+    for attachment in desired
+        .attachments
+        .iter()
+        .filter(|attachment| attachment.change == AttachmentChangeKind::Deleted)
+    {
+        if attachment.id.is_empty() {
+            continue;
+        }
+        let response = client
+            .delete(format!(
+                "{base_url}/rest/api/3/attachment/{}",
+                attachment.id
+            ))
+            .basic_auth(email, Some(token))
+            .send()
+            .map_err(|error| error.to_string())?;
+        ensure_success(response)?;
+    }
+    for attachment in desired.attachments.iter().filter(|attachment| {
+        matches!(
+            attachment.change,
+            AttachmentChangeKind::Added | AttachmentChangeKind::Modified
+        )
+    }) {
+        let data = attachment
+            .local_data
+            .clone()
+            .ok_or_else(|| format!("Attachment {} has no local file data", attachment.filename))?;
+        let part =
+            reqwest::blocking::multipart::Part::bytes(data).file_name(attachment.filename.clone());
+        let form = reqwest::blocking::multipart::Form::new().part("file", part);
+        let response = client
+            .post(format!(
+                "{base_url}/rest/api/3/issue/{issue_key}/attachments"
+            ))
+            .basic_auth(email, Some(token))
+            .header("Accept", "application/json")
+            .header("X-Atlassian-Token", "no-check")
+            .multipart(form)
+            .send()
+            .map_err(|error| error.to_string())?;
+        ensure_success(response)?;
+    }
+    Ok(())
 }
 
 fn delete_issue(
@@ -2501,6 +2565,7 @@ fn same_jira_content(left: &Ticket, right: &Ticket) -> bool {
         && left.fix_versions == right.fix_versions
         && left.labels == right.labels
         && left.parent_key == right.parent_key
+        && left.attachments == right.attachments
 }
 
 fn response_json<T: for<'de> Deserialize<'de>>(

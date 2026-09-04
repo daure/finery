@@ -27,6 +27,7 @@ fn ticket(key: &str, title: &str) -> Ticket {
         parent_title: None,
         parent_kind: None,
         has_children: false,
+        attachments: Vec::new(),
     }
 }
 

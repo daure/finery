@@ -137,6 +137,94 @@ pub(crate) fn ticket_summary_text(
     ])
 }
 
+pub(crate) fn attachment_summary_text(
+    change: crate::store::composer::AttachmentChangeKind,
+    filename: &str,
+    created: &str,
+    size: u64,
+    highlighted: bool,
+) -> Text<'static> {
+    let theme = tuicore::theme();
+    let text_style = Style::default().fg(if highlighted {
+        theme.selected_fg()
+    } else {
+        theme.text_fg()
+    });
+    let muted_style = Style::default().fg(if highlighted {
+        theme.selected_fg()
+    } else {
+        theme.muted_fg()
+    });
+    Text::from(Line::from(vec![
+        Span::styled(attachment_change_badge(change), text_style),
+        Span::styled(" ", text_style),
+        Span::styled(" ", text_style),
+        Span::styled(filename.to_owned(), text_style.add_modifier(Modifier::BOLD)),
+        Span::styled(" • ", muted_style),
+        Span::styled(attachment_date_label(created), muted_style),
+        Span::styled(" • ", muted_style),
+        Span::styled(attachment_size_label(size), muted_style),
+    ]))
+}
+
+fn attachment_change_badge(change: crate::store::composer::AttachmentChangeKind) -> &'static str {
+    match change {
+        crate::store::composer::AttachmentChangeKind::Synced => "S",
+        crate::store::composer::AttachmentChangeKind::Added => "A",
+        crate::store::composer::AttachmentChangeKind::Modified => "M",
+        crate::store::composer::AttachmentChangeKind::Deleted => "D",
+    }
+}
+
+fn attachment_date_label(created: &str) -> String {
+    if created.is_empty() {
+        return "Today".into();
+    }
+    let Some((year, month, day)) = created.split('T').next().and_then(|date| {
+        let mut parts = date.split('-');
+        Some((parts.next()?, parts.next()?, parts.next()?))
+    }) else {
+        return created.to_owned();
+    };
+    let month = match month {
+        "01" => "Jan",
+        "02" => "Feb",
+        "03" => "Mar",
+        "04" => "Apr",
+        "05" => "May",
+        "06" => "Jun",
+        "07" => "Jul",
+        "08" => "Aug",
+        "09" => "Sep",
+        "10" => "Oct",
+        "11" => "Nov",
+        "12" => "Dec",
+        _ => return created.to_owned(),
+    };
+    format!("{month} {day}, {year}")
+}
+
+fn attachment_size_label(size: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    match size {
+        size if size >= GIB => format_size(size, GIB, "GB"),
+        size if size >= MIB => format_size(size, MIB, "MB"),
+        size if size >= KIB => format_size(size, KIB, "KB"),
+        size => format!("{size} B"),
+    }
+}
+
+fn format_size(size: u64, unit: u64, label: &str) -> String {
+    let value = size as f64 / unit as f64;
+    if value >= 10.0 || value.fract() == 0.0 {
+        format!("{value:.0} {label}")
+    } else {
+        format!("{value:.1} {label}")
+    }
+}
+
 pub(crate) fn work_item_title_with_key_line_with_match(
     row: &WorkItemRow,
     number_query: Option<&str>,

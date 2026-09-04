@@ -21,13 +21,17 @@ use super::property_fields::BoundPropertyDropdown;
 use super::source::SourceController;
 use super::speed_reader_text::clean_for_speed_reader;
 use super::submission::SubmissionController;
-use super::ticket_rows::ticket_data_view;
+use super::{
+    ticket_editor::selected_ticket_ids,
+    ticket_rows::{ticket_data_view, ticket_rows},
+};
 use crate::{
     jira::JiraOption,
     service::{AppService, composer_service::ChangeSetPatchOperation},
     store::composer::{
-        ChangeKind, ChangeSet, ComposerAction, ComposerState, ComposerViewMode, PlacementTarget,
-        SubmissionSnapshot, Ticket, TicketChange, TicketKind, TicketPresentation,
+        AttachmentChangeKind, ChangeKind, ChangeSet, ComposerAction, ComposerState,
+        ComposerViewMode, PlacementTarget, SubmissionSnapshot, Ticket, TicketAttachment,
+        TicketChange, TicketKind, TicketPresentation,
     },
     store::work_items::{SubtaskProgress, WorkItem},
 };
@@ -56,6 +60,7 @@ fn share_ticket(key: &str, title: &str, kind: TicketKind, parent_key: Option<&st
         parent_title: None,
         parent_kind: None,
         has_children: false,
+        attachments: Vec::new(),
     }
 }
 
@@ -109,7 +114,12 @@ fn sharing_one_story_ticket_omits_the_change_set_and_story() {
 fn sharing_multiple_story_tickets_keeps_the_story_heading() {
     let mut second_ticket = share_change(
         "second-ticket",
-        share_ticket("FIN-102", "Second ticket", TicketKind::Task, Some("FIN-100")),
+        share_ticket(
+            "FIN-102",
+            "Second ticket",
+            TicketKind::Task,
+            Some("FIN-100"),
+        ),
     );
     second_ticket.sibling_order = 1;
     let text = change_set_share_text(
@@ -206,7 +216,12 @@ fn sharing_only_subtasks_keeps_them_and_uses_the_subtask_marker() {
             story,
             share_change(
                 "subtask",
-                share_ticket("FIN-102", "Subtask title", TicketKind::Subtask, Some("FIN-100")),
+                share_ticket(
+                    "FIN-102",
+                    "Subtask title",
+                    TicketKind::Subtask,
+                    Some("FIN-100"),
+                ),
             ),
         ]),
         Some("https://jira.example"),
@@ -2491,7 +2506,194 @@ fn added_subtask_uses_project_temporary_key_until_submission() {
 
     assert!(text.contains("FIN-200"));
     assert!(text.contains("A • @-- • To Do"));
-    assert_eq!(state.selected_existing_ticket_key().as_deref(), Some("FIN-200"));
+    assert_eq!(
+        state.selected_existing_ticket_key().as_deref(),
+        Some("FIN-200")
+    );
+}
+
+#[test]
+fn attachments_are_tree_children_before_ticket_children() {
+    let mut parent = share_ticket("FIN-1", "Parent", TicketKind::Task, None);
+    parent.attachments = vec![TicketAttachment {
+        id: "10000".into(),
+        filename: "design.png".into(),
+        created: "2026-09-04T16:14:04.000+0000".into(),
+        size: 21_504,
+        content_url: Some("https://jira.example/attachment/design.png".into()),
+        change: crate::store::composer::AttachmentChangeKind::Synced,
+        local_data: None,
+    }];
+    let child = share_ticket("FIN-2", "Child", TicketKind::Subtask, Some("FIN-1"));
+    let mut state = ComposerState::from_change_sets(vec![share_set(vec![
+        share_change("FIN-1", parent),
+        share_change("FIN-2", child),
+    ])]);
+    state.dispatch(ComposerAction::OpenChangeSet("CS-12".into()));
+
+    let rows = ticket_rows(&state);
+
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["FIN-1", "FIN-1:attachment:0", "FIN-2"]
+    );
+
+    state.dispatch(ComposerAction::SelectTicket(Some(
+        "FIN-1:attachment:0".into(),
+    )));
+    assert_eq!(
+        state
+            .selected_attachment()
+            .as_ref()
+            .map(|attachment| &attachment.filename),
+        Some(&"design.png".into())
+    );
+
+    let mut tickets = ticket_data_view(&state);
+    assert!(tickets.toggle_selected("FIN-1".into()));
+    assert!(tickets.selected_ids().contains(&"FIN-1".into()));
+    let area = Rect::new(0, 0, TEST_WIDTH, 5);
+    TuiNode::<()>::layout(&mut tickets, area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal.draw(|frame| tickets.render(frame, area)).unwrap();
+    let text = (0..area.height)
+        .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+        .map(|(x, y)| terminal.backend().buffer().cell((x, y)).unwrap().symbol())
+        .collect::<String>();
+
+    assert!(!text.contains("󱋭"));
+}
+
+#[test]
+fn attachment_tree_ids_are_not_sent_as_submission_ticket_ids() {
+    assert_eq!(
+        selected_ticket_ids(vec![
+            "FIN-1".into(),
+            "FIN-1:attachment:0".into(),
+            "FIN-2".into(),
+        ]),
+        ["FIN-1", "FIN-2"]
+    );
+}
+
+#[test]
+fn pasted_attachment_is_staged_with_local_data_and_can_be_renamed() {
+    let ticket = share_ticket("FIN-1", "Parent", TicketKind::Task, None);
+    let mut change = share_change("FIN-1", ticket.clone());
+    change.original = Some(ticket);
+    let mut state = ComposerState::from_change_sets(vec![share_set(vec![change])]);
+    state.dispatch(ComposerAction::OpenChangeSet("CS-12".into()));
+    state.dispatch(ComposerAction::SelectTicket(Some("FIN-1".into())));
+
+    state
+        .dispatch(ComposerAction::AddAttachment {
+            filename: "clipboard.png".into(),
+            data: vec![1, 2, 3],
+        })
+        .unwrap();
+
+    let attachment = state.selected_attachment().unwrap();
+    assert!(attachment.id.starts_with("local-"));
+    assert_eq!(attachment.filename, "clipboard.png");
+    assert_eq!(attachment.change, AttachmentChangeKind::Added);
+    assert_eq!(attachment.local_data, Some(vec![1, 2, 3]));
+    assert!(state.selected_attachment_is_editable());
+    assert!(state.selected_can_add_attachment());
+
+    state
+        .dispatch(ComposerAction::RenameSelectedAttachment(
+            "renamed.png".into(),
+        ))
+        .unwrap();
+    assert_eq!(state.selected_attachment().unwrap().filename, "renamed.png");
+    state.dispatch(ComposerAction::SetViewMode(ComposerViewMode::Source));
+    assert!(!state.selected_can_add_attachment());
+}
+
+#[test]
+fn synced_attachment_delete_is_staged_and_can_be_restored() {
+    let mut ticket = share_ticket("FIN-1", "Parent", TicketKind::Task, None);
+    ticket.attachments.push(TicketAttachment {
+        id: "10000".into(),
+        filename: "design.png".into(),
+        created: "2026-09-04T16:14:04.000+0000".into(),
+        size: 21_504,
+        content_url: Some("https://jira.example/attachment/design.png".into()),
+        change: AttachmentChangeKind::Synced,
+        local_data: None,
+    });
+    let mut change = share_change("FIN-1", ticket.clone());
+    change.original = Some(ticket);
+    let mut state = ComposerState::from_change_sets(vec![share_set(vec![change])]);
+    state.dispatch(ComposerAction::OpenChangeSet("CS-12".into()));
+    state.dispatch(ComposerAction::SelectTicket(Some(
+        "FIN-1:attachment:0".into(),
+    )));
+
+    state
+        .dispatch(ComposerAction::DeleteSelectedAttachment)
+        .unwrap();
+    assert_eq!(
+        state.selected_attachment().unwrap().change,
+        AttachmentChangeKind::Deleted
+    );
+    assert!(!state.selected_attachment_is_editable());
+
+    state
+        .dispatch(ComposerAction::RestoreSelectedAttachment)
+        .unwrap();
+    assert_eq!(
+        state.selected_attachment().unwrap().change,
+        AttachmentChangeKind::Synced
+    );
+}
+
+#[test]
+fn removing_a_new_attachment_drops_it_from_the_change_set() {
+    let ticket = share_ticket("FIN-1", "Parent", TicketKind::Task, None);
+    let mut change = share_change("FIN-1", ticket.clone());
+    change.original = Some(ticket);
+    let mut state = ComposerState::from_change_sets(vec![share_set(vec![change])]);
+    state.dispatch(ComposerAction::OpenChangeSet("CS-12".into()));
+    state.dispatch(ComposerAction::SelectTicket(Some("FIN-1".into())));
+    state
+        .dispatch(ComposerAction::AddAttachment {
+            filename: "clipboard.png".into(),
+            data: vec![1, 2, 3],
+        })
+        .unwrap();
+
+    state
+        .dispatch(ComposerAction::RemoveSelectedAttachment)
+        .unwrap();
+
+    assert!(state.selected_attachment().is_none());
+    assert_eq!(state.selected_ticket().unwrap().attachments, Vec::new());
+}
+
+#[test]
+fn local_attachment_bytes_survive_change_set_persistence() {
+    let service = AppService::for_tests();
+    let mut ticket = share_ticket("FIN-1", "Parent", TicketKind::Task, None);
+    ticket.attachments.push(TicketAttachment {
+        id: "local-1".into(),
+        filename: "clipboard.png".into(),
+        created: "2026-09-04T16:14:04Z".into(),
+        size: 4,
+        content_url: None,
+        change: AttachmentChangeKind::Added,
+        local_data: Some(vec![1, 2, 3, 4]),
+    });
+    service.save_change_set(share_set(vec![share_change("FIN-1", ticket)]));
+    service.flush().unwrap();
+
+    let persisted = service.change_set_for_tests("CS-12").unwrap();
+    assert_eq!(
+        persisted.tickets[0].updated.as_ref().unwrap().attachments[0].local_data,
+        Some(vec![1, 2, 3, 4])
+    );
 }
 
 #[test]

@@ -12,10 +12,10 @@ use super::{
     page::{
         BacklogPage, MAX_UNCONFIRMED_TRANSFER_REFRESHES, PendingRank, PendingRankReconciliation,
         PendingTransfer, PendingTransferReconciliation, move_work_items_to_edge,
-         recalculate_capacity, reconcile_pending_rank, reconcile_pending_transfer, should_poll,
-         source_transfer_highlight, source_transfer_highlight_key, sprint_report,
-         transfer_destinations, transfer_reconciliation_highlight, velocity_dialog,
-         velocity_share_report,
+        recalculate_capacity, reconcile_pending_rank, reconcile_pending_transfer, should_poll,
+        source_transfer_highlight, source_transfer_highlight_key, sprint_report,
+        transfer_destinations, transfer_reconciliation_highlight, velocity_dialog,
+        velocity_share_report,
     },
 };
 use crate::app_settings::{BacklogFilter, BacklogFilterSettings, BacklogRunwaySettings};
@@ -91,20 +91,17 @@ fn sprint_report_uses_compact_ticket_points_without_dates() {
     assert!(report.contains("Tickets: 3/5 done"));
     assert!(report.contains("Estimated stories/tasks: 1/2"));
     assert!(
-        report.contains(
-            "✓ [S] Estimate this work - 8pts - Done - https://jira.example/browse/FIN-8"
-        )
+        report
+            .contains("✓ [S] Estimate this work - 8pts - Done - https://jira.example/browse/FIN-8")
     );
     assert!(report.contains("✓ [B] Fix a bug - Done - https://jira.example/browse/FIN-9"));
     assert!(
         report
             .contains("✓ [S] Unestimated story - ?pts - Done - https://jira.example/browse/FIN-10")
     );
-    assert!(
-        report.contains(
-            "~ [S] Review report format - 5pts - In Review - https://jira.example/browse/FIN-12"
-        )
-    );
+    assert!(report.contains(
+        "~ [S] Review report format - 5pts - In Review - https://jira.example/browse/FIN-12"
+    ));
     assert!(
         report.contains(
             "· [S] Select report release - ?pts - Selected for Development - https://jira.example/browse/FIN-13"
@@ -132,7 +129,9 @@ fn velocity_report_uses_loaded_historical_sprint_tickets() {
     assert!(report.contains("Points: 3/3 pts completed"));
     assert!(report.contains("Tickets: 1/1 done"));
     assert!(report.contains("Estimated stories/tasks: 1/1"));
-    assert!(report.contains("✓ [S] Ship the report - 3pts - Done - https://jira.example/browse/FIN-12"));
+    assert!(
+        report.contains("✓ [S] Ship the report - 3pts - Done - https://jira.example/browse/FIN-12")
+    );
 }
 
 fn snapshot() -> BacklogSnapshot {

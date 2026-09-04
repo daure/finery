@@ -513,11 +513,12 @@ impl BacklogTree {
                     .filter(|goal| !goal.trim().is_empty())
                     .map(|goal| BacklogSectionEvent::YankSprintGoal { goal })
             }),
-            "yv" => self
-                .sprint_for_section(&id)
-                .map(|sprint| BacklogSectionEvent::YankSprintReport {
-                    sprint_id: sprint.id,
-                }),
+            "yv" => {
+                self.sprint_for_section(&id)
+                    .map(|sprint| BacklogSectionEvent::YankSprintReport {
+                        sprint_id: sprint.id,
+                    })
+            }
             _ => None,
         };
         let Some(event) = event else {
