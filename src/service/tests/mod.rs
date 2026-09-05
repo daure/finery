@@ -1450,8 +1450,32 @@ fn accepting_an_older_catalog_preserves_newer_tui_revisions() {
             .unwrap()
             .unwrap()
             .revision,
-        3
+        2
     );
+}
+
+#[test]
+fn no_op_tui_save_does_not_poison_the_next_revision() {
+    let app = AppService::for_tests();
+    let original = change_set();
+    app.save_change_set(original.clone());
+    app.flush().unwrap();
+
+    app.save_change_set(original.clone());
+
+    let mut updated = original;
+    updated.name = "Changed after no-op".into();
+    app.save_change_set(updated);
+    app.flush().unwrap();
+
+    let persisted = app
+        .runtime
+        .block_on(app.storage.load_change_set("CS-1"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.revision, 2);
+    assert_eq!(persisted.change_set.name, "Changed after no-op");
+    assert!(app.take_composer_alerts().is_empty());
 }
 
 #[test]

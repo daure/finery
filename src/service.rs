@@ -184,9 +184,11 @@ impl ComposerSyncState {
         match revision {
             Some(revision) => {
                 self.revisions.insert(id.into(), revision);
+                self.queued_revisions.insert(id.into(), revision);
             }
             None => {
                 self.revisions.remove(id);
+                self.queued_revisions.remove(id);
             }
         }
         self.catalog_revision = self.catalog_revision.max(catalog_revision);
@@ -1524,6 +1526,11 @@ fn save_change_set_durably(
         state.write_cancelled(&id);
         return Ok(DurableSaveOutcome::Cancelled);
     }
+    let expected = composer_sync
+        .lock()
+        .ok()
+        .and_then(|state| state.revisions.get(&id).copied())
+        .or(expected);
     match runtime.block_on(storage.save_change_set_if_revision(&set, expected)) {
         Ok(ConditionalSaveChangeSetOutcome::Saved {
             change_set_revision,
@@ -1565,6 +1572,11 @@ fn save_change_set(
         state.write_cancelled(&id);
         return Ok(());
     }
+    let expected = composer_sync
+        .lock()
+        .ok()
+        .and_then(|state| state.revisions.get(&id).copied())
+        .or(expected);
     let outcome = match runtime.block_on(storage.save_change_set_if_revision(&set, expected)) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -1608,6 +1620,11 @@ fn delete_change_set(
         state.write_cancelled(&id);
         return Ok(());
     }
+    let expected = composer_sync
+        .lock()
+        .ok()
+        .and_then(|state| state.revisions.get(&id).copied())
+        .unwrap_or(expected);
     let outcome = match runtime.block_on(storage.delete_change_set_if_revision(&id, expected)) {
         Ok(outcome) => outcome,
         Err(error) => {

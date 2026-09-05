@@ -106,6 +106,20 @@ pub(super) fn set_active_ticket_style(
     });
 }
 
+pub(super) fn ticket_row_ancestor_ids(rows: &[TicketRow], selected: Option<&str>) -> Vec<String> {
+    let parents = rows
+        .iter()
+        .map(|row| (row.item.id.as_str(), row.parent_id.as_deref()))
+        .collect::<HashMap<_, _>>();
+    let mut ancestors = Vec::new();
+    let mut current = selected;
+    while let Some(parent) = current.and_then(|id| parents.get(id).copied().flatten()) {
+        ancestors.push(parent.to_owned());
+        current = Some(parent);
+    }
+    ancestors
+}
+
 pub(super) fn ticket_rows(state: &ComposerState) -> Vec<TicketRow> {
     let changes = state.ordered_changes();
     let temporary_keys = temporary_draft_keys(state, &changes);

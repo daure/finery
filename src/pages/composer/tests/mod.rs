@@ -22,6 +22,7 @@ use super::property_fields::{BoundFixVersionsDropdown, BoundPropertyDropdown};
 use super::source::SourceController;
 use super::speed_reader_text::clean_for_speed_reader;
 use super::submission::SubmissionController;
+use super::ticket_editor::TicketEditor;
 use super::{
     ticket_editor::selected_ticket_ids,
     ticket_rows::{ticket_data_view, ticket_rows},
@@ -2748,6 +2749,61 @@ fn adding_child_expands_parent_and_focuses_new_child() {
 }
 
 #[test]
+fn collapsing_a_ticket_parent_survives_the_next_layout() {
+    tuicore::init();
+    let parent = share_change(
+        "parent",
+        share_ticket("FIN-1", "Parent story", TicketKind::Story, None),
+    );
+    let child = share_change(
+        "child",
+        share_ticket(
+            "FIN-2",
+            "Nested subtask",
+            TicketKind::Subtask,
+            Some("FIN-1"),
+        ),
+    );
+    let mut state = ComposerState::from_change_sets(vec![share_set(vec![parent, child])]);
+    state.dispatch(ComposerAction::OpenChangeSet("CS-12".into()));
+    let service = AppService::for_tests();
+    let mut editor = TicketEditor::new(Rc::new(RefCell::new(state)), service.settings(), service);
+    let area = Rect::new(0, 0, TEST_WIDTH, 40);
+    let mut layout = LayoutCtx::new();
+    editor.layout(area, &mut layout);
+    let target = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id == FocusId::new("data-view"))
+        .unwrap()
+        .clone();
+    editor.dispatch_focus(&target, true, &mut FocusCtx::default());
+    editor.dispatch_event(
+        &EventRoute::new(target.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char(' '))),
+        &mut EventCtx::default(),
+    );
+
+    editor.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            editor.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..area.height)
+        .flat_map(|y| {
+            (0..area.width).map(move |x| buffer.cell((x, y)).unwrap().symbol().to_owned())
+        })
+        .collect::<String>();
+
+    assert!(!text.contains("Nested subtask"));
+}
+
+#[test]
 fn added_subtask_uses_project_temporary_key_until_submission() {
     tuicore::init();
     let mut state = ComposerState::demo();
@@ -3107,6 +3163,7 @@ fn selecting_a_parent_ticket_selects_descendants_and_marks_partial_parents() {
     assert_eq!(tickets.selected_ids(), ["NEW-1", "NEW-2", "NEW-3"]);
 
     tickets.toggle_selected("NEW-2".into());
+    assert_eq!(tickets.selected_ids(), ["NEW-3"]);
     assert_eq!(
         tickets.check_state(&"NEW-1".into()),
         CheckState::Indeterminate

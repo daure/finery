@@ -8,7 +8,7 @@ use crate::store::composer::{ChangeKind, ChangeSet, Ticket, TicketChange, Ticket
 use super::{ConditionalSaveChangeSetOutcome, Storage};
 
 #[test]
-fn conditional_saves_increment_revisions_and_reject_stale_versions() {
+fn conditional_saves_increment_changed_revisions_and_reject_stale_versions() {
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let storage = Storage::connect_for_tests().await.unwrap();
         let set = ChangeSet {
@@ -45,6 +45,16 @@ fn conditional_saves_increment_revisions_and_reject_stale_versions() {
         assert_eq!(
             storage
                 .save_change_set_if_revision(&updated, Some(1))
+                .await
+                .unwrap(),
+            ConditionalSaveChangeSetOutcome::Saved {
+                change_set_revision: 2,
+                catalog_revision: 3,
+            }
+        );
+        assert_eq!(
+            storage
+                .save_change_set_if_revision(&updated, Some(2))
                 .await
                 .unwrap(),
             ConditionalSaveChangeSetOutcome::Saved {

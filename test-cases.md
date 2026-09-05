@@ -4,12 +4,17 @@
 
 > **This Jira environment is a test environment.** Agents may create, update, move, transition, and delete Jira work items as required by these cases. Each test case must establish and use its own made-up business context. Still verify every Jira write directly through the Atlassian MCP; a Finery MCP success response alone is not proof.
 
+> **Follow-along mode.** If the user refers to this file, assume they want to run the next test case. Explain what is happening as the case proceeds. The user performs every required TUI action; agents must pause, give the required steps, and wait for the user to confirm the result before continuing.
+
 - Give every run a marker such as `FINERY-TC-20260827-1430` in change-set names, summaries, and descriptions.
+- Use Jira project `KAN` for every fixture, draft, lookup, search, and submission in these cases. Do not use `FIN`.
+- For direct Atlassian MCP verification, use cloud ID `f9a8cf64-4f00-42cb-9962-bc6ce7780a77`.
 - Use a fresh change set for each P0 case. Record the full `get_change_set` view and its **inner change-set revision** before every MCP mutation.
 - After every local mutation, refresh, submit, or error, reread the change set. After every Jira submit attempt, fetch every affected Jira issue directly.
 - Use explicit `selected_ticket_ids` for submission. Stored UI selection must never be treated as permission to submit additional tickets.
 - Run destructive Jira cases last. Record created Jira keys so they can be cleaned up afterwards.
 - Do not expect a fixed revision increment for submissions containing drafts: durable create-attempt persistence may add an intermediate revision.
+- After completing and verifying a test case, delete its change set locally. Reread it first and use its current revision; this never deletes Jira fixtures.
 
 ## Shared hierarchy fixture
 
@@ -24,7 +29,7 @@ Create or reuse disposable staging work items with the current run marker. Recor
 | `B-A` | Bug | `E-A` | `[RUN] Duplicate authorization after retry` |
 | `ST-A` | Sub-task | `S-A` | `[RUN] Instrument retry correlation` |
 
-Confirm the project's actual hierarchy before testing. Common expected rules are: root may contain epics, stories, tasks, and bugs; epics may contain stories/tasks/bugs; stories/tasks/bugs may contain subtasks; subtasks cannot have children.
+Confirm the `KAN` project's actual hierarchy before testing. Common expected rules are: root may contain epics, stories, tasks, and bugs; epics may contain stories/tasks/bugs; stories/tasks/bugs may contain subtasks; subtasks cannot have children.
 
 ## Long-content fixture
 
@@ -82,12 +87,12 @@ Prepare two valid, visibly different diagrams with the current run marker in the
 
 ### Local MCP and revision safety
 
-- [ ] **L-01 — Local patch is Jira-free and atomic.** Include one Jira issue and capture its Jira history. Apply a valid multi-operation patch. Then apply a patch whose final operation references a missing ticket. The valid patch persists once; the invalid patch changes neither local state nor revision. Neither action changes Jira.
-- [ ] **L-02 — Every mutator rejects a stale revision.** Read revision `R`, make a separate local save to produce `R+1`, then call patch, refresh, and submit with `R`. Each returns `stale_revision`; no selection, marker, ticket, or Jira state changes. Reread and retry only with the current revision.
-- [ ] **L-03 — UI and MCP do not silently overwrite each other.** Keep a change set open in the UI. Apply an MCP title edit, then edit a different field in the UI. Reread by MCP and restart Finery. Both edits survive, or the UI visibly blocks/reloads stale state. Silent loss is a failure.
-- [ ] **L-04 — Explicit submit selection is authoritative.** Stage pending tickets A and B, store UI selection for B, and submit only A through MCP. Only A reaches Jira. B remains pending and selected.
-- [ ] **L-05 — Invalid selection fails before Jira I/O.** Try empty, duplicate, missing, already-submitted, and retry-blocked ticket IDs. Each request fails atomically with no revision or Jira change.
-- [ ] **L-06 — Mixed artifact patches remain atomic.** Apply one patch that adds a local attachment, Mermaid diagram, web link, and issue link, then ends with an invalid artifact or link operation. It fails with no revision change: no staged artifact, link, bytes, or rendered-diagram metadata appears in the updated snapshot, and Jira history is unchanged.
+- [x] **L-01 — Local patch is Jira-free and atomic.** Include one Jira issue and capture its Jira history. Apply a valid multi-operation patch. Then apply a patch whose final operation references a missing ticket. The valid patch persists once; the invalid patch changes neither local state nor revision. Neither action changes Jira.
+- [x] **L-02 — Every mutator rejects a stale revision.** Read revision `R`, make a separate local save to produce `R+1`, then call patch, refresh, and submit with `R`. Each returns `stale_revision`; no selection, marker, ticket, or Jira state changes. Reread and retry only with the current revision.
+- [x] **L-03 — UI and MCP do not silently overwrite each other.** Keep a change set open in the UI. Apply an MCP title edit, then edit a different field in the UI. Reread by MCP and restart Finery. Both edits survive, or the UI visibly blocks/reloads stale state. Silent loss is a failure.
+- [x] **L-04 — Explicit submit selection is authoritative.** Stage pending tickets A and B, store UI selection for B, and submit only A through MCP. Only A reaches Jira. B remains pending and selected.
+- [x] **L-05 — Invalid selection fails before Jira I/O.** Try empty, duplicate, missing, already-submitted, and retry-blocked ticket IDs. Each request fails atomically with no revision or Jira change.
+- [x] **L-06 — Mixed artifact patches remain atomic.** Apply one patch that adds a local attachment, Mermaid diagram, web link, and issue link, then ends with an invalid artifact or link operation. It fails with no revision change: no staged artifact, link, bytes, or rendered-diagram metadata appears in the updated snapshot, and Jira history is unchanged.
 
 ### New drafts, hierarchy, and display
 
@@ -99,7 +104,7 @@ Prepare two valid, visibly different diagrams with the current run marker in the
 
 ### Jira creates, updates, and field preservation
 
-- [ ] **J-01 — Create exactly one Jira issue.** Submit a uniquely marked draft. Search Jira for the marker before and after. There is exactly one matching issue; its project, type, title, long description, parent, status, priority, and assignee match the intended draft.
+- [ ] **J-01 — Create exactly one Jira issue.** Submit a uniquely marked `KAN` draft. Search Jira for the marker before and after. There is exactly one matching issue; its project, type, title, long description, parent, status, priority, and assignee match the intended draft.
 - [ ] **J-02 — New-ticket statuses follow the workflow.** For each supported draft kind, choose `To Do`, `In Progress`, `In Review`, and `Done` where the UI offers them. On submission, Jira creates in its initial state then transitions to the selected status. Unsupported statuses are not offered or cause a visible pending failure, never a silent wrong status.
 - [ ] **J-03 — Title-only change preserves all other fields.** Seed an issue with a non-default status, priority, assignee, parent, rich ADF description, labels/components/fix versions/custom fields where available, comment, attachment, link, and worklog. Change only the title and submit. Only the summary changes; every unrelated field and related object survives.
 - [ ] **J-04 — Long description diffs are complete.** Apply the long-content fixture. Change one line around each marker. In Source, Changes, and Diff modes at narrow and wide terminal sizes, all edits have usable context; scrolling reaches `END`; no wrapping, clipping, or mode switch loses text. Submit and verify Jira preserves headings, lists, and code blocks.

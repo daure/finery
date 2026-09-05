@@ -262,6 +262,39 @@ impl Storage {
         let mut transaction = self.pool.begin().await?;
         let change_set_revision = match expected_revision {
             Some(revision) => {
+                let closed_column = match self.dialect {
+                    SqlDialect::Sqlite => "CAST(closed AS INTEGER) AS closed",
+                    SqlDialect::Postgres => "closed",
+                };
+                let query = format!(
+                    "SELECT public_id, name, selected_ticket_ids, submission_attempt, {closed_column}, revision FROM change_sets WHERE public_id = {}",
+                    self.dialect.placeholder(1)
+                );
+                let Some(row) = sqlx::query(AssertSqlSafe(query.as_str()))
+                    .bind(&set.id)
+                    .fetch_optional(&mut *transaction)
+                    .await?
+                else {
+                    return Ok(ConditionalSaveChangeSetOutcome::Conflict);
+                };
+                let current = self
+                    .versioned_change_set_from_row_in_transaction(row, &mut transaction)
+                    .await?;
+                if current.revision != revision {
+                    return Ok(ConditionalSaveChangeSetOutcome::Conflict);
+                }
+                if current.change_set == *set {
+                    let catalog_revision =
+                        sqlx::query("SELECT revision FROM change_set_catalog WHERE id = 1")
+                            .fetch_one(&mut *transaction)
+                            .await?
+                            .try_get("revision")?;
+                    transaction.commit().await?;
+                    return Ok(ConditionalSaveChangeSetOutcome::Saved {
+                        change_set_revision: current.revision,
+                        catalog_revision,
+                    });
+                }
                 let update = format!(
                     "UPDATE change_sets SET name = {}, selected_ticket_ids = {}, submission_attempt = {}, closed = {}, revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE public_id = {} AND revision = {}",
                     self.dialect.placeholder(1),

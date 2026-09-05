@@ -37,7 +37,7 @@ use super::{
     submission::SubmissionController,
     ticket_rows::{
         TicketRow, display_key_for_ticket, set_active_ticket_style,
-        ticket_data_view_with_number_jump, ticket_rows,
+        ticket_data_view_with_number_jump, ticket_row_ancestor_ids, ticket_rows,
     },
     ticket_toolbar::{ToolbarEvent, ToolbarEvents, ToolbarFeedback, toolbar},
     title_guidance::{TitleFeedback, format_title},
@@ -348,6 +348,7 @@ pub(super) struct TicketEditor {
     loading_view: ScrollContainer<Flex<()>>,
     opening_loading: bool,
     pending_focus_tickets: bool,
+    tree_change_set_id: Option<String>,
     number_jump: Rc<RefCell<TicketNumberJump>>,
     clipboard_image: Option<Receiver<Result<Option<crate::service::ClipboardImage>, String>>>,
 }
@@ -552,6 +553,7 @@ impl TicketEditor {
             loading_view: loading_view(),
             opening_loading: false,
             pending_focus_tickets: false,
+            tree_change_set_id: None,
             number_jump,
             clipboard_image: None,
         }
@@ -599,7 +601,7 @@ impl TicketEditor {
     }
 
     pub(super) fn sync(&mut self) {
-        let (breadcrumb, rows, selected, selected_for_submission, is_open) = {
+        let (change_set_id, breadcrumb, rows, selected, selected_for_submission, is_open) = {
             let state = self.state.borrow();
             let breadcrumb = state.active_set().map_or_else(
                 || "Change sets".into(),
@@ -611,6 +613,7 @@ impl TicketEditor {
                 .flat_map(|set| set.selected_ticket_ids.clone())
                 .collect::<Vec<_>>();
             (
+                state.active_set().map(|set| set.id.clone()),
                 breadcrumb,
                 ticket_rows(&state),
                 state.selected_ticket.clone(),
@@ -618,6 +621,9 @@ impl TicketEditor {
                 state.active_set().is_some_and(|set| !set.closed),
             )
         };
+        let changed_change_set = self.tree_change_set_id != change_set_id;
+        let mut expanded = self.table().tree_expansion_snapshot();
+        expanded.extend(ticket_row_ancestor_ids(&rows, selected.as_deref()));
         self.view
             .base_mut()
             .base_mut()
@@ -629,12 +635,17 @@ impl TicketEditor {
             .set_top_left(breadcrumb);
         let table = self.table_mut();
         table.set_rows(rows);
-        table.expand_all();
+        if changed_change_set {
+            table.expand_all();
+        } else {
+            table.restore_tree_expansion(expanded);
+        }
         set_active_ticket_style(table, selected.clone());
         restore_ticket_selection(table, selected_for_submission);
         if let Some(selected) = &selected {
             table.highlight_id(selected);
         }
+        self.tree_change_set_id = change_set_id;
         self.can_change
             .set(is_open && !self.submission.is_submitting());
         let can_add_child = {
