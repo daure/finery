@@ -186,7 +186,7 @@ pub(crate) fn mermaid_diagram_summary_text(
     Text::from(Line::from(vec![
         Span::styled("A", text_style),
         Span::styled(" ", text_style),
-        Span::styled(" ", text_style),
+        Span::styled(" ", text_style),
         Span::styled(title.to_owned(), text_style.add_modifier(Modifier::BOLD)),
         Span::styled(" • ", muted_style),
         Span::styled(diagram_type_label(diagram_type), muted_style),

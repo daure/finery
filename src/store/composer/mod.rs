@@ -54,6 +54,8 @@ pub(crate) struct Ticket {
     pub mermaid_diagrams: Vec<MermaidDiagram>,
     #[serde(default)]
     pub web_links: Vec<TicketWebLink>,
+    #[serde(default)]
+    pub issue_links: Vec<TicketIssueLink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -65,6 +67,15 @@ pub(crate) struct TicketWebLink {
     pub url: String,
     #[serde(default)]
     pub remote_payload: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TicketIssueLink {
+    pub id: String,
+    pub relationship: String,
+    pub target_key: String,
+    pub target_title: String,
+    pub outward: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -354,6 +365,20 @@ pub(crate) enum ComposerAction {
         url: String,
     },
     RemoveWebLink(String),
+    AddIssueLink {
+        relationship: String,
+        target_key: String,
+        target_title: String,
+        outward: bool,
+    },
+    UpdateIssueLink {
+        id: String,
+        relationship: String,
+        target_key: String,
+        target_title: String,
+        outward: bool,
+    },
+    RemoveIssueLink(String),
     AddAttachment {
         filename: String,
         mime_type: Option<String>,
@@ -1101,6 +1126,37 @@ impl ComposerState {
             ComposerAction::RemoveWebLink(id) => self.edit_selected(|ticket| {
                 ticket.web_links.retain(|link| link.id != id);
             }),
+            ComposerAction::AddIssueLink {
+                relationship,
+                target_key,
+                target_title,
+                outward,
+            } => self.edit_selected(|ticket| {
+                ticket.issue_links.push(TicketIssueLink {
+                    id: local_issue_link_id(),
+                    relationship,
+                    target_key,
+                    target_title,
+                    outward,
+                });
+            }),
+            ComposerAction::UpdateIssueLink {
+                id,
+                relationship,
+                target_key,
+                target_title,
+                outward,
+            } => self.edit_selected(|ticket| {
+                if let Some(link) = ticket.issue_links.iter_mut().find(|link| link.id == id) {
+                    link.relationship = relationship;
+                    link.target_key = target_key;
+                    link.target_title = target_title;
+                    link.outward = outward;
+                }
+            }),
+            ComposerAction::RemoveIssueLink(id) => self.edit_selected(|ticket| {
+                ticket.issue_links.retain(|link| link.id != id);
+            }),
             ComposerAction::AddAttachment {
                 filename,
                 mime_type,
@@ -1335,6 +1391,7 @@ impl ComposerState {
             attachments: Vec::new(),
             mermaid_diagrams: Vec::new(),
             web_links: Vec::new(),
+            issue_links: Vec::new(),
         };
         self.validate_new_placement(ticket.kind, &placement, None)?;
         ticket.parent_key = self.resolved_parent_key(&placement);
@@ -2228,6 +2285,15 @@ fn local_mermaid_diagram_id() -> String {
     format!("local-diagram-{timestamp}-{sequence}")
 }
 
+fn local_issue_link_id() -> String {
+    static NEXT_LINK: AtomicU64 = AtomicU64::new(1);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let sequence = NEXT_LINK.fetch_add(1, Ordering::Relaxed);
+    format!("local-issue-link-{timestamp}-{sequence}")
+}
+
 pub(crate) fn change_parent(change: &TicketChange) -> Option<String> {
     let ticket = if change.kind == ChangeKind::Deleted {
         change.original.as_ref()
@@ -2285,6 +2351,9 @@ pub(crate) fn rebase_ticket(original: &Ticket, updated: &Ticket, refreshed: &Tic
     }
     if original.web_links != updated.web_links {
         rebased.web_links = updated.web_links.clone();
+    }
+    if original.issue_links != updated.issue_links {
+        rebased.issue_links = updated.issue_links.clone();
     }
     rebased
 }
@@ -2368,6 +2437,9 @@ impl ComposerAction {
                 | Self::AddWebLink { .. }
                 | Self::UpdateWebLink { .. }
                 | Self::RemoveWebLink(_)
+                | Self::AddIssueLink { .. }
+                | Self::UpdateIssueLink { .. }
+                | Self::RemoveIssueLink(_)
                 | Self::RenameSelectedAttachment(_)
                 | Self::DeleteSelectedAttachment
                 | Self::RestoreSelectedAttachment
@@ -2403,6 +2475,9 @@ impl ComposerAction {
                 | Self::AddWebLink { .. }
                 | Self::UpdateWebLink { .. }
                 | Self::RemoveWebLink(_)
+                | Self::AddIssueLink { .. }
+                | Self::UpdateIssueLink { .. }
+                | Self::RemoveIssueLink(_)
                 | Self::RenameSelectedAttachment(_)
                 | Self::DeleteSelectedAttachment
                 | Self::RestoreSelectedAttachment
@@ -2446,6 +2521,7 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             attachments: Vec::new(),
             mermaid_diagrams: Vec::new(),
             web_links: Vec::new(),
+            issue_links: Vec::new(),
         },
         Ticket {
             key: "FIN-157".into(),
@@ -2469,6 +2545,7 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             attachments: Vec::new(),
             mermaid_diagrams: Vec::new(),
             web_links: Vec::new(),
+            issue_links: Vec::new(),
         },
         Ticket {
             key: "FIN-131".into(),
@@ -2492,6 +2569,7 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             attachments: Vec::new(),
             mermaid_diagrams: Vec::new(),
             web_links: Vec::new(),
+            issue_links: Vec::new(),
         },
         Ticket {
             key: "FIN-166".into(),
@@ -2515,6 +2593,7 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             attachments: Vec::new(),
             mermaid_diagrams: Vec::new(),
             web_links: Vec::new(),
+            issue_links: Vec::new(),
         },
     ]
 }

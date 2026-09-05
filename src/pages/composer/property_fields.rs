@@ -24,6 +24,7 @@ use crate::{
 };
 
 use super::fields::{BoundLabelsInput, BoundTicketPropertyInput, TicketPropertyText};
+use super::issue_links::BoundIssueLinks;
 use super::web_links::BoundWebLinks;
 
 type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
@@ -177,6 +178,16 @@ impl PropertyFields {
                     keys.web_links.clone(),
                 ),
                 FlexItem::fixed(6),
+            )
+            .child(
+                "issue-links",
+                BoundIssueLinks::new(
+                    Rc::clone(&state),
+                    Rc::clone(&pending),
+                    service.clone(),
+                    keys.issue_links.clone(),
+                ),
+                FlexItem::fixed(11),
             );
         let root = ScrollContainer::vertical(fields)
             .scrollbars(ScrollbarConfig::default())

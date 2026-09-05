@@ -2,6 +2,7 @@ mod add_ticket_menu;
 mod change_set_list;
 mod detail;
 mod fields;
+mod issue_links;
 mod mermaid;
 mod page;
 mod property_fields;

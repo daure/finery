@@ -1111,6 +1111,7 @@ mod file_content_tests {
             attachments: vec![attachment],
             mermaid_diagrams: Vec::new(),
             web_links: Vec::new(),
+            issue_links: Vec::new(),
         };
         let mut state = ComposerState::from_change_sets(vec![ChangeSet {
             id: "CS-1".into(),
@@ -1175,6 +1176,7 @@ mod file_content_tests {
             attachments: vec![attachment],
             mermaid_diagrams: Vec::new(),
             web_links: Vec::new(),
+            issue_links: Vec::new(),
         };
         let mut state = ComposerState::from_change_sets(vec![ChangeSet {
             id: "CS-1".into(),
@@ -1293,6 +1295,7 @@ mod file_content_tests {
             attachments,
             mermaid_diagrams: Vec::new(),
             web_links: Vec::new(),
+            issue_links: Vec::new(),
         };
         let mut state = ComposerState::from_change_sets(vec![ChangeSet {
             id: "CS-1".into(),

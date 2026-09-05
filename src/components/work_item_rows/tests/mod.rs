@@ -17,6 +17,7 @@ fn mermaid_rows_capitalize_the_diagram_type() {
 
     let text = mermaid_diagram_summary_text("Lifecycle", "state", false);
 
+    assert_eq!(text.lines[0].spans[2].content, " ");
     assert_eq!(text.lines[0].spans.last().unwrap().content, "State");
 }
 

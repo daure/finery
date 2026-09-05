@@ -1,4 +1,9 @@
-use std::{io::Write, net::TcpListener, sync::Arc, thread};
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    sync::Arc,
+    thread,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rmcp::model::ResourceContents;
@@ -54,13 +59,21 @@ fn attachment_calls_return_images_text_blobs_and_partial_errors() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let header = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            remote_image.len()
-        );
-        stream.write_all(header.as_bytes()).unwrap();
-        stream.write_all(&remote_image).unwrap();
+        for response in [
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                remote_image.len()
+            ),
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            stream.read(&mut request).unwrap();
+            stream.write_all(response.as_bytes()).unwrap();
+            if response.starts_with("HTTP/1.1 200") {
+                stream.write_all(&remote_image).unwrap();
+            }
+        }
     });
     let service = AppService::for_tests();
     {
@@ -112,6 +125,16 @@ fn attachment_calls_return_images_text_blobs_and_partial_errors() {
                 local_data: None,
             },
             TicketAttachment {
+                id: "denied-1".into(),
+                filename: "denied.pdf".into(),
+                created: String::new(),
+                size: 8,
+                mime_type: Some("application/pdf".into()),
+                content_url: Some(format!("http://{address}/denied.pdf")),
+                change: AttachmentChangeKind::Synced,
+                local_data: None,
+            },
+            TicketAttachment {
                 id: "text-1".into(),
                 filename: "notes.txt".into(),
                 created: String::new(),
@@ -134,6 +157,7 @@ fn attachment_calls_return_images_text_blobs_and_partial_errors() {
         ],
         mermaid_diagrams: Vec::new(),
         web_links: Vec::new(),
+        issue_links: Vec::new(),
     };
     service.save_change_set(ChangeSet {
         id: "CS-images".into(),
@@ -179,6 +203,11 @@ fn attachment_calls_return_images_text_blobs_and_partial_errors() {
                     ticket_id: "FIN-1".into(),
                     snapshot: TicketSnapshotView::Original,
                     attachment_id: "jira-1".into(),
+                },
+                AttachmentRequest {
+                    ticket_id: "FIN-1".into(),
+                    snapshot: TicketSnapshotView::Original,
+                    attachment_id: "denied-1".into(),
                 },
                 AttachmentRequest {
                     ticket_id: "FIN-1".into(),
@@ -235,6 +264,14 @@ fn attachment_calls_return_images_text_blobs_and_partial_errors() {
             .as_text()
             .is_some_and(|text| text.text.contains("attachment not found"))
     }));
+    assert!(
+        content.iter().any(|content| {
+            content
+                .as_text()
+                .is_some_and(|text| text.text.contains("HTTP 403 Forbidden"))
+        }),
+        "{content:?}"
+    );
 
     let stale = attachment_contents(
         &service,

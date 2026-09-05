@@ -8,7 +8,7 @@ use std::{
         mpsc::{self, Sender},
     },
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::runtime::Runtime;
@@ -242,6 +242,16 @@ impl ComposerSyncState {
         self.blocked_change_sets.clear();
         self.reload_required = false;
         true
+    }
+}
+
+fn jira_attachment_download_error(error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        "attachment download timed out".into()
+    } else if let Some(status) = error.status() {
+        format!("attachment download failed with HTTP {status}")
+    } else {
+        format!("could not download Jira attachment: {error}")
     }
 }
 
@@ -976,18 +986,21 @@ impl AppService {
             })?;
             (email.to_owned(), token.to_owned())
         };
-        let response = reqwest::blocking::Client::new()
+        let response = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|error| format!("could not configure Jira attachment download: {error}"))?
             .get(content_url)
             .basic_auth(email, Some(token))
             .send()
-            .map_err(|error| error.to_string())?
+            .map_err(jira_attachment_download_error)?
             .error_for_status()
-            .map_err(|error| error.to_string())?;
+            .map_err(jira_attachment_download_error)?;
         let Some(max_bytes) = max_bytes else {
             return response
                 .bytes()
                 .map(|bytes| bytes.to_vec())
-                .map_err(|error| error.to_string());
+                .map_err(jira_attachment_download_error);
         };
         if response
             .content_length()
@@ -1007,7 +1020,13 @@ impl AppService {
         response
             .take(max_bytes.saturating_add(1) as u64)
             .read_to_end(&mut data)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    "attachment download timed out".into()
+                } else {
+                    format!("could not read Jira attachment: {error}")
+                }
+            })?;
         if data.len() > max_bytes {
             return Err(format!(
                 "attachment exceeds the {max_bytes}-byte response limit"

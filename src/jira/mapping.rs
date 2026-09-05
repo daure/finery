@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use crate::store::{
     composer::{
-        AttachmentChangeKind, Ticket, TicketAttachment, TicketKind, TicketWebLink,
+        AttachmentChangeKind, Ticket, TicketAttachment, TicketIssueLink, TicketKind, TicketWebLink,
         jira_adf::{adf_is_safe_to_overwrite, adf_overwrite_warning, adf_to_markdown},
     },
     work_items::{BacklogSnapshot, SubtaskProgress, WorkItem, is_done_status},
@@ -56,7 +56,48 @@ pub(super) fn to_ticket(issue: JiraIssue) -> Ticket {
         attachments: attachments(field("attachment")),
         mermaid_diagrams: Vec::new(),
         web_links: Vec::new(),
+        issue_links: issue_links(field("issuelinks")),
     }
+}
+
+pub(super) fn issue_links(value: &Value) -> Vec<TicketIssueLink> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|link| {
+            let target = link
+                .get("outwardIssue")
+                .map(|issue| (issue, true))
+                .or_else(|| link.get("inwardIssue").map(|issue| (issue, false)))?;
+            let relationship = link.get("type")?;
+            let target_key = target.0.get("key")?.as_str()?.to_owned();
+            let target_title = target
+                .0
+                .pointer("/fields/summary")
+                .and_then(Value::as_str)
+                .unwrap_or(&target_key)
+                .to_owned();
+            let relationship = if target.1 {
+                relationship.get("outward")
+            } else {
+                relationship.get("inward")
+            }
+            .and_then(Value::as_str)?
+            .to_owned();
+            Some(TicketIssueLink {
+                id: link
+                    .get("id")?
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| link.get("id")?.as_u64().map(|id| id.to_string()))?,
+                relationship,
+                target_key,
+                target_title,
+                outward: target.1,
+            })
+        })
+        .collect()
 }
 
 pub(super) fn web_links(value: &Value) -> Vec<TicketWebLink> {

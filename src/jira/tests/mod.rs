@@ -57,6 +57,7 @@ fn ticket(key: &str, kind: TicketKind, parent_key: Option<&str>) -> Ticket {
         attachments: Vec::new(),
         mermaid_diagrams: Vec::new(),
         web_links: Vec::new(),
+        issue_links: Vec::new(),
     }
 }
 

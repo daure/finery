@@ -12,8 +12,8 @@ use tuicore::{MermaidRasterOptions, MermaidRenderer, theme};
 use crate::{
     app_settings::AppSettings,
     store::composer::{
-        AttachmentChangeKind, ChangeKind, SubmissionSnapshot, Ticket, TicketChange, TicketKind,
-        TicketWebLink, change_parent, jira_adf::markdown_to_adf,
+        AttachmentChangeKind, ChangeKind, SubmissionSnapshot, Ticket, TicketChange,
+        TicketIssueLink, TicketKind, TicketWebLink, change_parent, jira_adf::markdown_to_adf,
     },
     store::work_items::{
         BacklogSnapshot, RankPlan, RunwayCapacitySource, Sprint, VelocityReport, VelocitySprint,
@@ -25,7 +25,7 @@ mod mapping;
 
 use mapping::*;
 
-const ISSUE_FIELDS: [&str; 12] = [
+const ISSUE_FIELDS: [&str; 13] = [
     "summary",
     "description",
     "issuetype",
@@ -38,6 +38,7 @@ const ISSUE_FIELDS: [&str; 12] = [
     "labels",
     "fixVersions",
     "attachment",
+    "issuelinks",
 ];
 
 const BACKLOG_FIELDS: [&str; 9] = [
@@ -51,7 +52,7 @@ const BACKLOG_FIELDS: [&str; 9] = [
     "labels",
     "fixVersions",
 ];
-const COMPOSER_FIELDS: [&str; 12] = [
+const COMPOSER_FIELDS: [&str; 13] = [
     "summary",
     "description",
     "issuetype",
@@ -64,6 +65,7 @@ const COMPOSER_FIELDS: [&str; 12] = [
     "labels",
     "fixVersions",
     "attachment",
+    "issuelinks",
 ];
 const BACKLOG_JQL: &str = "";
 const MAX_VELOCITY_GOAL_LOOKUPS: usize = 10;
@@ -2162,6 +2164,16 @@ fn create_issue(
         &desired.web_links,
     )
     .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
+    apply_issue_link_changes(
+        client,
+        base_url,
+        email,
+        token,
+        &created.key,
+        &[],
+        &desired.issue_links,
+    )
+    .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
     fetch_ticket(
         client,
         base_url,
@@ -2222,6 +2234,15 @@ fn update_issue(
         &original.key,
         &original.web_links,
         &desired.web_links,
+    )?;
+    apply_issue_link_changes(
+        client,
+        base_url,
+        email,
+        token,
+        &original.key,
+        &original.issue_links,
+        &desired.issue_links,
     )?;
     fetch_ticket(
         client,
@@ -2367,10 +2388,11 @@ fn apply_web_link_changes(
     original: &[TicketWebLink],
     desired: &[TicketWebLink],
 ) -> Result<(), String> {
-    for link in original
-        .iter()
-        .filter(|link| !desired.iter().any(|desired| desired.id == link.id))
-    {
+    for link in original.iter().filter(|link| {
+        !desired
+            .iter()
+            .any(|desired| desired.id == link.id && desired == *link)
+    }) {
         let response = client
             .delete(format!(
                 "{base_url}/rest/api/3/issue/{issue_key}/remotelink/{}",
@@ -2423,6 +2445,61 @@ fn web_link_payload(link: &TicketWebLink) -> Value {
     object.insert("url".into(), json!(link.url));
     payload.insert("object".into(), Value::Object(object));
     Value::Object(payload)
+}
+
+fn apply_issue_link_changes(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    issue_key: &str,
+    original: &[TicketIssueLink],
+    desired: &[TicketIssueLink],
+) -> Result<(), String> {
+    for link in original
+        .iter()
+        .filter(|link| !desired.iter().any(|desired| desired.id == link.id))
+    {
+        let response = client
+            .delete(format!("{base_url}/rest/api/3/issueLink/{}", link.id))
+            .basic_auth(email, Some(token))
+            .send()
+            .map_err(|error| error.to_string())?;
+        ensure_success(response)?;
+    }
+    for link in desired {
+        if original.iter().any(|original| original == link) {
+            continue;
+        }
+        let (inward_issue, outward_issue) = if link.outward {
+            (issue_key, link.target_key.as_str())
+        } else {
+            (link.target_key.as_str(), issue_key)
+        };
+        let response = client
+            .post(format!("{base_url}/rest/api/3/issueLink"))
+            .basic_auth(email, Some(token))
+            .header("Accept", "application/json")
+            .json(&json!({
+                "type": { "name": issue_link_type_name(&link.relationship) },
+                "inwardIssue": { "key": inward_issue },
+                "outwardIssue": { "key": outward_issue },
+            }))
+            .send()
+            .map_err(|error| error.to_string())?;
+        ensure_success(response)?;
+    }
+    Ok(())
+}
+
+fn issue_link_type_name(relationship: &str) -> &str {
+    match relationship.to_ascii_lowercase().as_str() {
+        "blocks" | "is blocked by" => "Blocks",
+        "duplicates" | "is duplicated by" => "Duplicate",
+        "clones" | "is cloned by" => "Cloners",
+        "relates to" => "Relates",
+        _ => relationship,
+    }
 }
 
 fn delete_issue(
@@ -2718,6 +2795,7 @@ fn same_jira_content(left: &Ticket, right: &Ticket) -> bool {
         && left.parent_key == right.parent_key
         && left.attachments == right.attachments
         && left.web_links == right.web_links
+        && left.issue_links == right.issue_links
 }
 
 fn response_json<T: for<'de> Deserialize<'de>>(

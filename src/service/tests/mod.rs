@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     ffi::OsStr,
     fs,
-    io::Write,
+    io::{Read, Write},
     net::TcpListener,
     path::PathBuf,
     sync::{
@@ -69,6 +69,29 @@ fn clipboard_image_format_detection_covers_supported_formats() {
         Some("image/png")
     );
     assert_eq!(super::image_extension(b"plain text"), None);
+}
+
+#[test]
+fn attachment_download_errors_identify_timeouts() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let _connection = listener.accept().unwrap();
+        thread::sleep(Duration::from_millis(100));
+    });
+    let error = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(10))
+        .build()
+        .unwrap()
+        .get(format!("http://{address}/slow"))
+        .send()
+        .expect_err("the response should exceed the client timeout");
+
+    assert_eq!(
+        super::jira_attachment_download_error(error),
+        "attachment download timed out"
+    );
+    server.join().unwrap();
 }
 
 #[test]
@@ -164,6 +187,7 @@ fn ticket(key: &str) -> Ticket {
         attachments: Vec::new(),
         mermaid_diagrams: Vec::new(),
         web_links: Vec::new(),
+        issue_links: Vec::new(),
     }
 }
 
@@ -822,6 +846,8 @@ fn patch_downloads_a_url_attachment_into_persistent_storage() {
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 1024];
+        stream.read(&mut request).unwrap();
         let header = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             file.len()

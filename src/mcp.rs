@@ -386,9 +386,9 @@ fn attachment_contents(
                 "attachment exceeds the {max_bytes}-byte remaining response limit ({} bytes)",
                 bytes.len()
             )),
-            AttachmentSource::Jira(url) if max_bytes > 0 => service
-                .download_jira_attachment_limited(&url, max_bytes)
-                .map_err(|_| "could not download Jira attachment within response limits".into()),
+            AttachmentSource::Jira(url) if max_bytes > 0 => {
+                service.download_jira_attachment_limited(&url, max_bytes)
+            }
             AttachmentSource::Jira(_) => {
                 Err("attachment exceeds the remaining batch response limit".into())
             }

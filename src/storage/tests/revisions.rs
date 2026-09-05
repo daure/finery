@@ -176,6 +176,7 @@ fn snapshot_set(name: &str) -> ChangeSet {
                 attachments: Vec::new(),
                 mermaid_diagrams: Vec::new(),
                 web_links: Vec::new(),
+                issue_links: Vec::new(),
             }),
             updated: None,
             kind: ChangeKind::Synced,

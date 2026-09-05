@@ -84,6 +84,7 @@ pub struct CatalogTicketView {
     pub has_children: bool,
     pub has_attachments: bool,
     pub has_web_links: bool,
+    pub has_issue_links: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -131,6 +132,7 @@ pub struct TicketView {
     pub attachments: Vec<AttachmentView>,
     pub mermaid_diagrams: Vec<MermaidDiagramView>,
     pub web_links: Vec<WebLinkView>,
+    pub issue_links: Vec<IssueLinkView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -149,6 +151,15 @@ pub struct WebLinkView {
     pub global_id: Option<String>,
     pub title: String,
     pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IssueLinkView {
+    pub id: String,
+    pub relationship: String,
+    pub target_key: String,
+    pub target_title: String,
+    pub outward: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -252,6 +263,17 @@ pub enum ChangeSetPatchOperation {
         url: String,
     },
     RemoveWebLink {
+        ticket_id: String,
+        link_id: String,
+    },
+    AddIssueLink {
+        ticket_id: String,
+        relationship: String,
+        target_key: String,
+        target_title: String,
+        outward: bool,
+    },
+    RemoveIssueLink {
         ticket_id: String,
         link_id: String,
     },
@@ -1303,6 +1325,27 @@ impl ComposerService {
                 remove_web_link(state, &ticket_id, link_id)?;
                 Ok(vec![ticket_id])
             }
+            ChangeSetPatchOperation::AddIssueLink {
+                ticket_id,
+                relationship,
+                target_key,
+                target_title,
+                outward,
+            } => {
+                add_issue_link(
+                    state,
+                    &ticket_id,
+                    relationship,
+                    target_key,
+                    target_title,
+                    outward,
+                )?;
+                Ok(vec![ticket_id])
+            }
+            ChangeSetPatchOperation::RemoveIssueLink { ticket_id, link_id } => {
+                remove_issue_link(state, &ticket_id, link_id)?;
+                Ok(vec![ticket_id])
+            }
             ChangeSetPatchOperation::AddAttachment {
                 ticket_id,
                 filename,
@@ -1836,6 +1879,46 @@ fn ensure_web_link(
     }
 }
 
+fn add_issue_link(
+    state: &mut ComposerState,
+    ticket_id: &str,
+    relationship: String,
+    target_key: String,
+    target_title: String,
+    outward: bool,
+) -> Result<(), ServiceError> {
+    if relationship.trim().is_empty() || target_key.trim().is_empty() {
+        return Err(invalid("issue links need a relationship and target ticket"));
+    }
+    select(state, ticket_id)?;
+    dispatch(
+        state,
+        ComposerAction::AddIssueLink {
+            relationship: relationship.trim().into(),
+            target_key: target_key.trim().into(),
+            target_title: target_title.trim().into(),
+            outward,
+        },
+    )
+}
+
+fn remove_issue_link(
+    state: &mut ComposerState,
+    ticket_id: &str,
+    link_id: String,
+) -> Result<(), ServiceError> {
+    let change = editable_change(state, ticket_id)?;
+    let ticket = change.updated.as_ref().or(change.original.as_ref());
+    if !ticket.is_some_and(|ticket| ticket.issue_links.iter().any(|link| link.id == link_id)) {
+        return Err(ServiceError::NotFound {
+            resource: "issue link".into(),
+            id: link_id,
+        });
+    }
+    select(state, ticket_id)?;
+    dispatch(state, ComposerAction::RemoveIssueLink(link_id))
+}
+
 pub(crate) fn validate_web_link(
     title: String,
     url: String,
@@ -2366,6 +2449,7 @@ impl From<Ticket> for TicketView {
                 })
                 .collect(),
             web_links: value.web_links.into_iter().map(Into::into).collect(),
+            issue_links: value.issue_links.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -2392,6 +2476,7 @@ impl From<Ticket> for CatalogTicketView {
             has_children: value.has_children,
             has_attachments: !value.attachments.is_empty(),
             has_web_links: !value.web_links.is_empty(),
+            has_issue_links: !value.issue_links.is_empty(),
         }
     }
 }
@@ -2403,6 +2488,18 @@ impl From<TicketWebLink> for WebLinkView {
             global_id: value.global_id,
             title: value.title,
             url: value.url,
+        }
+    }
+}
+
+impl From<crate::store::composer::TicketIssueLink> for IssueLinkView {
+    fn from(value: crate::store::composer::TicketIssueLink) -> Self {
+        Self {
+            id: value.id,
+            relationship: value.relationship,
+            target_key: value.target_key,
+            target_title: value.target_title,
+            outward: value.outward,
         }
     }
 }

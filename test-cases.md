@@ -74,6 +74,10 @@ Change one factual line near `BEGIN`, `MIDDLE`, and `END` during diff tests.
 
 Create local files named with the current run marker: a small UTF-8 text file, a PDF, and valid PNG and JPEG images. Record each file's byte length and SHA-256. Make the text file and PDF available from a disposable HTTPS endpoint as well. Prepare invalid fixtures: an empty file, a file larger than 5 MiB, a PNG renamed `.jpg`, and a non-image file named `.png`.
 
+## Mermaid fixture
+
+Prepare two valid, visibly different diagrams with the current run marker in their titles: a state diagram and a sequence diagram. Also prepare invalid inputs: blank title, blank type, blank markup, and syntactically invalid Mermaid markup. Record the active TUI theme ID before each rendered-diagram assertion. Legacy fixture data may omit both `rendered_png` and `rendered_theme`.
+
 ## Test cases
 
 ### Local MCP and revision safety
@@ -83,6 +87,7 @@ Create local files named with the current run marker: a small UTF-8 text file, a
 - [ ] **L-03 — UI and MCP do not silently overwrite each other.** Keep a change set open in the UI. Apply an MCP title edit, then edit a different field in the UI. Reread by MCP and restart Finery. Both edits survive, or the UI visibly blocks/reloads stale state. Silent loss is a failure.
 - [ ] **L-04 — Explicit submit selection is authoritative.** Stage pending tickets A and B, store UI selection for B, and submit only A through MCP. Only A reaches Jira. B remains pending and selected.
 - [ ] **L-05 — Invalid selection fails before Jira I/O.** Try empty, duplicate, missing, already-submitted, and retry-blocked ticket IDs. Each request fails atomically with no revision or Jira change.
+- [ ] **L-06 — Mixed artifact patches remain atomic.** Apply one patch that adds a local attachment, Mermaid diagram, web link, and issue link, then ends with an invalid artifact or link operation. It fails with no revision change: no staged artifact, link, bytes, or rendered-diagram metadata appears in the updated snapshot, and Jira history is unchanged.
 
 ### New drafts, hierarchy, and display
 
@@ -111,6 +116,19 @@ Create local files named with the current run marker: a small UTF-8 text file, a
 - [ ] **A-05 — Attachment UI actions target the selected file.** Select an added attachment, a synced attachment, and a deleted attachment in turn. `Ctrl+X` shows only the applicable Remove/Delete/Restore action, never Open; successful actions close the dialog. `Ctrl+R` on a deleted attachment opens Restore rather than “No ticket is selected”, restores it, and closes the dialog. `Ctrl+Enter` remains the explicit open-file shortcut. Verify the row badge and detail pane reflect `A`, `S`, and `D` states, and a local-file rename persists after navigation and restart.
 - [ ] **A-06 — Submit attachment additions and deletions exactly once.** Submit an existing ticket with one staged addition and one staged deletion, then fetch Jira directly. The deletion is absent; the addition has the intended filename, MIME type, byte length, and SHA-256. The ticket is reconciled as submitted and a later submit does not upload/delete again. Repeat with a draft ticket: Jira creates the ticket before its attachment upload, and the uploaded file matches the source.
 - [ ] **A-07 — Attachment failures do not falsely reconcile.** Use a controlled invalid upload or fault injector to fail an attachment upload after other ticket updates are possible. The change set surfaces the failure and does not mark the ticket submitted. Fetch Jira before recovery, record which attachment operations landed, and do not blindly retry a possibly completed deletion or upload.
+
+### Mermaid diagrams, previews, and submission
+
+- [ ] **M-01 — Add a local diagram with rendered metadata.** Add each valid Mermaid fixture through one atomic MCP patch. The patch advances once, keeps title, type, and markup only in the local updated snapshot, records `rendered=true` and the active `rendered_theme`, and makes no Jira write. The original snapshot remains unchanged.
+- [ ] **M-02 — Mermaid validation and updates are atomic.** In separate patches try every invalid Mermaid fixture. Also put a valid title or attachment update before an invalid diagram operation. Each failure leaves the revision, existing diagram title/type/markup, rendered state/theme, attachment bytes, and Jira history unchanged. A title-only update preserves the existing rendered PNG/theme; a markup update replaces the rendered PNG and records the current theme.
+- [ ] **M-03 — Missing and stale renders recover locally.** Load a legacy diagram with no PNG/theme, then open the change set in the TUI. It renders, displays, and persists a PNG with the active theme without Jira I/O. Change the TUI theme, verify the preview rerenders and the stored theme changes, then restart Finery and confirm the current-theme PNG loads without a fresh render. `Ctrl+Enter` opens the current PNG in the external image program.
+- [ ] **M-04 — Diagram removal is local and selection stays valid.** Remove a selected diagram through MCP and confirm it disappears from the updated snapshot with no Jira write. In the TUI, remove a selected diagram through its confirmation dialog; the dialog closes and focus moves to the next DataView row, or the previous row when no next row exists.
+- [ ] **M-05 — Submit diagrams as PNG attachments exactly once.** Submit a draft and an existing ticket containing diagrams. Jira receives one PNG per diagram with the sanitized title filename and valid PNG bytes; title, type, markup, and render-theme metadata never appear as Jira fields or description text. Re-fetch Jira after submission and confirm a later submit cannot upload the diagrams again.
+
+### Web and issue links
+
+- [ ] **K-01 — Link edits stage atomically and preserve diffs.** On an existing staged ticket, add a web link and directional issue links using both `blocks` and `is blocked by`; then edit and remove one of each. Confirm every valid local patch advances once with no Jira write, Diff shows additions/removals distinctly, and an invalid final link operation rolls back all preceding link changes. The issue-link target selector excludes the current ticket and Jira search results use the shared two-line ticket summary.
+- [ ] **K-02 — Submit links exactly once and preserve unrelated links.** Seed Jira with an unrelated web link and issue link. Submit staged web-link and issue-link additions, replacements, and removals for both an existing ticket and a draft. Fetch Jira directly: the requested directional relationships and URLs match, unrelated links remain, and a later submit creates, updates, or deletes no link again.
 
 ### Refresh and concurrency
 

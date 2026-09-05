@@ -65,6 +65,7 @@ fn share_ticket(key: &str, title: &str, kind: TicketKind, parent_key: Option<&st
         attachments: Vec::new(),
         mermaid_diagrams: Vec::new(),
         web_links: Vec::new(),
+        issue_links: Vec::new(),
     }
 }
 

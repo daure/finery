@@ -52,6 +52,7 @@ pub(crate) const COMPOSER_STORY_POINTS_KEY_SETTING: &str = "composer.story_point
 pub(crate) const COMPOSER_FIX_VERSIONS_KEY_SETTING: &str = "composer.fix_versions_key";
 pub(crate) const COMPOSER_LABELS_KEY_SETTING: &str = "composer.labels_key";
 pub(crate) const COMPOSER_WEB_LINKS_KEY_SETTING: &str = "composer.web_links_key";
+pub(crate) const COMPOSER_ISSUE_LINKS_KEY_SETTING: &str = "composer.issue_links_key";
 pub(crate) const COMPOSER_CREATE_SUBMIT_KEY_SETTING: &str = "composer.create_submit_key";
 pub(crate) const COMPOSER_CREATE_CONFIRM_KEY_SETTING: &str = "composer.create_confirm_key";
 pub(crate) const COMPOSER_DIALOG_CANCEL_KEY_SETTING: &str = "composer.dialog_cancel_key";
@@ -156,6 +157,7 @@ pub(crate) struct ComposerKeyBindings {
     pub(crate) fix_versions: ComposerSequenceBinding,
     pub(crate) labels: ComposerSequenceBinding,
     pub(crate) web_links: ComposerSequenceBinding,
+    pub(crate) issue_links: ComposerSequenceBinding,
     pub(crate) create_submit: ComposerKeyBinding,
     pub(crate) create_confirm: ComposerKeyBinding,
     pub(crate) dialog_cancel: ComposerKeyBinding,
@@ -219,6 +221,7 @@ impl ComposerKeyBindings {
             fix_versions: sequence_binding(COMPOSER_FIX_VERSIONS_KEY_SETTING, "fv")?,
             labels: sequence_binding(COMPOSER_LABELS_KEY_SETTING, "be")?,
             web_links: sequence_binding(COMPOSER_WEB_LINKS_KEY_SETTING, "uu")?,
+            issue_links: sequence_binding(COMPOSER_ISSUE_LINKS_KEY_SETTING, "ui")?,
             create_submit: binding(COMPOSER_CREATE_SUBMIT_KEY_SETTING, "ctrl+enter")?,
             create_confirm: binding(COMPOSER_CREATE_CONFIRM_KEY_SETTING, "o")?,
             dialog_cancel: binding(COMPOSER_DIALOG_CANCEL_KEY_SETTING, "c")?,
@@ -257,6 +260,7 @@ impl ComposerKeyBindings {
             bindings.fix_versions.sequence(),
             bindings.labels.sequence(),
             bindings.web_links.sequence(),
+            bindings.issue_links.sequence(),
         ])?;
         ensure_unambiguous(&[
             bindings.create_submit.sequence(),
@@ -697,6 +701,10 @@ impl AppSettings {
             (
                 COMPOSER_WEB_LINKS_KEY_SETTING,
                 self.composer_keys.web_links.sequence.clone(),
+            ),
+            (
+                COMPOSER_ISSUE_LINKS_KEY_SETTING,
+                self.composer_keys.issue_links.sequence.clone(),
             ),
             (
                 COMPOSER_CREATE_SUBMIT_KEY_SETTING,
