@@ -1,10 +1,21 @@
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt, fs,
+    io::Read,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
+use reqwest::Url;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 
 use crate::{
+    service::composer_attachments::{
+        ATTACHMENT_BYTES_LIMIT, AttachmentRequest, AttachmentView, ResolvedAttachment,
+        image_mime_type_for_filename, resolve_attachments,
+    },
     storage::{
         ConditionalDeleteChangeSetOutcome, ConditionalSaveChangeSetOutcome, Storage,
         VersionedChangeSet,
@@ -24,7 +35,53 @@ pub struct Versioned<T> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ChangeSetCatalogView {
-    pub change_sets: Vec<Versioned<ChangeSetView>>,
+    pub change_sets: Vec<Versioned<ChangeSetCatalogChangeSetView>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ChangeSetCatalogChangeSetView {
+    pub id: String,
+    pub name: String,
+    pub closed: bool,
+    pub selected_ticket_ids: Vec<String>,
+    pub tickets: Vec<CatalogTicketChangeView>,
+    pub has_attachments: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CatalogTicketChangeView {
+    pub id: String,
+    pub kind: ChangeKindView,
+    pub original: Option<CatalogTicketView>,
+    pub updated: Option<CatalogTicketView>,
+    pub submitted: bool,
+    pub selected_for_commit: bool,
+    pub retry_blocked: bool,
+    pub create_attempt: bool,
+    pub submission_claimed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CatalogTicketView {
+    pub key: String,
+    pub project_key: String,
+    pub title: String,
+    pub description: String,
+    pub description_safe_to_overwrite: bool,
+    pub description_overwrite_warning: Option<String>,
+    pub kind: TicketKindView,
+    pub status: String,
+    pub priority: String,
+    pub assignee: String,
+    pub assignee_account_id: String,
+    pub story_points: Option<f64>,
+    pub fix_versions: Vec<String>,
+    pub labels: Vec<String>,
+    pub parent_key: Option<String>,
+    pub parent_title: Option<String>,
+    pub parent_kind: Option<TicketKindView>,
+    pub has_children: bool,
+    pub has_attachments: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -69,6 +126,7 @@ pub struct TicketView {
     pub parent_title: Option<String>,
     pub parent_kind: Option<TicketKindView>,
     pub has_children: bool,
+    pub attachments: Vec<AttachmentView>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -113,6 +171,13 @@ pub struct AssigneeInput {
     pub account_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AttachmentSourceInput {
+    FilePath { path: String },
+    Url { url: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChangeSetPatchOperation {
@@ -151,6 +216,16 @@ pub enum ChangeSetPatchOperation {
     UpdateAssignee {
         ticket_id: String,
         assignee: Option<AssigneeInput>,
+    },
+    AddAttachment {
+        ticket_id: String,
+        filename: Option<String>,
+        mime_type: Option<String>,
+        source: AttachmentSourceInput,
+    },
+    RemoveAttachment {
+        ticket_id: String,
+        attachment_id: String,
     },
     MoveTicket {
         ticket_id: String,
@@ -336,7 +411,10 @@ impl ComposerService {
         }
     }
 
-    pub fn change_set_catalog(&self) -> Result<Versioned<ChangeSetCatalogView>, ServiceError> {
+    pub fn change_set_catalog(
+        &self,
+        include_closed: bool,
+    ) -> Result<Versioned<ChangeSetCatalogView>, ServiceError> {
         let catalog = self
             .runtime
             .block_on(self.storage.load_versioned_change_sets())
@@ -347,7 +425,8 @@ impl ComposerService {
                 change_sets: catalog
                     .change_sets
                     .into_iter()
-                    .map(versioned_change_set_view)
+                    .filter(|change_set| include_closed || !change_set.change_set.closed)
+                    .map(versioned_change_set_catalog_view)
                     .collect(),
             },
         })
@@ -359,6 +438,21 @@ impl ComposerService {
     ) -> Result<Versioned<ChangeSetView>, ServiceError> {
         let change_set = self.load_change_set(change_set_id)?;
         Ok(versioned_change_set_view(change_set))
+    }
+
+    pub(crate) fn attachment_sources(
+        &self,
+        change_set_id: &str,
+        expected_revision: i64,
+        requests: &[AttachmentRequest],
+    ) -> Result<Vec<Result<ResolvedAttachment, String>>, ServiceError> {
+        let versioned = self.load_change_set(change_set_id)?;
+        if versioned.revision != expected_revision {
+            return Err(ServiceError::StaleRevision {
+                change_set_id: change_set_id.into(),
+            });
+        }
+        Ok(resolve_attachments(&versioned.change_set, requests))
     }
 
     pub fn create_change_set(
@@ -513,7 +607,7 @@ impl ComposerService {
                 self.save(&change_set.id, &change_set, Some(versioned.revision))?;
             }
         }
-        self.change_set_catalog()
+        self.change_set_catalog(true)
     }
 
     pub fn apply_change_set_patch(
@@ -882,7 +976,7 @@ impl ComposerService {
                     persisted_revision,
                 )?;
                 let change_set = self.change_set(change_set_id)?;
-                let catalog = self.change_set_catalog()?.revision;
+                let catalog = self.change_set_catalog(true)?.revision;
                 Ok(SubmitChangeSetResponse {
                     change_set,
                     catalog_revision: catalog,
@@ -898,7 +992,7 @@ impl ComposerService {
                     persisted_revision,
                 )?;
                 let change_set = self.change_set(change_set_id)?;
-                let catalog = self.change_set_catalog()?.revision;
+                let catalog = self.change_set_catalog(true)?.revision;
                 Ok(SubmitChangeSetResponse {
                     change_set,
                     catalog_revision: catalog,
@@ -1127,6 +1221,33 @@ impl ComposerService {
                 assignee,
             } => {
                 update_assignee(state, &ticket_id, assignee)?;
+                Ok(vec![ticket_id])
+            }
+            ChangeSetPatchOperation::AddAttachment {
+                ticket_id,
+                filename,
+                mime_type,
+                source,
+            } => {
+                let (source_filename, data) = read_attachment(&source)?;
+                let (filename, mime_type, data) =
+                    validate_attachment(filename.unwrap_or(source_filename), mime_type, data)?;
+                select(state, &ticket_id)?;
+                dispatch(
+                    state,
+                    ComposerAction::AddAttachment {
+                        filename,
+                        mime_type,
+                        data,
+                    },
+                )?;
+                Ok(vec![ticket_id])
+            }
+            ChangeSetPatchOperation::RemoveAttachment {
+                ticket_id,
+                attachment_id,
+            } => {
+                remove_attachment(state, &ticket_id, &attachment_id)?;
                 Ok(vec![ticket_id])
             }
             ChangeSetPatchOperation::MoveTicket {
@@ -1483,6 +1604,203 @@ fn update_assignee(
     select(state, ticket_id)?;
     dispatch(state, ComposerAction::UpdateAssignee { name, account_id })
 }
+fn read_attachment(source: &AttachmentSourceInput) -> Result<(String, Vec<u8>), ServiceError> {
+    match source {
+        AttachmentSourceInput::FilePath { path } => read_attachment_file(path),
+        AttachmentSourceInput::Url { url } => download_attachment(url),
+    }
+}
+
+fn read_attachment_file(path: &str) -> Result<(String, Vec<u8>), ServiceError> {
+    let path = PathBuf::from(path);
+    let metadata = fs::metadata(&path)
+        .map_err(|error| invalid(format!("could not inspect attachment file: {error}")))?;
+    if !metadata.is_file() {
+        return Err(invalid("attachment file must be a regular file"));
+    }
+    if metadata.len() > ATTACHMENT_BYTES_LIMIT as u64 {
+        return Err(invalid(format!(
+            "attachment must not exceed {ATTACHMENT_BYTES_LIMIT} bytes"
+        )));
+    }
+    let filename = filename_from_path(&path)?;
+    let data = fs::read(path)
+        .map_err(|error| invalid(format!("could not read attachment file: {error}")))?;
+    Ok((filename, data))
+}
+
+fn download_attachment(url: &str) -> Result<(String, Vec<u8>), ServiceError> {
+    let url = Url::parse(url).map_err(|_| invalid("attachment URL is invalid"))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(invalid("attachment URL must use http or https"));
+    }
+    let filename = filename_from_url(&url);
+    let response = reqwest::blocking::Client::new()
+        .get(url)
+        .send()
+        .map_err(|error| invalid(format!("could not download attachment: {error}")))?
+        .error_for_status()
+        .map_err(|error| invalid(format!("could not download attachment: {error}")))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > ATTACHMENT_BYTES_LIMIT as u64)
+    {
+        return Err(invalid(format!(
+            "attachment must not exceed {ATTACHMENT_BYTES_LIMIT} bytes"
+        )));
+    }
+    let mut data = Vec::with_capacity(
+        response
+            .content_length()
+            .and_then(|length| usize::try_from(length).ok())
+            .unwrap_or_default()
+            .min(ATTACHMENT_BYTES_LIMIT),
+    );
+    response
+        .take(ATTACHMENT_BYTES_LIMIT.saturating_add(1) as u64)
+        .read_to_end(&mut data)
+        .map_err(|error| invalid(format!("could not download attachment: {error}")))?;
+    Ok((filename, data))
+}
+
+fn filename_from_path(path: &Path) -> Result<String, ServiceError> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| invalid("attachment file path must include a UTF-8 filename"))
+}
+
+fn filename_from_url(url: &Url) -> String {
+    url.path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("attachment")
+        .to_owned()
+}
+
+fn validate_attachment(
+    filename: String,
+    mime_type: Option<String>,
+    data: Vec<u8>,
+) -> Result<(String, Option<String>, Vec<u8>), ServiceError> {
+    let filename = filename.trim();
+    if filename.is_empty()
+        || filename.len() > 255
+        || filename
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+    {
+        return Err(invalid(
+            "attachment filename must be 1-255 characters without paths or control characters",
+        ));
+    }
+    if data.is_empty() {
+        return Err(invalid("attachment content must not be empty"));
+    }
+    if data.len() > ATTACHMENT_BYTES_LIMIT {
+        return Err(invalid(format!(
+            "attachment must not exceed {ATTACHMENT_BYTES_LIMIT} bytes"
+        )));
+    }
+    let declared_mime_type = mime_type
+        .as_deref()
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if !declared_mime_type.is_empty()
+        && (declared_mime_type.len() > 255 || !valid_mime_type(&declared_mime_type))
+    {
+        return Err(invalid("attachment MIME type is invalid"));
+    }
+    let declared_mime_type = if declared_mime_type == "image/x-icon" {
+        "image/vnd.microsoft.icon"
+    } else {
+        declared_mime_type.as_str()
+    };
+    let detected_image_mime_type = super::image_mime_type(&data);
+    let filename_image_mime_type = image_mime_type_for_filename(filename);
+    if detected_image_mime_type.is_some()
+        || declared_mime_type.starts_with("image/")
+        || filename_image_mime_type.is_some()
+    {
+        let detected_mime_type = detected_image_mime_type
+            .ok_or_else(|| invalid("attachment content is not a supported image"))?;
+        if !declared_mime_type.is_empty() && declared_mime_type != detected_mime_type {
+            return Err(invalid(format!(
+                "attachment MIME type does not match its content; detected {detected_mime_type}"
+            )));
+        }
+        if filename_image_mime_type != Some(detected_mime_type) {
+            return Err(invalid(format!(
+                "attachment filename extension does not match {detected_mime_type} content"
+            )));
+        }
+    }
+    let mime_type = if declared_mime_type.is_empty() {
+        detected_image_mime_type.map(str::to_owned)
+    } else {
+        Some(declared_mime_type.into())
+    };
+    Ok((filename.into(), mime_type, data))
+}
+fn valid_mime_type(mime_type: &str) -> bool {
+    let Some((top_level, subtype)) = mime_type.split_once('/') else {
+        return false;
+    };
+    !top_level.is_empty()
+        && !subtype.is_empty()
+        && [top_level, subtype].into_iter().all(|part| {
+            part.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'
+                    )
+            })
+        })
+}
+fn remove_attachment(
+    state: &mut ComposerState,
+    ticket_id: &str,
+    attachment_id: &str,
+) -> Result<(), ServiceError> {
+    let change = editable_change(state, ticket_id)?;
+    let ticket = change
+        .updated
+        .as_ref()
+        .or(change.original.as_ref())
+        .ok_or_else(|| invalid("ticket has no attachment snapshot"))?;
+    let (index, attachment) = ticket
+        .attachments
+        .iter()
+        .enumerate()
+        .find(|(_, attachment)| attachment.id == attachment_id)
+        .ok_or_else(|| ServiceError::NotFound {
+            resource: "attachment".into(),
+            id: attachment_id.into(),
+        })?;
+    if attachment.change == crate::store::composer::AttachmentChangeKind::Deleted {
+        return Err(invalid("attachment is already staged for deletion"));
+    }
+    let locally_added = attachment.change == crate::store::composer::AttachmentChangeKind::Added;
+    select(state, ticket_id)?;
+    dispatch(
+        state,
+        ComposerAction::SelectTicket(Some(format!("{ticket_id}:attachment:{index}"))),
+    )?;
+    dispatch(
+        state,
+        if locally_added {
+            ComposerAction::RemoveSelectedAttachment
+        } else {
+            ComposerAction::DeleteSelectedAttachment
+        },
+    )
+}
 fn clean_values(values: Vec<String>) -> Vec<String> {
     values
         .into_iter()
@@ -1576,6 +1894,51 @@ fn versioned_change_set_view(change_set: VersionedChangeSet) -> Versioned<Change
         value: change_set_view(change_set.change_set),
     }
 }
+fn versioned_change_set_catalog_view(
+    change_set: VersionedChangeSet,
+) -> Versioned<ChangeSetCatalogChangeSetView> {
+    Versioned {
+        revision: change_set.revision,
+        value: change_set_catalog_view(change_set.change_set),
+    }
+}
+fn change_set_catalog_view(change_set: ChangeSet) -> ChangeSetCatalogChangeSetView {
+    let selected = change_set.selected_ticket_ids.clone();
+    let submission_claimed = change_set.submission_attempt.is_some();
+    let tickets = change_set
+        .tickets
+        .into_iter()
+        .map(|change| CatalogTicketChangeView {
+            selected_for_commit: selected.contains(&change.id),
+            id: change.id,
+            kind: change.kind.into(),
+            original: change.original.map(Into::into),
+            updated: change.updated.map(Into::into),
+            submitted: change.submitted.is_some(),
+            retry_blocked: change.retry_blocked,
+            create_attempt: change.create_attempt,
+            submission_claimed,
+        })
+        .collect::<Vec<_>>();
+    let has_attachments = tickets.iter().any(|change| {
+        change
+            .original
+            .as_ref()
+            .is_some_and(|ticket| ticket.has_attachments)
+            || change
+                .updated
+                .as_ref()
+                .is_some_and(|ticket| ticket.has_attachments)
+    });
+    ChangeSetCatalogChangeSetView {
+        id: change_set.id,
+        name: change_set.name,
+        closed: change_set.closed,
+        selected_ticket_ids: selected,
+        tickets,
+        has_attachments,
+    }
+}
 fn change_set_view(change_set: ChangeSet) -> ChangeSetView {
     let selected = change_set.selected_ticket_ids.clone();
     let submission_claimed = change_set.submission_attempt.is_some();
@@ -1654,6 +2017,32 @@ impl From<Ticket> for TicketView {
             parent_title: value.parent_title,
             parent_kind: value.parent_kind.map(Into::into),
             has_children: value.has_children,
+            attachments: value.attachments.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+impl From<Ticket> for CatalogTicketView {
+    fn from(value: Ticket) -> Self {
+        Self {
+            key: value.key,
+            project_key: value.project_key,
+            title: value.title,
+            description: value.description,
+            description_safe_to_overwrite: value.description_safe_to_overwrite,
+            description_overwrite_warning: value.description_overwrite_warning,
+            kind: value.kind.into(),
+            status: value.status,
+            priority: value.priority,
+            assignee: value.assignee,
+            assignee_account_id: value.assignee_account_id,
+            story_points: value.story_points,
+            fix_versions: value.fix_versions,
+            labels: value.labels,
+            parent_key: value.parent_key,
+            parent_title: value.parent_title,
+            parent_kind: value.parent_kind.map(Into::into),
+            has_children: value.has_children,
+            has_attachments: !value.attachments.is_empty(),
         }
     }
 }

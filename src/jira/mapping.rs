@@ -197,6 +197,10 @@ fn attachments(value: &Value) -> Vec<TicketAttachment> {
                     .get("size")
                     .and_then(Value::as_u64)
                     .unwrap_or_default(),
+                mime_type: attachment
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
                 content_url: attachment
                     .get("content")
                     .and_then(Value::as_str)

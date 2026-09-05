@@ -298,6 +298,60 @@ impl ComposerPage {
     }
 
     #[cfg(test)]
+    pub(super) fn add_selected_attachment_for_test(
+        &mut self,
+        change: crate::store::composer::AttachmentChangeKind,
+    ) {
+        let mut state = self.state.borrow_mut();
+        let active_change_set = state.active_change_set.clone();
+        let selected = state
+            .selected_ticket
+            .clone()
+            .or_else(|| {
+                state
+                    .change_sets
+                    .iter()
+                    .find(|set| active_change_set.as_deref() == Some(set.id.as_str()))
+                    .and_then(|set| set.tickets.first())
+                    .map(|ticket| ticket.id.clone())
+            })
+            .unwrap();
+        let ticket = state
+            .change_sets
+            .iter_mut()
+            .find(|set| active_change_set.as_deref() == Some(set.id.as_str()))
+            .and_then(|set| set.tickets.iter_mut().find(|ticket| ticket.id == selected))
+            .and_then(|ticket| ticket.updated.as_mut().or(ticket.original.as_mut()))
+            .unwrap();
+        let index = ticket.attachments.len();
+        ticket
+            .attachments
+            .push(crate::store::composer::TicketAttachment {
+                id: format!("attachment-{index}"),
+                filename: "design.png".into(),
+                created: String::new(),
+                size: 1,
+                mime_type: Some("image/png".into()),
+                content_url: None,
+                change,
+                local_data: None,
+            });
+        state.selected_ticket = Some(format!("{selected}:attachment:{index}"));
+        drop(state);
+        self.editor.sync();
+    }
+
+    #[cfg(test)]
+    pub(super) fn selected_attachment_change(
+        &self,
+    ) -> Option<crate::store::composer::AttachmentChangeKind> {
+        self.state
+            .borrow()
+            .selected_attachment()
+            .map(|attachment| attachment.change)
+    }
+
+    #[cfg(test)]
     pub(super) fn detail_panel_areas(&self) -> (Rect, Rect) {
         self.editor.detail_panel_areas()
     }

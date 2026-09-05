@@ -1,6 +1,10 @@
 use std::{
     collections::HashMap,
     ffi::OsStr,
+    fs,
+    io::Write,
+    net::TcpListener,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -15,16 +19,21 @@ use crate::{
     jira::{SubmitBatchOutcome, TicketSubmitOutcome},
     service::{
         AppService,
+        composer_attachments::{
+            AttachmentChangeKindView, AttachmentKindView, AttachmentRequest, AttachmentSource,
+            TicketSnapshotView,
+        },
         composer_service::{
-            AssigneeInput, ChangeSetPatchOperation, ComposerService, DraftTicketInput,
-            ServiceError, SubmitChangeSetOutcome, TicketKindView, test_service,
-            test_service_with_submit,
+            AssigneeInput, AttachmentSourceInput, ChangeSetPatchOperation, ComposerService,
+            DraftTicketInput, ServiceError, SubmitChangeSetOutcome, TicketKindView, TicketView,
+            test_service, test_service_with_submit,
         },
     },
     storage::Storage,
     store::composer::{
-        ChangeKind, ChangeSet, ComposerAction, ComposerState, SubmissionAttempt,
-        SubmissionAttemptPhase, SubmissionSnapshot, Ticket, TicketChange, TicketKind,
+        AttachmentChangeKind, ChangeKind, ChangeSet, ComposerAction, ComposerState,
+        SubmissionAttempt, SubmissionAttemptPhase, SubmissionSnapshot, Ticket, TicketAttachment,
+        TicketChange, TicketKind,
     },
 };
 
@@ -53,7 +62,83 @@ fn clipboard_image_format_detection_covers_supported_formats() {
     assert_eq!(super::image_extension(b"GIF89arest"), Some("gif"));
     assert_eq!(super::image_extension(b"BMrest"), Some("bmp"));
     assert_eq!(super::image_extension(b"RIFF0000WEBPrest"), Some("webp"));
+    assert_eq!(super::image_extension(b"\0\0\x01\0rest"), Some("ico"));
+    assert_eq!(super::image_extension(b"0000ftypavif0000"), Some("avif"));
+    assert_eq!(
+        super::image_mime_type(b"\x89PNG\r\n\x1a\nrest"),
+        Some("image/png")
+    );
     assert_eq!(super::image_extension(b"plain text"), None);
+}
+
+#[test]
+fn ticket_views_expose_attachment_metadata_without_attachment_content() {
+    let mut ticket = ticket("FIN-1");
+    ticket.attachments.push(TicketAttachment {
+        id: "local-1".into(),
+        filename: "design.png".into(),
+        created: "2026-09-05T10:00:00Z".into(),
+        size: 12,
+        mime_type: Some("image/png".into()),
+        content_url: Some("https://jira.example/secret".into()),
+        change: AttachmentChangeKind::Added,
+        local_data: Some(vec![1, 2, 3]),
+    });
+
+    let view = TicketView::from(ticket);
+
+    assert_eq!(view.attachments.len(), 1);
+    assert_eq!(view.attachments[0].id, "local-1");
+    assert_eq!(view.attachments[0].filename, "design.png");
+    assert_eq!(view.attachments[0].mime_type.as_deref(), Some("image/png"));
+    assert_eq!(view.attachments[0].change, AttachmentChangeKindView::Added);
+    assert_eq!(view.attachments[0].kind, AttachmentKindView::Image);
+    assert!(view.attachments[0].content_available);
+    let json = serde_json::to_value(view).unwrap();
+    assert!(json["attachments"][0].get("content_url").is_none());
+    assert!(json["attachments"][0].get("local_data").is_none());
+}
+
+#[test]
+fn change_set_catalog_exposes_attachment_presence_without_metadata() {
+    let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    let storage = runtime.block_on(Storage::connect_for_tests()).unwrap();
+    let mut change_set = change_set();
+    change_set.tickets[0]
+        .original
+        .as_mut()
+        .unwrap()
+        .attachments
+        .push(TicketAttachment {
+            id: "local-1".into(),
+            filename: "design.png".into(),
+            created: String::new(),
+            size: 12,
+            mime_type: Some("image/png".into()),
+            content_url: None,
+            change: AttachmentChangeKind::Added,
+            local_data: Some(vec![1, 2, 3]),
+        });
+    runtime
+        .block_on(storage.save_change_set(&change_set))
+        .unwrap();
+    let lookup = Arc::new(|key: &str| -> Result<Ticket, String> { Ok(ticket(key)) });
+    let service = test_service(storage, runtime, lookup);
+
+    let catalog = service.change_set_catalog(false).unwrap();
+    let ticket = catalog.value.change_sets[0].value.tickets[0]
+        .original
+        .as_ref()
+        .unwrap();
+    let json = serde_json::to_value(&catalog).unwrap();
+
+    assert!(catalog.value.change_sets[0].value.has_attachments);
+    assert!(ticket.has_attachments);
+    assert!(
+        json["change_sets"][0]["value"]["tickets"][0]["original"]
+            .get("attachments")
+            .is_none()
+    );
 }
 
 fn ticket(key: &str) -> Ticket {
@@ -78,6 +163,15 @@ fn ticket(key: &str) -> Ticket {
         has_children: false,
         attachments: Vec::new(),
     }
+}
+
+fn attachment_fixture(filename: &str, data: &[u8]) -> PathBuf {
+    let directory =
+        std::env::temp_dir().join(format!("finery-composer-attachment-{}", std::process::id()));
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join(filename);
+    fs::write(&path, data).unwrap();
+    path
 }
 
 fn change_set() -> ChangeSet {
@@ -130,6 +224,40 @@ fn create_change_set_persists_an_empty_open_set() {
             .value
             .id,
         "CS-3"
+    );
+}
+
+#[test]
+fn change_set_catalog_excludes_closed_sets_unless_requested() {
+    let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    let storage = runtime.block_on(Storage::connect_for_tests()).unwrap();
+    runtime
+        .block_on(storage.save_change_set(&change_set()))
+        .unwrap();
+    let mut closed = change_set();
+    closed.id = "CS-2".into();
+    closed.closed = true;
+    runtime.block_on(storage.save_change_set(&closed)).unwrap();
+    let lookup = Arc::new(|key: &str| -> Result<Ticket, String> { Ok(ticket(key)) });
+    let service = test_service(storage, runtime, lookup);
+
+    assert_eq!(
+        service
+            .change_set_catalog(false)
+            .unwrap()
+            .value
+            .change_sets
+            .len(),
+        1
+    );
+    assert_eq!(
+        service
+            .change_set_catalog(true)
+            .unwrap()
+            .value
+            .change_sets
+            .len(),
+        2
     );
 }
 
@@ -445,6 +573,200 @@ fn patch_persists_multiple_operations_as_one_revision() {
             .assignee_account_id,
         "ada"
     );
+}
+
+#[test]
+fn patch_adds_and_removes_a_file_attachment_in_persistent_storage() {
+    let service = service();
+    let file = b"%PDF-1.7 attachment".to_vec();
+    let path = attachment_fixture("report.pdf", &file);
+
+    let added = service
+        .apply_change_set_patch(
+            "CS-1",
+            1,
+            vec![ChangeSetPatchOperation::AddAttachment {
+                ticket_id: "FIN-1".into(),
+                filename: None,
+                mime_type: Some("application/pdf".into()),
+                source: AttachmentSourceInput::FilePath {
+                    path: path.to_string_lossy().into_owned(),
+                },
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(added.change_set.revision, 2);
+    let attachment = &added.change_set.value.tickets[0]
+        .updated
+        .as_ref()
+        .unwrap()
+        .attachments[0];
+    assert!(attachment.id.starts_with("local-"));
+    assert_eq!(attachment.filename, "report.pdf");
+    assert_eq!(attachment.mime_type.as_deref(), Some("application/pdf"));
+    assert_eq!(attachment.kind, AttachmentKindView::Other);
+    assert_eq!(attachment.change, AttachmentChangeKindView::Added);
+    let attachment_id = attachment.id.clone();
+    let persisted = service
+        .attachment_sources(
+            "CS-1",
+            2,
+            &[AttachmentRequest {
+                ticket_id: "FIN-1".into(),
+                snapshot: TicketSnapshotView::Updated,
+                attachment_id: attachment_id.clone(),
+            }],
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.mime_type.as_deref(), Some("application/pdf"));
+    assert_eq!(persisted.source, AttachmentSource::Local(file));
+
+    let removed = service
+        .apply_change_set_patch(
+            "CS-1",
+            2,
+            vec![ChangeSetPatchOperation::RemoveAttachment {
+                ticket_id: "FIN-1".into(),
+                attachment_id,
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(removed.change_set.revision, 3);
+    assert!(
+        removed.change_set.value.tickets[0]
+            .updated
+            .as_ref()
+            .unwrap()
+            .attachments
+            .is_empty()
+    );
+    assert!(
+        service.change_set("CS-1").unwrap().value.tickets[0]
+            .updated
+            .as_ref()
+            .unwrap()
+            .attachments
+            .is_empty()
+    );
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn patch_downloads_a_url_attachment_into_persistent_storage() {
+    let file = b"%PDF-1.7 downloaded".to_vec();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            file.len()
+        );
+        stream.write_all(header.as_bytes()).unwrap();
+        stream.write_all(&file).unwrap();
+    });
+    let service = service();
+
+    let added = service
+        .apply_change_set_patch(
+            "CS-1",
+            1,
+            vec![ChangeSetPatchOperation::AddAttachment {
+                ticket_id: "FIN-1".into(),
+                filename: None,
+                mime_type: Some("application/pdf".into()),
+                source: AttachmentSourceInput::Url {
+                    url: format!("http://{address}/download.pdf"),
+                },
+            }],
+        )
+        .unwrap();
+    server.join().unwrap();
+
+    let attachment = &added.change_set.value.tickets[0]
+        .updated
+        .as_ref()
+        .unwrap()
+        .attachments[0];
+    assert_eq!(attachment.filename, "download.pdf");
+    assert_eq!(attachment.mime_type.as_deref(), Some("application/pdf"));
+}
+
+#[test]
+fn patch_removal_stages_a_synced_attachment_for_jira_deletion() {
+    let mut set = change_set();
+    set.tickets[0]
+        .original
+        .as_mut()
+        .unwrap()
+        .attachments
+        .push(TicketAttachment {
+            id: "jira-1".into(),
+            filename: "old.png".into(),
+            created: String::new(),
+            size: 12,
+            mime_type: Some("image/png".into()),
+            content_url: Some("https://jira.example/old.png".into()),
+            change: AttachmentChangeKind::Synced,
+            local_data: None,
+        });
+    let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    let storage = runtime.block_on(Storage::connect_for_tests()).unwrap();
+    runtime.block_on(storage.save_change_set(&set)).unwrap();
+    let service = test_service(
+        storage,
+        runtime,
+        Arc::new(|key: &str| -> Result<Ticket, String> { Ok(ticket(key)) }),
+    );
+
+    let removed = service
+        .apply_change_set_patch(
+            "CS-1",
+            1,
+            vec![ChangeSetPatchOperation::RemoveAttachment {
+                ticket_id: "FIN-1".into(),
+                attachment_id: "jira-1".into(),
+            }],
+        )
+        .unwrap();
+
+    let attachment = &removed.change_set.value.tickets[0]
+        .updated
+        .as_ref()
+        .unwrap()
+        .attachments[0];
+    assert_eq!(attachment.change, AttachmentChangeKindView::Deleted);
+}
+
+#[test]
+fn patch_rejects_an_image_mime_mismatch_without_persisting() {
+    let service = service();
+    let path = attachment_fixture("design.png", b"\xff\xd8\xffjpeg");
+
+    let error = service
+        .apply_change_set_patch(
+            "CS-1",
+            1,
+            vec![ChangeSetPatchOperation::AddAttachment {
+                ticket_id: "FIN-1".into(),
+                filename: None,
+                mime_type: Some("image/png".into()),
+                source: AttachmentSourceInput::FilePath {
+                    path: path.to_string_lossy().into_owned(),
+                },
+            }],
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, ServiceError::InvalidOperation { .. }));
+    assert_eq!(service.change_set("CS-1").unwrap().revision, 1);
+    fs::remove_file(path).unwrap();
 }
 
 #[test]

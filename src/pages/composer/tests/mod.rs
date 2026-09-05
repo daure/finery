@@ -1017,6 +1017,121 @@ fn ticket_action_hotkeys_open_from_other_composer_controls() {
 }
 
 #[test]
+fn attachment_actions_close_the_dialog_and_restore_selected_attachments() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 1);
+
+    page.add_selected_attachment_for_test(AttachmentChangeKind::Added);
+    let tickets = focus(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+    let action_dialog = render_text(&mut page);
+    assert!(action_dialog.contains("Attachment action"));
+    assert!(action_dialog.contains("Remove (r)"));
+    assert!(!action_dialog.contains("Open"));
+    let dialog = target(&mut page, "dialog");
+    page.dispatch_event(
+        &EventRoute::new(dialog.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('r'))),
+        &mut EventCtx::default(),
+    );
+    assert!(!render_text(&mut page).contains("Attachment action"));
+    assert_eq!(page.selected_attachment_change(), None);
+
+    page.add_selected_attachment_for_test(AttachmentChangeKind::Synced);
+    let tickets = focus(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+    let dialog = target(&mut page, "dialog");
+    page.dispatch_event(
+        &EventRoute::new(dialog.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('d'))),
+        &mut EventCtx::default(),
+    );
+    assert!(!render_text(&mut page).contains("Attachment action"));
+    assert_eq!(
+        page.selected_attachment_change(),
+        Some(AttachmentChangeKind::Deleted)
+    );
+
+    let tickets = focus(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('r'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+    assert!(render_text(&mut page).contains("Restore (r)"));
+    let dialog = target(&mut page, "dialog");
+    page.dispatch_event(
+        &EventRoute::new(dialog.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('r'))),
+        &mut EventCtx::default(),
+    );
+    assert!(!render_text(&mut page).contains("Restore or reset"));
+    assert_eq!(
+        page.selected_attachment_change(),
+        Some(AttachmentChangeKind::Synced)
+    );
+}
+
+#[test]
+fn ticket_delete_and_restore_actions_close_the_dialog() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 1);
+
+    let tickets = focus(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+    let dialog = target(&mut page, "dialog");
+    page.dispatch_event(
+        &EventRoute::new(dialog.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('d'))),
+        &mut EventCtx::default(),
+    );
+    assert!(!render_text(&mut page).contains("Ticket action"));
+
+    let tickets = focus(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('r'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+    let dialog = target(&mut page, "dialog");
+    page.dispatch_event(
+        &EventRoute::new(dialog.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('r'))),
+        &mut EventCtx::default(),
+    );
+    assert!(!render_text(&mut page).contains("Restore or reset"));
+}
+
+#[test]
 fn submit_requires_confirmation() {
     tuicore::init();
     let mut page = composer_page();
@@ -2520,6 +2635,7 @@ fn attachments_are_tree_children_before_ticket_children() {
         filename: "design.png".into(),
         created: "2026-09-04T16:14:04.000+0000".into(),
         size: 21_504,
+        mime_type: Some("image/png".into()),
         content_url: Some("https://jira.example/attachment/design.png".into()),
         change: crate::store::composer::AttachmentChangeKind::Synced,
         local_data: None,
@@ -2590,6 +2706,7 @@ fn pasted_attachment_is_staged_with_local_data_and_can_be_renamed() {
     state
         .dispatch(ComposerAction::AddAttachment {
             filename: "clipboard.png".into(),
+            mime_type: Some("image/png".into()),
             data: vec![1, 2, 3],
         })
         .unwrap();
@@ -2620,6 +2737,7 @@ fn synced_attachment_delete_is_staged_and_can_be_restored() {
         filename: "design.png".into(),
         created: "2026-09-04T16:14:04.000+0000".into(),
         size: 21_504,
+        mime_type: Some("image/png".into()),
         content_url: Some("https://jira.example/attachment/design.png".into()),
         change: AttachmentChangeKind::Synced,
         local_data: None,
@@ -2661,6 +2779,7 @@ fn removing_a_new_attachment_drops_it_from_the_change_set() {
     state
         .dispatch(ComposerAction::AddAttachment {
             filename: "clipboard.png".into(),
+            mime_type: Some("image/png".into()),
             data: vec![1, 2, 3],
         })
         .unwrap();
@@ -2682,6 +2801,7 @@ fn local_attachment_bytes_survive_change_set_persistence() {
         filename: "clipboard.png".into(),
         created: "2026-09-04T16:14:04Z".into(),
         size: 4,
+        mime_type: Some("image/png".into()),
         content_url: None,
         change: AttachmentChangeKind::Added,
         local_data: Some(vec![1, 2, 3, 4]),

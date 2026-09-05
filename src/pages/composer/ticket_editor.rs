@@ -879,6 +879,9 @@ impl TicketEditor {
                     | ComposerAction::RemoveTicket(_)
                     | ComposerAction::RestoreTicket(_)
                     | ComposerAction::ResetTicket(_)
+                    | ComposerAction::DeleteSelectedAttachment
+                    | ComposerAction::RestoreSelectedAttachment
+                    | ComposerAction::RemoveSelectedAttachment
             );
             persist |= action.affects_persistence();
             if let Err(error) = self.state.borrow_mut().dispatch(action) {
@@ -1466,6 +1469,7 @@ impl TicketEditor {
                     .borrow_mut()
                     .dispatch(ComposerAction::AddAttachment {
                         filename: image.filename,
+                        mime_type: Some(image.mime_type),
                         data: image.data,
                     });
                 match result {
@@ -1663,20 +1667,6 @@ impl TicketEditor {
         };
         let keys = self.composer_keys();
         let mut actions = Vec::new();
-        let service = self.service.clone();
-        let open_attachment = attachment.clone();
-        actions.push(DialogAction::new("Open").on_trigger(move || {
-            let service = service.clone();
-            let attachment = open_attachment.clone();
-            std::thread::spawn(move || {
-                if let Err(error) = service.open_attachment(&attachment) {
-                    service.report_notification(tuicore::Notification::error(
-                        "Could not open attachment",
-                        error,
-                    ));
-                }
-            });
-        }));
         let message = match attachment.change {
             crate::store::composer::AttachmentChangeKind::Added => {
                 let sink = Rc::clone(&self.pending);
@@ -1763,6 +1753,36 @@ impl TicketEditor {
         self.ticket_dialog_close_requested.set(false);
         let mut actions = Vec::new();
         let keys = self.composer_keys();
+        if let Some(attachment) = self.state.borrow().selected_attachment().cloned() {
+            let message =
+                if attachment.change == crate::store::composer::AttachmentChangeKind::Deleted {
+                    let restore_sink = Rc::clone(&self.pending);
+                    actions.push(
+                        DialogAction::new("Restore")
+                            .hotkey(keys.restore.spec())
+                            .on_trigger(move || {
+                                restore_sink
+                                    .borrow_mut()
+                                    .push(ComposerAction::RestoreSelectedAttachment);
+                            }),
+                    );
+                    "Restore this attachment to cancel its staged Jira deletion."
+                } else {
+                    "No restore or reset action is available for this attachment."
+                };
+            let cancel_ticket_dialog = Rc::clone(&self.ticket_dialog_close_requested);
+            actions.push(
+                DialogAction::new("Cancel")
+                    .hotkey(keys.dialog_cancel.spec())
+                    .on_trigger(move || cancel_ticket_dialog.set(true)),
+            );
+            let dialog = self.view.base_mut().layer_mut();
+            dialog.set_top_left("Restore or reset");
+            dialog.set_actions(actions);
+            dialog.set_content([message]);
+            self.view.base_mut().set_active_with_context(true, ctx);
+            return true;
+        }
         let change = self.state.borrow().selected_change().cloned();
         let message = if let Some(change) = &change {
             let can_recover = !change.is_submitted() && self.can_change.get();

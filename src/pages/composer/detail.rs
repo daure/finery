@@ -1,5 +1,6 @@
 use std::{
     cell::RefCell,
+    collections::{HashMap, HashSet},
     rc::Rc,
     sync::mpsc::{self, Receiver},
     thread,
@@ -23,7 +24,9 @@ use tuicore::{
 use crate::{
     app_settings::ComposerKeyBindings,
     service::AppService,
-    store::composer::{ChangeKind, ComposerAction, ComposerState, ComposerViewMode},
+    store::composer::{
+        ChangeKind, ComposerAction, ComposerState, ComposerViewMode, TicketAttachment,
+    },
 };
 
 use super::fields::{
@@ -55,10 +58,19 @@ struct ResponsiveDetails {
 struct FileContent {
     state: Rc<RefCell<ComposerState>>,
     service: AppService,
-    content_url: Option<String>,
-    image: Option<Image>,
-    loading: Option<Receiver<Result<Image, String>>>,
-    error: Option<String>,
+    images: HashMap<String, CachedAttachmentImage>,
+    preview_size: (u16, u16),
+}
+
+enum CachedAttachmentImage {
+    Loading(Receiver<Result<Image, String>>),
+    Ready(Image),
+    Failed(String),
+}
+
+enum AttachmentImageSource {
+    Local(Vec<u8>),
+    Remote(String),
 }
 
 struct AttachmentFilename {
@@ -546,62 +558,89 @@ impl FileContent {
         Self {
             state,
             service,
-            content_url: None,
-            image: None,
-            loading: None,
-            error: None,
+            images: HashMap::new(),
+            preview_size: (32, 16),
         }
     }
 
-    fn sync(&mut self) {
-        let state = self.state.borrow();
-        let Some(attachment) = state.selected_attachment() else {
-            return;
-        };
-        let is_image = is_image_file(&attachment.filename);
-        if is_image && let Some(data) = attachment.local_data.as_ref() {
-            let identity = format!(
-                "local:{}:{}:{}",
-                attachment.id,
-                attachment.filename,
-                data.len()
-            );
-            if self.content_url.as_deref() != Some(&identity) {
-                self.content_url = Some(identity);
-                self.loading = None;
-                match Image::from_bytes(data) {
-                    Ok(image) => {
-                        self.image = Some(image.protocol(ImageProtocol::Kitty));
-                        self.error = None;
-                    }
-                    Err(error) => {
-                        self.image = None;
-                        self.error = Some(error.to_string());
+    fn sync_cache(&mut self) -> bool {
+        let mut desired = HashSet::new();
+        let mut pending = Vec::new();
+        {
+            let state = self.state.borrow();
+            if let Some(set) = state.active_set() {
+                for change in &set.tickets {
+                    for ticket in [
+                        state.source_for_change(change),
+                        state.changes_for_change(change),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        for attachment in &ticket.attachments {
+                            let Some(key) = attachment_image_key(attachment) else {
+                                continue;
+                            };
+                            if desired.insert(key.clone()) && !self.images.contains_key(&key) {
+                                let source = attachment
+                                    .local_data
+                                    .as_ref()
+                                    .map(|data| AttachmentImageSource::Local(data.clone()))
+                                    .or_else(|| {
+                                        attachment
+                                            .content_url
+                                            .clone()
+                                            .map(AttachmentImageSource::Remote)
+                                    });
+                                if let Some(source) = source {
+                                    pending.push((key, source));
+                                }
+                            }
+                        }
                     }
                 }
             }
-            return;
         }
-        let Some(url) = attachment.content_url.as_deref().filter(|_| is_image) else {
-            self.content_url = None;
-            self.image = None;
-            self.loading = None;
-            self.error = None;
-            return;
-        };
-        if self.content_url.as_deref() == Some(url) {
-            return;
+
+        let removed = self.images.keys().any(|key| !desired.contains(key));
+        let added = !pending.is_empty();
+        self.images.retain(|key, _| desired.contains(key));
+        for (key, source) in pending {
+            self.images
+                .insert(key, CachedAttachmentImage::Loading(self.load(source)));
         }
-        self.content_url = Some(url.to_owned());
-        self.image = None;
-        self.error = None;
+        removed || added
+    }
+
+    fn load(&self, source: AttachmentImageSource) -> Receiver<Result<Image, String>> {
         let (sender, receiver) = mpsc::channel();
         let service = self.service.clone();
-        let url = url.to_owned();
         thread::spawn(move || {
-            let _ = sender.send(service.load_jira_attachment_image(&url));
+            let result = match source {
+                AttachmentImageSource::Local(data) => {
+                    Image::from_bytes(data).map_err(|error| error.to_string())
+                }
+                AttachmentImageSource::Remote(url) => service.load_jira_attachment_image(&url),
+            };
+            let _ = sender.send(result);
         });
-        self.loading = Some(receiver);
+        receiver
+    }
+
+    fn selected_image_key(&self) -> Option<String> {
+        self.state
+            .borrow()
+            .selected_attachment()
+            .and_then(attachment_image_key)
+    }
+
+    fn preload(&mut self, width: u16, height: u16) {
+        self.preview_size = (width, height);
+        for image in self.images.values_mut() {
+            if let CachedAttachmentImage::Ready(image) = image {
+                image.preload(width, height);
+            }
+        }
     }
 
     fn text(&self) -> String {
@@ -610,12 +649,22 @@ impl FileContent {
             return "File unavailable".into();
         };
         if is_image_file(&attachment.filename) {
-            if let Some(error) = self.error.as_deref() {
-                return format!("Could not load image: {error}");
+            if let Some(key) = attachment_image_key(attachment) {
+                match self.images.get(&key) {
+                    Some(CachedAttachmentImage::Failed(error)) => {
+                        return format!("Could not load image: {error}");
+                    }
+                    Some(CachedAttachmentImage::Loading(_)) | None => {
+                        return "Loading image...".into();
+                    }
+                    Some(CachedAttachmentImage::Ready(_)) => {}
+                }
             }
-            if self.loading.is_some() {
-                return "Loading image...".into();
-            }
+        } else {
+            return format!(
+                "{}\n{} bytes\n\nPress ctrl+enter to open the file.",
+                attachment.filename, attachment.size
+            );
         }
         format!("{}\n{} bytes", attachment.filename, attachment.size)
     }
@@ -627,15 +676,22 @@ impl TuiNode for FileContent {
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        self.sync();
-        if let Some(image) = self.image.as_mut() {
+        self.sync_cache();
+        self.preload(area.width, area.height);
+        let selected = self.selected_image_key();
+        if let Some(CachedAttachmentImage::Ready(image)) =
+            selected.as_ref().and_then(|key| self.images.get_mut(key))
+        {
             <Image as TuiNode<()>>::layout(image, area, ctx);
         }
         LayoutResult::new(area)
     }
 
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
-        if let Some(image) = self.image.as_ref() {
+        let selected = self.selected_image_key();
+        if let Some(CachedAttachmentImage::Ready(image)) =
+            selected.as_ref().and_then(|key| self.images.get(key))
+        {
             <Image as TuiNode<()>>::render(image, frame, area, ctx);
         } else {
             frame.render_widget(
@@ -646,36 +702,69 @@ impl TuiNode for FileContent {
     }
 
     fn tick(&mut self, _dt: Duration, _settings: AnimationSettings) -> TickResult {
-        self.sync();
-        if let Some(receiver) = self.loading.as_ref() {
-            match receiver.try_recv() {
-                Ok(Ok(image)) => {
-                    self.image = Some(image.protocol(ImageProtocol::Kitty));
-                    self.loading = None;
-                    return TickResult {
+        let mut result = if self.sync_cache() {
+            TickResult::CHANGED
+        } else {
+            TickResult::IDLE
+        };
+        let selected = self.selected_image_key();
+        for (key, cached) in &mut self.images {
+            let next = match cached {
+                CachedAttachmentImage::Loading(receiver) => match receiver.try_recv() {
+                    Ok(Ok(image)) => Some(CachedAttachmentImage::Ready(
+                        image.protocol(ImageProtocol::Kitty),
+                    )),
+                    Ok(Err(error)) => Some(CachedAttachmentImage::Failed(error)),
+                    Err(mpsc::TryRecvError::Disconnected) => Some(CachedAttachmentImage::Failed(
+                        "image download stopped".into(),
+                    )),
+                    Err(mpsc::TryRecvError::Empty) => {
+                        result = result.merge(TickResult::ACTIVE);
+                        None
+                    }
+                },
+                CachedAttachmentImage::Ready(image) => {
+                    result = result.merge(image.tick());
+                    None
+                }
+                CachedAttachmentImage::Failed(_) => None,
+            };
+            if let Some(mut next) = next {
+                if let CachedAttachmentImage::Ready(image) = &mut next {
+                    image.preload(self.preview_size.0, self.preview_size.1);
+                    result = result.merge(TickResult::ACTIVE);
+                }
+                *cached = next;
+                if selected.as_ref() == Some(key) {
+                    result = result.merge(TickResult {
                         changed: true,
                         layout: true,
                         active: true,
                         next_tick: None,
-                    };
+                    });
                 }
-                Ok(Err(error)) => {
-                    self.error = Some(error);
-                    self.loading = None;
-                    return TickResult::CHANGED;
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.error = Some("image download stopped".into());
-                    self.loading = None;
-                    return TickResult::CHANGED;
-                }
-                Err(mpsc::TryRecvError::Empty) => return TickResult::ACTIVE,
             }
         }
-        self.image
-            .as_mut()
-            .map(Image::tick)
-            .unwrap_or(TickResult::IDLE)
+        result
+    }
+}
+
+fn attachment_image_key(attachment: &TicketAttachment) -> Option<String> {
+    if !is_image_file(&attachment.filename) {
+        return None;
+    }
+    let id = if attachment.id.is_empty() {
+        attachment.filename.as_str()
+    } else {
+        attachment.id.as_str()
+    };
+    if let Some(data) = attachment.local_data.as_ref() {
+        Some(format!("local:{id}:{}", data.len()))
+    } else {
+        attachment
+            .content_url
+            .as_ref()
+            .map(|url| format!("remote:{id}:{url}"))
     }
 }
 
@@ -937,12 +1026,75 @@ mod file_content_tests {
     const TEST_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAGAAAAAwCAIAAABhdOiYAAAAf0lEQVR42u3RMRGAQBADwBdBTU1NjTDkvAhcffMSMJFrbjYTA9mM47wjvd4v0j2fSFcoAxAgQIAAAQIECBAgQIAKgLoOSx0PCBAgQIAAAQIECBAgQBVAXYeljgcECBAgQIAAAQIECBCgCqCuw1LHAwIECBAgQIAAAQIECFAB0A/Lrzglvf/PRwAAAABJRU5ErkJggg==";
 
     #[test]
+    fn non_image_files_show_the_open_shortcut() {
+        let attachment = TicketAttachment {
+            id: "notes".into(),
+            filename: "notes.txt".into(),
+            created: String::new(),
+            size: 4,
+            mime_type: Some("text/plain".into()),
+            content_url: None,
+            change: AttachmentChangeKind::Added,
+            local_data: Some(b"text".to_vec()),
+        };
+        let ticket = Ticket {
+            key: "FIN-1".into(),
+            project_key: "FIN".into(),
+            title: "File ticket".into(),
+            description: String::new(),
+            description_safe_to_overwrite: true,
+            description_overwrite_warning: None,
+            kind: TicketKind::Task,
+            status: "To Do".into(),
+            priority: "Medium".into(),
+            assignee: String::new(),
+            assignee_account_id: String::new(),
+            story_points: None,
+            fix_versions: Vec::new(),
+            labels: Vec::new(),
+            parent_key: None,
+            parent_title: None,
+            parent_kind: None,
+            has_children: false,
+            attachments: vec![attachment],
+        };
+        let mut state = ComposerState::from_change_sets(vec![ChangeSet {
+            id: "CS-1".into(),
+            name: "Files".into(),
+            tickets: vec![TicketChange {
+                id: "FIN-1".into(),
+                original: Some(ticket.clone()),
+                updated: Some(ticket),
+                kind: ChangeKind::Synced,
+                submitted: None,
+                retry_blocked: false,
+                create_attempt: false,
+                sibling_order: 0,
+            }],
+            selected_ticket_ids: Vec::new(),
+            closed: false,
+            submission_attempt: None,
+        }]);
+        state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+        state.dispatch(ComposerAction::SelectTicket(Some(
+            "FIN-1:attachment:0".into(),
+        )));
+        let content = FileContent::new(Rc::new(RefCell::new(state)), AppService::for_tests());
+
+        assert_eq!(
+            content.text(),
+            "notes.txt\n4 bytes\n\nPress ctrl+enter to open the file."
+        );
+    }
+
+    #[test]
     fn downloaded_image_requests_layout_before_rendering() {
         let attachment = TicketAttachment {
             id: "10000".into(),
             filename: "design.png".into(),
             created: String::new(),
             size: 1,
+            mime_type: Some("image/png".into()),
             content_url: Some("https://jira.example/design.png".into()),
             change: AttachmentChangeKind::Synced,
             local_data: None,
@@ -990,19 +1142,23 @@ mod file_content_tests {
             "FIN-1:attachment:0".into(),
         )));
         let mut content = FileContent::new(Rc::new(RefCell::new(state)), AppService::for_tests());
-        content.content_url = Some("https://jira.example/design.png".into());
+        let key = "remote:10000:https://jira.example/design.png".to_string();
         let (sender, receiver) = mpsc::channel();
         sender
             .send(Ok(Image::from_base64(TEST_PNG).unwrap()))
             .unwrap();
-        content.loading = Some(receiver);
+        content
+            .images
+            .insert(key.clone(), CachedAttachmentImage::Loading(receiver));
 
         let result = content.tick(Duration::ZERO, AnimationSettings::default());
 
-        assert!(content.image.is_some());
+        let Some(CachedAttachmentImage::Ready(image)) = content.images.get(&key) else {
+            panic!("downloaded image should be cached");
+        };
         assert_eq!(
-            content.image.as_ref().map(Image::graphics_protocol),
-            Some(ImageProtocol::Kitty),
+            image.graphics_protocol(),
+            ImageProtocol::Kitty,
             "downloaded Composer previews use direct Kitty placements"
         );
         assert!(
@@ -1016,12 +1172,106 @@ mod file_content_tests {
         content.tick(Duration::ZERO, AnimationSettings::default());
 
         assert!(
-            content.image.is_some(),
+            matches!(
+                content.images.get(&key),
+                Some(CachedAttachmentImage::Ready(_))
+            ),
             "leaving the attachment should keep its image cached"
         );
-        assert_eq!(
-            content.content_url.as_deref(),
-            Some("https://jira.example/design.png")
+    }
+
+    #[test]
+    fn active_change_set_images_start_loading_before_selection() {
+        let png = vec![1, 2, 3];
+        let attachments = vec![
+            TicketAttachment {
+                id: "first".into(),
+                filename: "first.png".into(),
+                created: String::new(),
+                size: png.len() as u64,
+                mime_type: Some("image/png".into()),
+                content_url: None,
+                change: AttachmentChangeKind::Added,
+                local_data: Some(png.clone()),
+            },
+            TicketAttachment {
+                id: "second".into(),
+                filename: "second.jpg".into(),
+                created: String::new(),
+                size: png.len() as u64,
+                mime_type: Some("image/jpeg".into()),
+                content_url: None,
+                change: AttachmentChangeKind::Added,
+                local_data: Some(png),
+            },
+            TicketAttachment {
+                id: "notes".into(),
+                filename: "notes.txt".into(),
+                created: String::new(),
+                size: 4,
+                mime_type: Some("text/plain".into()),
+                content_url: None,
+                change: AttachmentChangeKind::Added,
+                local_data: Some(b"text".to_vec()),
+            },
+        ];
+        let ticket = Ticket {
+            key: "FIN-1".into(),
+            project_key: "FIN".into(),
+            title: "Image ticket".into(),
+            description: String::new(),
+            description_safe_to_overwrite: true,
+            description_overwrite_warning: None,
+            kind: TicketKind::Task,
+            status: "To Do".into(),
+            priority: "Medium".into(),
+            assignee: String::new(),
+            assignee_account_id: String::new(),
+            story_points: None,
+            fix_versions: Vec::new(),
+            labels: Vec::new(),
+            parent_key: None,
+            parent_title: None,
+            parent_kind: None,
+            has_children: false,
+            attachments,
+        };
+        let mut state = ComposerState::from_change_sets(vec![ChangeSet {
+            id: "CS-1".into(),
+            name: "Images".into(),
+            tickets: vec![TicketChange {
+                id: "FIN-1".into(),
+                original: Some(ticket.clone()),
+                updated: Some(ticket),
+                kind: ChangeKind::Synced,
+                submitted: None,
+                retry_blocked: false,
+                create_attempt: false,
+                sibling_order: 0,
+            }],
+            selected_ticket_ids: Vec::new(),
+            closed: false,
+            submission_attempt: None,
+        }]);
+        state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+        state.dispatch(ComposerAction::SelectTicket(Some("FIN-1".into())));
+        let mut content = FileContent::new(Rc::new(RefCell::new(state)), AppService::for_tests());
+
+        assert!(content.sync_cache());
+        assert_eq!(content.images.len(), 2);
+        assert!(
+            content
+                .images
+                .values()
+                .all(|entry| matches!(entry, CachedAttachmentImage::Loading(_)))
         );
+
+        content
+            .state
+            .borrow_mut()
+            .dispatch(ComposerAction::CloseChangeSet);
+
+        assert!(content.sync_cache());
+        assert!(content.images.is_empty());
     }
 }

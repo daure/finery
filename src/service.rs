@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    io::Read,
     process::{Command, Stdio},
     sync::{
         Arc, Mutex, RwLock,
@@ -26,6 +27,7 @@ use crate::{
     store::work_items::{BacklogSnapshot, RankPlan, WorkItem},
 };
 
+pub(crate) mod composer_attachments;
 pub(crate) mod composer_service;
 
 #[cfg(test)]
@@ -70,6 +72,7 @@ pub(crate) struct ComposerSourceTicket {
 
 pub(crate) struct ClipboardImage {
     pub filename: String,
+    pub mime_type: String,
     pub data: Vec<u8>,
 }
 
@@ -887,6 +890,9 @@ impl AppService {
             .as_millis();
         Ok(Some(ClipboardImage {
             filename: format!("clipboard-{timestamp}.{extension}"),
+            mime_type: image_mime_type(&data)
+                .expect("clipboard image extension came from detected image bytes")
+                .into(),
             data,
         }))
     }
@@ -918,23 +924,70 @@ impl AppService {
     }
 
     fn download_jira_attachment(&self, content_url: &str) -> Result<Vec<u8>, String> {
-        let settings = self
-            .settings
-            .read()
-            .map_err(|_| "settings lock is unavailable".to_string())?;
-        let (_, email, token) = settings.configured_jira().ok_or_else(|| {
-            "Jira is not configured; add URL, email, and API token in Settings".to_string()
-        })?;
-        reqwest::blocking::Client::new()
+        self.download_jira_attachment_with_limit(content_url, None)
+    }
+
+    pub(crate) fn download_jira_attachment_limited(
+        &self,
+        content_url: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, String> {
+        self.download_jira_attachment_with_limit(content_url, Some(max_bytes))
+    }
+
+    fn download_jira_attachment_with_limit(
+        &self,
+        content_url: &str,
+        max_bytes: Option<usize>,
+    ) -> Result<Vec<u8>, String> {
+        let (email, token) = {
+            let settings = self
+                .settings
+                .read()
+                .map_err(|_| "settings lock is unavailable".to_string())?;
+            let (_, email, token) = settings.configured_jira().ok_or_else(|| {
+                "Jira is not configured; add URL, email, and API token in Settings".to_string()
+            })?;
+            (email.to_owned(), token.to_owned())
+        };
+        let response = reqwest::blocking::Client::new()
             .get(content_url)
             .basic_auth(email, Some(token))
             .send()
             .map_err(|error| error.to_string())?
             .error_for_status()
-            .map_err(|error| error.to_string())?
-            .bytes()
-            .map(|bytes| bytes.to_vec())
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        let Some(max_bytes) = max_bytes else {
+            return response
+                .bytes()
+                .map(|bytes| bytes.to_vec())
+                .map_err(|error| error.to_string());
+        };
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err(format!(
+                "attachment exceeds the {max_bytes}-byte response limit"
+            ));
+        }
+        let mut data = Vec::with_capacity(
+            response
+                .content_length()
+                .and_then(|length| usize::try_from(length).ok())
+                .unwrap_or_default()
+                .min(max_bytes),
+        );
+        response
+            .take(max_bytes.saturating_add(1) as u64)
+            .read_to_end(&mut data)
+            .map_err(|error| error.to_string())?;
+        if data.len() > max_bytes {
+            return Err(format!(
+                "attachment exceeds the {max_bytes}-byte response limit"
+            ));
+        }
+        Ok(data)
     }
 
     #[cfg(test)]
@@ -1203,6 +1256,19 @@ fn browser_command(url: &str) -> Command {
     }
 }
 
+pub(crate) fn image_mime_type(data: &[u8]) -> Option<&'static str> {
+    match image_extension(data)? {
+        "png" => Some("image/png"),
+        "jpg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "bmp" => Some("image/bmp"),
+        "webp" => Some("image/webp"),
+        "ico" => Some("image/vnd.microsoft.icon"),
+        "avif" => Some("image/avif"),
+        _ => None,
+    }
+}
+
 fn image_extension(data: &[u8]) -> Option<&'static str> {
     if data.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("png")
@@ -1214,6 +1280,16 @@ fn image_extension(data: &[u8]) -> Option<&'static str> {
         Some("bmp")
     } else if data.starts_with(b"RIFF") && data.get(8..12) == Some(b"WEBP") {
         Some("webp")
+    } else if data.starts_with(b"\0\0\x01\0") {
+        Some("ico")
+    } else if data.get(4..8) == Some(b"ftyp")
+        && data
+            .get(8..40)
+            .unwrap_or_else(|| data.get(8..).unwrap_or_default())
+            .chunks_exact(4)
+            .any(|brand| matches!(brand, b"avif" | b"avis"))
+    {
+        Some("avif")
     } else {
         None
     }

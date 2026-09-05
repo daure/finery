@@ -2256,8 +2256,13 @@ fn apply_attachment_changes(
             .local_data
             .clone()
             .ok_or_else(|| format!("Attachment {} has no local file data", attachment.filename))?;
-        let part =
+        let mut part =
             reqwest::blocking::multipart::Part::bytes(data).file_name(attachment.filename.clone());
+        if let Some(mime_type) = attachment.mime_type.as_deref() {
+            part = part
+                .mime_str(mime_type)
+                .map_err(|error| error.to_string())?;
+        }
         let form = reqwest::blocking::multipart::Form::new().part("file", part);
         let response = client
             .post(format!(

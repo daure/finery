@@ -105,9 +105,27 @@ fn applying_attachment_changes_deletes_synced_files_and_uploads_local_files() {
         let mut requests = Vec::new();
         for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0; 8192];
-            let size = stream.read(&mut request).unwrap();
-            requests.push(String::from_utf8_lossy(&request[..size]).into_owned());
+            stream
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 8192];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(size) => request.extend_from_slice(&chunk[..size]),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(error) => panic!("could not read attachment request: {error}"),
+                }
+            }
+            requests.push(String::from_utf8_lossy(&request).into_owned());
             write!(
                 stream,
                 "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -123,6 +141,7 @@ fn applying_attachment_changes_deletes_synced_files_and_uploads_local_files() {
             filename: "old.png".into(),
             created: String::new(),
             size: 3,
+            mime_type: Some("image/png".into()),
             content_url: None,
             change: AttachmentChangeKind::Deleted,
             local_data: None,
@@ -132,6 +151,7 @@ fn applying_attachment_changes_deletes_synced_files_and_uploads_local_files() {
             filename: "new.png".into(),
             created: String::new(),
             size: 3,
+            mime_type: Some("image/png".into()),
             content_url: None,
             change: AttachmentChangeKind::Added,
             local_data: Some(vec![1, 2, 3]),
@@ -153,6 +173,11 @@ fn applying_attachment_changes_deletes_synced_files_and_uploads_local_files() {
     assert!(requests[1].starts_with("POST /rest/api/3/issue/FIN-1/attachments HTTP/1.1"));
     assert!(requests[1].contains("x-atlassian-token: no-check"));
     assert!(requests[1].contains("filename=\"new.png\""));
+    assert!(
+        requests[1]
+            .to_ascii_lowercase()
+            .contains("content-type: image/png")
+    );
 }
 
 #[test]
@@ -650,6 +675,7 @@ fn jira_ticket_maps_attachment_metadata() {
                 "filename": "image-20260904-161404.png",
                 "created": "2026-09-04T16:14:04.000+0000",
                 "size": 21_504,
+                "mimeType": "image/png",
                 "content": "https://jira.example/attachment/image.png"
             }]
         }),
@@ -662,6 +688,10 @@ fn jira_ticket_maps_attachment_metadata() {
         "2026-09-04T16:14:04.000+0000"
     );
     assert_eq!(ticket.attachments[0].size, 21_504);
+    assert_eq!(
+        ticket.attachments[0].mime_type.as_deref(),
+        Some("image/png")
+    );
     assert_eq!(
         ticket.attachments[0].content_url.as_deref(),
         Some("https://jira.example/attachment/image.png")

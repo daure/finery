@@ -3,10 +3,11 @@ use std::{
     net::SocketAddr,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rmcp::{
-    Json, ServerHandler, ServiceExt,
+    ErrorData, Json, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{ServerCapabilities, ServerInfo},
+    model::{CallToolResult, Content, ResourceContents, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::{StreamableHttpServerConfig, StreamableHttpService, stdio},
 };
@@ -16,6 +17,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     service::{
         AppService,
+        composer_attachments::{
+            ATTACHMENT_BYTES_LIMIT, AttachmentRequest, AttachmentSource, TicketSnapshotView,
+        },
         composer_service::{
             ChangeSetCatalogView, ChangeSetMutationResponse, ChangeSetPatchOperation,
             ChangeSetPatchResponse, ChangeSetView, ComposerService, DeleteChangeSetResponse,
@@ -25,12 +29,13 @@ use crate::{
     store::work_items::{BacklogSnapshot, RankPlan, RunwayCapacitySource, WorkItem, rank_plan},
 };
 
-const MCP_INSTRUCTIONS: &str = "Read Composer change sets and Jira backlog order. Before mutating an existing change set, reread it and send its current revision as expected_revision. Call get_change_set_guidance before reading or writing a Composer ticket description. Call lookup_jira_user before creating an @mention unless the account ID is already known. Use lookup_jira_label to discover existing Jira labels and lookup_jira_fix_version to discover project fix versions. create_change_set, apply_change_set_patch, and delete_change_set persist local edits only; delete_change_set never deletes Jira tickets. Before Jira reordering, state the exact move and get explicit user confirmation; reread the workspace afterward. submit_change_set is the only Composer Jira submission path, requires explicit ticket IDs, and may set updateTitle to rename the change set as part of submission. Submitted tickets cannot be changed or resubmitted. If a description cannot round-trip safely, state the identified formatting risk and get explicit user confirmation before setting accept_unsafe_description_overwrite. Recover marked draft creates with a confirmed Jira key, or explicitly mark them absent only after verifying they did not reach Jira; never retry ambiguous creates.";
+const MCP_INSTRUCTIONS: &str = "Read Composer change sets and Jira backlog order. Ticket snapshots include attachment metadata; call get_change_set_attachments with the current revision to inspect one or more files. Add attachments from a local file path or an http(s) URL through apply_change_set_patch; Finery stores the loaded bytes locally, and those changes remain local until submission. Remove attachments through apply_change_set_patch. Before mutating an existing change set, reread it and send its current revision as expected_revision. Call get_change_set_guidance before reading or writing a Composer ticket description. Call lookup_jira_user before creating an @mention unless the account ID is already known. Use lookup_jira_label to discover existing Jira labels and lookup_jira_fix_version to discover project fix versions. create_change_set, apply_change_set_patch, and delete_change_set persist local edits only; delete_change_set never deletes Jira tickets. Before Jira reordering, state the exact move and get explicit user confirmation; reread the workspace afterward. submit_change_set is the only Composer Jira submission path, requires explicit ticket IDs, and may set updateTitle to rename the change set as part of submission. Submitted tickets cannot be changed or resubmitted. If a description cannot round-trip safely, state the identified formatting risk and get explicit user confirmation before setting accept_unsafe_description_overwrite. Recover marked draft creates with a confirmed Jira key, or explicitly mark them absent only after verifying they did not reach Jira; never retry ambiguous creates.";
 // Agent-facing description contract. Any Jira ADF conversion, supported tag, validation, or
 // overwrite-safety change MUST update this guidance so MCP agents receive accurate instructions.
 const CHANGE_SET_GUIDANCE: &str = "Composer descriptions are Markdown transformed to and from Jira ADF. This is reference documentation, not a recommendation to add rich formatting. The syntax preserves Jira-specific source content when it is present.\n\nAvailable syntax: normal Markdown, nested ordered/bullet lists, basic tables (one header row; one paragraph per cell), underline (++text++), text colour ({color:#RRGGBB}text{/color}), emoji (:short_name:), UTC dates (@date(YYYY-MM-DD)), statuses (@status(\"Text\", color)), mentions (@mention(\"@Name\", \"ACCOUNT_ID\")), and cards (@card(https://example.com)). Jira background highlights are rejected because they break Jira's native editor. Status colors: green, blue, red, yellow, neutral, purple.\n\nJira blocks:\n- Panel: {{jira:panel {\"panelType\":\"info\"}}} … {{/jira:panel}}\n- Task list: {{jira:task-list}} with - [ ] or - [x] items … {{/jira:task-list}}\n- Decision list: {{jira:decision-list}} with plain - item entries … {{/jira:decision-list}}\n\nEscape literal {{ as \\{\\{ and any literal canonical inline opening with a leading backslash. Emoji syntax needs both colons, and content in inline code spans is literal. Old {{jira:mention ... /}} and {{jira:inline-card ... /}} forms are rejected. A patch with malformed Jira syntax is rejected atomically; malformed syntax also blocks a selected submission before Jira writes. For an unsafe existing Jira description, describe the formatting risk and get explicit approval before accept_unsafe_description_overwrite.";
 const WORKSPACE_UNPLANNED_TICKET_LIMIT: usize = 50;
 const WORKSPACE_VELOCITY_SPRINT_LIMIT: usize = 10;
+const ATTACHMENT_BATCH_BYTES_LIMIT: usize = 20 * 1024 * 1024;
 
 #[derive(Clone)]
 struct McpServer {
@@ -54,6 +59,20 @@ impl McpServer {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ChangeSetId {
     change_set_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListChangeSets {
+    #[serde(default)]
+    include_closed: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GetChangeSetAttachments {
+    change_set_id: String,
+    expected_revision: i64,
+    #[schemars(length(min = 1))]
+    attachments: Vec<AttachmentRequest>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -287,6 +306,7 @@ struct WorkspaceChangeSetView {
     id: String,
     name: String,
     revision: i64,
+    has_attachments: bool,
 }
 
 fn mcp_error(error: ServiceError) -> String {
@@ -333,13 +353,143 @@ where
         .map_err(mcp_error)
 }
 
+fn attachment_contents(
+    service: &AppService,
+    input: GetChangeSetAttachments,
+) -> Result<Vec<Content>, String> {
+    if input.attachments.is_empty() {
+        return Err("invalid_operation: request at least one attachment".into());
+    }
+    let resolved = service
+        .composer_service()
+        .attachment_sources(
+            &input.change_set_id,
+            input.expected_revision,
+            &input.attachments,
+        )
+        .map_err(mcp_error)?;
+    let mut content = Vec::with_capacity(resolved.len() * 2);
+    let mut total_bytes = 0usize;
+    for resolution in resolved {
+        let attachment = match resolution {
+            Ok(attachment) => attachment,
+            Err(error) => {
+                content.push(Content::text(format!("Attachment error: {error}")));
+                continue;
+            }
+        };
+        let remaining = ATTACHMENT_BATCH_BYTES_LIMIT.saturating_sub(total_bytes);
+        let max_bytes = ATTACHMENT_BYTES_LIMIT.min(remaining);
+        let bytes = match attachment.source {
+            AttachmentSource::Local(bytes) if bytes.len() <= max_bytes => Ok(bytes),
+            AttachmentSource::Local(bytes) => Err(format!(
+                "attachment exceeds the {max_bytes}-byte remaining response limit ({} bytes)",
+                bytes.len()
+            )),
+            AttachmentSource::Jira(url) if max_bytes > 0 => service
+                .download_jira_attachment_limited(&url, max_bytes)
+                .map_err(|_| "could not download Jira attachment within response limits".into()),
+            AttachmentSource::Jira(_) => {
+                Err("attachment exceeds the remaining batch response limit".into())
+            }
+        };
+        let bytes = match bytes {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                content.push(Content::text(attachment_result_label(
+                    &attachment.request,
+                    &attachment.filename,
+                    attachment.mime_type.as_deref(),
+                    Some(&error),
+                )));
+                continue;
+            }
+        };
+        total_bytes += bytes.len();
+        content.push(Content::text(attachment_result_label(
+            &attachment.request,
+            &attachment.filename,
+            attachment.mime_type.as_deref(),
+            None,
+        )));
+        let uri = format!("finery://attachment/{}", attachment.request.attachment_id);
+        if let Some(mime_type) = crate::service::image_mime_type(&bytes) {
+            content.push(Content::image(BASE64_STANDARD.encode(bytes), mime_type));
+        } else {
+            let mime_type = attachment
+                .mime_type
+                .unwrap_or_else(|| "application/octet-stream".into());
+            content.push(attachment_resource(bytes, uri, mime_type));
+        }
+    }
+    Ok(content)
+}
+
+fn attachment_result_label(
+    request: &AttachmentRequest,
+    filename: &str,
+    mime_type: Option<&str>,
+    error: Option<&str>,
+) -> String {
+    let snapshot = match request.snapshot {
+        TicketSnapshotView::Original => "original",
+        TicketSnapshotView::Updated => "updated",
+    };
+    let mut metadata = serde_json::json!({
+        "ticket_id": request.ticket_id,
+        "snapshot": snapshot,
+        "attachment_id": request.attachment_id,
+        "filename": filename,
+        "mime_type": mime_type,
+    });
+    if let Some(error) = error {
+        metadata["error"] = error.into();
+        format!("Attachment error: {metadata}")
+    } else {
+        format!("Attachment: {metadata}")
+    }
+}
+
+fn attachment_resource(bytes: Vec<u8>, uri: String, mime_type: String) -> Content {
+    let base_mime_type = mime_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let textual = base_mime_type.starts_with("text/")
+        || matches!(
+            base_mime_type.as_str(),
+            "application/json"
+                | "application/ld+json"
+                | "application/xml"
+                | "application/javascript"
+                | "application/x-yaml"
+                | "application/yaml"
+        );
+    if textual && let Ok(text) = String::from_utf8(bytes.clone()) {
+        return Content::resource(ResourceContents::TextResourceContents {
+            uri,
+            mime_type: Some(mime_type),
+            text,
+            meta: None,
+        });
+    }
+    Content::resource(ResourceContents::BlobResourceContents {
+        uri,
+        mime_type: Some(mime_type),
+        blob: BASE64_STANDARD.encode(bytes),
+        meta: None,
+    })
+}
+
 async fn run_workspace(service: AppService) -> Result<WorkspaceView, String> {
     tokio::task::spawn_blocking(move || {
         let composer = service.composer_service();
         let backlog = service
             .with_jira_reorder(|service| service.jira_backlog_while_reorder_locked())
             .map_err(|error| format!("jira_backlog_failed: {error}"))?;
-        let change_sets = composer.change_set_catalog().map_err(mcp_error)?;
+        let change_sets = composer.change_set_catalog(true).map_err(mcp_error)?;
         workspace_view(backlog, change_sets)
     })
     .await
@@ -366,7 +516,7 @@ fn workspace_with_backlog(
     backlog: BacklogSnapshot,
 ) -> Result<WorkspaceView, String> {
     let composer = service.composer_service();
-    let change_sets = composer.change_set_catalog().map_err(mcp_error)?;
+    let change_sets = composer.change_set_catalog(true).map_err(mcp_error)?;
     workspace_view(backlog, change_sets)
 }
 
@@ -741,12 +891,13 @@ fn workspace_points_source(
 }
 
 fn workspace_change_set_view(
-    change_set: Versioned<crate::service::composer_service::ChangeSetView>,
+    change_set: Versioned<crate::service::composer_service::ChangeSetCatalogChangeSetView>,
 ) -> WorkspaceChangeSetView {
     WorkspaceChangeSetView {
         id: change_set.value.id,
         name: change_set.value.name,
         revision: change_set.revision,
+        has_attachments: change_set.value.has_attachments,
     }
 }
 
@@ -887,10 +1038,15 @@ impl McpServer {
         .map(Json)
     }
 
-    #[tool(description = "List Composer change sets with revisioned canonical data")]
-    async fn list_change_sets(&self) -> Result<Json<Versioned<ChangeSetCatalogView>>, String> {
-        run_composer(self.service.composer_service(), |service| {
-            service.change_set_catalog()
+    #[tool(
+        description = "List open Composer change sets with revisioned canonical data. Set include_closed to true to include closed change sets."
+    )]
+    async fn list_change_sets(
+        &self,
+        Parameters(input): Parameters<ListChangeSets>,
+    ) -> Result<Json<Versioned<ChangeSetCatalogView>>, String> {
+        run_composer(self.service.composer_service(), move |service| {
+            service.change_set_catalog(input.include_closed)
         })
         .await
         .map(Json)
@@ -906,6 +1062,23 @@ impl McpServer {
         })
         .await
         .map(Json)
+    }
+
+    #[tool(
+        description = "Return one or more Composer attachments, limited to 5 MiB per file and 20 MiB per response. Images use native MCP image blocks, UTF-8 text uses text resources, and other files use blob resources. Read the change set first, then identify each file by ticket ID, original or updated snapshot, and attachment ID, and send the current revision as expected_revision. Local staged files use their stored bytes; Jira files are downloaded with Finery's configured authentication. Individual failures do not suppress successful attachments."
+    )]
+    async fn get_change_set_attachments(
+        &self,
+        Parameters(input): Parameters<GetChangeSetAttachments>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let service = self.service.clone();
+        let result = tokio::task::spawn_blocking(move || attachment_contents(&service, input))
+            .await
+            .map_err(|_| ErrorData::internal_error("attachment task failed", None))?;
+        Ok(match result {
+            Ok(content) => CallToolResult::success(content),
+            Err(error) => CallToolResult::error(vec![Content::text(error)]),
+        })
     }
 
     #[tool(
@@ -937,7 +1110,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Apply a nonempty ordered local patch atomically. This persists once and never submits Jira."
+        description = "Apply a nonempty ordered local patch atomically. Attachment additions load up to 5 MiB from a local file path or an http(s) URL and store the bytes in the change set; optional filenames and MIME types default from the source where possible. Image signatures and filename extensions are validated. Removing a local addition drops it, while removing a synced attachment stages its Jira deletion. This persists once and never submits Jira."
     )]
     async fn apply_change_set_patch(
         &self,

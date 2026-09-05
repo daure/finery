@@ -60,6 +60,8 @@ pub(crate) struct TicketAttachment {
     pub created: String,
     pub size: u64,
     #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
     pub content_url: Option<String>,
     #[serde(default)]
     pub change: AttachmentChangeKind,
@@ -316,6 +318,7 @@ pub(crate) enum ComposerAction {
     },
     AddAttachment {
         filename: String,
+        mime_type: Option<String>,
         data: Vec<u8>,
     },
     RenameSelectedAttachment(String),
@@ -988,7 +991,11 @@ impl ComposerState {
                 ticket.assignee = name;
                 ticket.assignee_account_id = account_id;
             }),
-            ComposerAction::AddAttachment { filename, data } => self.add_attachment(filename, data),
+            ComposerAction::AddAttachment {
+                filename,
+                mime_type,
+                data,
+            } => self.add_attachment(filename, mime_type, data),
             ComposerAction::RenameSelectedAttachment(filename) => {
                 if !filename.trim().is_empty() {
                     self.edit_selected_attachment(|attachment| {
@@ -1602,7 +1609,7 @@ impl ComposerState {
         Some((ticket_id.to_owned(), index.parse().ok()?))
     }
 
-    fn add_attachment(&mut self, filename: String, data: Vec<u8>) {
+    fn add_attachment(&mut self, filename: String, mime_type: Option<String>, data: Vec<u8>) {
         let selected = self.selected_ticket.clone();
         let ticket_id = selected
             .as_deref()
@@ -1620,6 +1627,7 @@ impl ComposerState {
                 filename,
                 created: String::new(),
                 size,
+                mime_type,
                 content_url: None,
                 change: AttachmentChangeKind::Added,
                 local_data: Some(data),
@@ -2084,6 +2092,10 @@ impl ComposerAction {
                 | Self::UpdateFixVersions(_)
                 | Self::UpdateLabels(_)
                 | Self::UpdateAssignee { .. }
+                | Self::RenameSelectedAttachment(_)
+                | Self::DeleteSelectedAttachment
+                | Self::RestoreSelectedAttachment
+                | Self::RemoveSelectedAttachment
                 | Self::SetSelectedTickets(_)
         )
     }
@@ -2112,6 +2124,10 @@ impl ComposerAction {
                 | Self::UpdateFixVersions(_)
                 | Self::UpdateLabels(_)
                 | Self::UpdateAssignee { .. }
+                | Self::RenameSelectedAttachment(_)
+                | Self::DeleteSelectedAttachment
+                | Self::RestoreSelectedAttachment
+                | Self::RemoveSelectedAttachment
                 | Self::BlockTicketRetry { .. }
                 | Self::MarkCreateAttempts { .. }
                 | Self::ResolveCreateAttempt { .. }

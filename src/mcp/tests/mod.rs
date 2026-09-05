@@ -1,17 +1,28 @@
-use std::sync::Arc;
+use std::{io::Write, net::TcpListener, sync::Arc, thread};
+
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use rmcp::model::ResourceContents;
 
 use crate::{
     mcp::{
-        CHANGE_SET_GUIDANCE, JiraPosition, JiraSection, final_order, issue_sections,
-        placement_rank_plan, run_composer, section_order, validate_issue_keys,
-        workspace_capacity_guidance_view, workspace_view,
+        CHANGE_SET_GUIDANCE, GetChangeSetAttachments, JiraPosition, JiraSection,
+        attachment_contents, final_order, issue_sections, placement_rank_plan, run_composer,
+        section_order, validate_issue_keys, workspace_capacity_guidance_view, workspace_view,
     },
-    service::composer_service::{
-        ChangeSetCatalogView, ChangeSetView, JiraTicketLookup, Versioned, test_service,
+    service::{
+        AppService,
+        composer_attachments::{AttachmentRequest, TicketSnapshotView},
+        composer_service::{
+            ChangeSetCatalogChangeSetView, ChangeSetCatalogView, JiraTicketLookup, Versioned,
+            test_service,
+        },
     },
     storage::Storage,
     store::{
-        composer::Ticket,
+        composer::{
+            AttachmentChangeKind, ChangeKind, ChangeSet, Ticket, TicketAttachment, TicketChange,
+            TicketKind,
+        },
         work_items::{
             BacklogRunway, BacklogSnapshot, RunwayCapacitySource, RunwayTicket, Sprint,
             VelocityReport, VelocitySprint, WorkItem,
@@ -31,10 +42,212 @@ fn composer_calls_complete_from_async_runtime() {
     let result = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(run_composer(service, |service| {
-            service.change_set_catalog()
+            service.change_set_catalog(true)
         }));
 
     assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn attachment_calls_return_images_text_blobs_and_partial_errors() {
+    let remote_image = b"\xff\xd8\xffremote".to_vec();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            remote_image.len()
+        );
+        stream.write_all(header.as_bytes()).unwrap();
+        stream.write_all(&remote_image).unwrap();
+    });
+    let service = AppService::for_tests();
+    {
+        let settings = service.settings();
+        let mut settings = settings.write().unwrap();
+        settings.jira_base_url = format!("http://{address}");
+        settings.jira_email = "agent@example.com".into();
+        settings.jira_api_token = "token".into();
+    }
+    let local_image = b"\x89PNG\r\n\x1a\nlocal".to_vec();
+    let ticket = Ticket {
+        key: "FIN-1".into(),
+        project_key: "FIN".into(),
+        title: "Images".into(),
+        description: String::new(),
+        description_safe_to_overwrite: true,
+        description_overwrite_warning: None,
+        kind: TicketKind::Task,
+        status: "To Do".into(),
+        priority: "Medium".into(),
+        assignee: "Unassigned".into(),
+        assignee_account_id: String::new(),
+        story_points: None,
+        fix_versions: Vec::new(),
+        labels: Vec::new(),
+        parent_key: None,
+        parent_title: None,
+        parent_kind: None,
+        has_children: false,
+        attachments: vec![
+            TicketAttachment {
+                id: "local-1".into(),
+                filename: "local.png".into(),
+                created: String::new(),
+                size: local_image.len() as u64,
+                mime_type: Some("image/png".into()),
+                content_url: None,
+                change: AttachmentChangeKind::Added,
+                local_data: Some(local_image.clone()),
+            },
+            TicketAttachment {
+                id: "jira-1".into(),
+                filename: "remote.jpg".into(),
+                created: String::new(),
+                size: 11,
+                mime_type: Some("image/jpeg".into()),
+                content_url: Some(format!("http://{address}/remote.jpg")),
+                change: AttachmentChangeKind::Synced,
+                local_data: None,
+            },
+            TicketAttachment {
+                id: "text-1".into(),
+                filename: "notes.txt".into(),
+                created: String::new(),
+                size: 5,
+                mime_type: Some("text/plain".into()),
+                content_url: None,
+                change: AttachmentChangeKind::Added,
+                local_data: Some(b"hello".to_vec()),
+            },
+            TicketAttachment {
+                id: "pdf-1".into(),
+                filename: "report.pdf".into(),
+                created: String::new(),
+                size: 8,
+                mime_type: Some("application/pdf".into()),
+                content_url: None,
+                change: AttachmentChangeKind::Added,
+                local_data: Some(b"%PDF-1.7".to_vec()),
+            },
+        ],
+    };
+    service.save_change_set(ChangeSet {
+        id: "CS-images".into(),
+        name: "Images".into(),
+        tickets: vec![TicketChange {
+            id: "FIN-1".into(),
+            original: Some(ticket),
+            updated: None,
+            kind: ChangeKind::Synced,
+            submitted: None,
+            retry_blocked: false,
+            create_attempt: false,
+            sibling_order: 0,
+        }],
+        selected_ticket_ids: Vec::new(),
+        closed: false,
+        submission_attempt: None,
+    });
+    service.flush().unwrap();
+
+    let content = attachment_contents(
+        &service,
+        GetChangeSetAttachments {
+            change_set_id: "CS-images".into(),
+            expected_revision: 1,
+            attachments: vec![
+                AttachmentRequest {
+                    ticket_id: "FIN-1".into(),
+                    snapshot: TicketSnapshotView::Original,
+                    attachment_id: "local-1".into(),
+                },
+                AttachmentRequest {
+                    ticket_id: "FIN-1".into(),
+                    snapshot: TicketSnapshotView::Original,
+                    attachment_id: "text-1".into(),
+                },
+                AttachmentRequest {
+                    ticket_id: "FIN-1".into(),
+                    snapshot: TicketSnapshotView::Original,
+                    attachment_id: "pdf-1".into(),
+                },
+                AttachmentRequest {
+                    ticket_id: "FIN-1".into(),
+                    snapshot: TicketSnapshotView::Original,
+                    attachment_id: "jira-1".into(),
+                },
+                AttachmentRequest {
+                    ticket_id: "FIN-1".into(),
+                    snapshot: TicketSnapshotView::Original,
+                    attachment_id: "local-1".into(),
+                },
+                AttachmentRequest {
+                    ticket_id: "FIN-1".into(),
+                    snapshot: TicketSnapshotView::Original,
+                    attachment_id: "local-1".into(),
+                },
+                AttachmentRequest {
+                    ticket_id: "FIN-1".into(),
+                    snapshot: TicketSnapshotView::Original,
+                    attachment_id: "local-1".into(),
+                },
+                AttachmentRequest {
+                    ticket_id: "FIN-1".into(),
+                    snapshot: TicketSnapshotView::Original,
+                    attachment_id: "missing".into(),
+                },
+            ],
+        },
+    )
+    .unwrap();
+    server.join().unwrap();
+
+    let images = content
+        .iter()
+        .filter_map(|content| content.as_image())
+        .collect::<Vec<_>>();
+    assert_eq!(images.len(), 5);
+    assert_eq!(images[0].mime_type, "image/png");
+    assert_eq!(images[0].data, BASE64_STANDARD.encode(local_image));
+    assert_eq!(images[1].mime_type, "image/jpeg");
+    let resources = content
+        .iter()
+        .filter_map(|content| content.as_resource())
+        .collect::<Vec<_>>();
+    assert_eq!(resources.len(), 2);
+    assert!(matches!(
+        &resources[0].resource,
+        ResourceContents::TextResourceContents { mime_type, text, .. }
+            if mime_type.as_deref() == Some("text/plain") && text == "hello"
+    ));
+    assert!(matches!(
+        &resources[1].resource,
+        ResourceContents::BlobResourceContents { mime_type, blob, .. }
+            if mime_type.as_deref() == Some("application/pdf")
+                && blob == &BASE64_STANDARD.encode(b"%PDF-1.7")
+    ));
+    assert!(content.iter().any(|content| {
+        content
+            .as_text()
+            .is_some_and(|text| text.text.contains("attachment not found"))
+    }));
+
+    let stale = attachment_contents(
+        &service,
+        GetChangeSetAttachments {
+            change_set_id: "CS-images".into(),
+            expected_revision: 2,
+            attachments: vec![AttachmentRequest {
+                ticket_id: "FIN-1".into(),
+                snapshot: TicketSnapshotView::Original,
+                attachment_id: "local-1".into(),
+            }],
+        },
+    )
+    .unwrap_err();
+    assert!(stale.starts_with("stale_revision:"));
 }
 
 #[test]
@@ -69,19 +282,21 @@ fn work_item(index: usize) -> WorkItem {
 
 #[test]
 fn workspace_compacts_backlog_and_change_set_payloads() {
-    let open = ChangeSetView {
+    let open = ChangeSetCatalogChangeSetView {
         id: "CS-open".into(),
         name: "Open".into(),
         closed: false,
         selected_ticket_ids: Vec::new(),
         tickets: Vec::new(),
+        has_attachments: true,
     };
-    let closed = ChangeSetView {
+    let closed = ChangeSetCatalogChangeSetView {
         id: "CS-closed".into(),
         name: "Closed".into(),
         closed: true,
         selected_ticket_ids: Vec::new(),
         tickets: Vec::new(),
+        has_attachments: false,
     };
     let mut sprint_tickets = (0..51).map(work_item).collect::<Vec<_>>();
     sprint_tickets[0].done = true;
@@ -213,6 +428,7 @@ fn workspace_compacts_backlog_and_change_set_payloads() {
     assert_eq!(view.change_sets.len(), 1);
     assert_eq!(view.change_sets[0].id, "CS-open");
     assert_eq!(view.change_sets[0].revision, 2);
+    assert!(view.change_sets[0].has_attachments);
 
     let json = serde_json::to_value(view).unwrap();
     assert!(json.get("change_set_catalog_revision").is_none());
