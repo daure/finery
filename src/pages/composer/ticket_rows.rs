@@ -119,6 +119,12 @@ pub(super) fn ticket_rows(state: &ComposerState) -> Vec<TicketRow> {
                     .iter()
                     .cloned()
                     .enumerate()
+                    .filter(|(_, attachment)| {
+                        !row.mermaid_diagrams.iter().any(|diagram| {
+                            diagram.published_attachment_id.as_deref()
+                                == Some(attachment.id.as_str())
+                        })
+                    })
                     .map(|(index, attachment)| TicketRow::attachment_child(&row, attachment, index))
                     .collect::<Vec<_>>();
                 attachment_rows.extend(row.mermaid_diagrams.iter().cloned().enumerate().map(
@@ -279,6 +285,7 @@ fn ticket_columns(number_jump: Rc<RefCell<TicketNumberJump>>) -> Vec<Column<Tick
                         &attachment.created,
                         attachment.size,
                         context.highlighted,
+                        row.item.submitted,
                     );
                 }
                 if let Some(diagram) = row.mermaid_diagram.as_ref() {
@@ -286,6 +293,8 @@ fn ticket_columns(number_jump: Rc<RefCell<TicketNumberJump>>) -> Vec<Column<Tick
                         &diagram.title,
                         &diagram.diagram_type,
                         context.highlighted,
+                        row.item.submitted,
+                        diagram.published_attachment_id.is_some(),
                     );
                 }
                 ticket_summary_text(
@@ -335,7 +344,7 @@ impl TicketRow {
                 story_points_estimated: false,
                 story_points_from_average: false,
                 change_badge: None,
-                submitted: false,
+                submitted: parent.item.submitted,
             },
             parent_id: Some(parent.item.id.clone()),
             depth: 0,
@@ -371,7 +380,7 @@ impl TicketRow {
                 story_points_estimated: false,
                 story_points_from_average: false,
                 change_badge: None,
-                submitted: false,
+                submitted: parent.item.submitted,
             },
             parent_id: Some(parent.item.id.clone()),
             depth: 0,

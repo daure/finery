@@ -15,10 +15,25 @@ fn ticket_menu_height_cap_uses_sixty_percent_of_the_viewport() {
 fn mermaid_rows_capitalize_the_diagram_type() {
     tuicore::init();
 
-    let text = mermaid_diagram_summary_text("Lifecycle", "state", false);
+    let text = mermaid_diagram_summary_text("Lifecycle", "state", false, false, false);
 
     assert_eq!(text.lines[0].spans[2].content, " ");
     assert_eq!(text.lines[0].spans.last().unwrap().content, "State");
+}
+
+#[test]
+fn published_mermaid_rows_show_the_published_state() {
+    tuicore::init();
+
+    let text = mermaid_diagram_summary_text("Lifecycle", "state", false, true, true);
+
+    assert_eq!(text.lines[0].spans.last().unwrap().content, " • published");
+    assert!(
+        text.lines[0]
+            .spans
+            .iter()
+            .all(|span| span.style.fg == Some(tuicore::theme().muted_fg()))
+    );
 }
 
 #[test]
@@ -240,6 +255,7 @@ fn attachment_rows_show_filename_date_and_size() {
         "2026-09-04T16:14:04.000+0000",
         21_504,
         false,
+        false,
     );
     let rendered = text.lines[0]
         .spans
@@ -263,6 +279,7 @@ fn highlighted_attachment_rows_use_the_selected_foreground() {
         "2026-09-04T16:14:04.000+0000",
         21_504,
         true,
+        false,
     );
 
     assert!(

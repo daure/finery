@@ -32,8 +32,8 @@ use crate::{
     service::{AppService, composer_service::ChangeSetPatchOperation},
     store::composer::{
         AttachmentChangeKind, ChangeKind, ChangeSet, ComposerAction, ComposerState,
-        ComposerViewMode, PlacementTarget, SubmissionSnapshot, Ticket, TicketAttachment,
-        TicketChange, TicketKind, TicketPresentation,
+        ComposerViewMode, MermaidDiagram, PlacementTarget, SubmissionSnapshot, Ticket,
+        TicketAttachment, TicketChange, TicketKind, TicketPresentation,
     },
     store::work_items::{SubtaskProgress, WorkItem},
 };
@@ -111,7 +111,7 @@ fn sharing_one_story_ticket_omits_the_change_set_and_story() {
 
     assert_eq!(
         text,
-        "[T] Ticket title - https://jira.example/browse/FIN-101"
+        "[T] (Modified) Ticket title - https://jira.example/browse/FIN-101"
     );
 }
 
@@ -144,7 +144,7 @@ fn sharing_multiple_story_tickets_keeps_the_story_heading() {
 
     assert_eq!(
         text,
-        "[S] Story title - https://jira.example/browse/FIN-100\n├─ [T] First ticket - https://jira.example/browse/FIN-101\n└─ [T] Second ticket - https://jira.example/browse/FIN-102"
+        "[S] (Modified) Story title - https://jira.example/browse/FIN-100\n├─ [T] (Modified) First ticket - https://jira.example/browse/FIN-101\n└─ [T] (Modified) Second ticket - https://jira.example/browse/FIN-102"
     );
 }
 
@@ -175,7 +175,7 @@ fn sharing_omits_subtasks_when_a_non_subtask_changed() {
 
     assert_eq!(
         text,
-        "[T] Ticket title - https://jira.example/browse/FIN-101"
+        "[T] (Modified) Ticket title - https://jira.example/browse/FIN-101"
     );
 }
 
@@ -205,7 +205,7 @@ fn sharing_multiple_story_groups_includes_the_change_set_name_and_markers() {
 
     assert_eq!(
         text,
-        "Change set name\n[T] Its ticket - https://jira.example/browse/FIN-101\n[B] Second bug - https://jira.example/browse/FIN-200"
+        "Change set name\n[T] (Modified) Its ticket - https://jira.example/browse/FIN-101\n[B] (Modified) Second bug - https://jira.example/browse/FIN-200"
     );
 }
 
@@ -234,7 +234,38 @@ fn sharing_only_subtasks_keeps_them_and_uses_the_subtask_marker() {
 
     assert_eq!(
         text,
-        "[ST] Subtask title - https://jira.example/browse/FIN-102"
+        "[ST] (Modified) Subtask title - https://jira.example/browse/FIN-102"
+    );
+}
+
+#[test]
+fn sharing_includes_each_ticket_change_type() {
+    let mut added = share_change(
+        "added",
+        share_ticket("FIN-100", "Added ticket", TicketKind::Task, None),
+    );
+    added.kind = ChangeKind::Added;
+    let mut deleted = share_change(
+        "deleted",
+        share_ticket("FIN-101", "Deleted ticket", TicketKind::Task, None),
+    );
+    deleted.kind = ChangeKind::Deleted;
+
+    let text = change_set_share_text(
+        &share_set(vec![
+            added,
+            share_change(
+                "modified",
+                share_ticket("FIN-102", "Modified ticket", TicketKind::Task, None),
+            ),
+            deleted,
+        ]),
+        Some("https://jira.example"),
+    );
+
+    assert_eq!(
+        text,
+        "Change set name\n[T] (Added) Added ticket - https://jira.example/browse/FIN-100\n[T] (Deleted) Deleted ticket - https://jira.example/browse/FIN-101\n[T] (Modified) Modified ticket - https://jira.example/browse/FIN-102"
     );
 }
 
@@ -2845,6 +2876,65 @@ fn attachments_are_tree_children_before_ticket_children() {
         .collect::<String>();
 
     assert!(!text.contains("󱋭"));
+}
+
+#[test]
+fn submitted_diagram_hides_its_generated_attachment_and_locks_artifact_rows() {
+    let mut ticket = share_ticket("FIN-1", "Parent", TicketKind::Task, None);
+    ticket.attachments = vec![
+        TicketAttachment {
+            id: "generated-1".into(),
+            filename: "lifecycle.png".into(),
+            created: String::new(),
+            size: 12,
+            mime_type: Some("image/png".into()),
+            content_url: None,
+            change: AttachmentChangeKind::Synced,
+            local_data: None,
+        },
+        TicketAttachment {
+            id: "evidence-1".into(),
+            filename: "evidence.png".into(),
+            created: String::new(),
+            size: 18,
+            mime_type: Some("image/png".into()),
+            content_url: None,
+            change: AttachmentChangeKind::Synced,
+            local_data: None,
+        },
+    ];
+    ticket.mermaid_diagrams.push(MermaidDiagram {
+        id: "diagram-1".into(),
+        title: "Lifecycle".into(),
+        diagram_type: "state".into(),
+        markup: "stateDiagram-v2".into(),
+        rendered_png: Vec::new(),
+        rendered_theme: String::new(),
+        published_attachment_id: Some("generated-1".into()),
+    });
+    let mut change = share_change("FIN-1", ticket);
+    change.submitted = Some(SubmissionSnapshot {
+        original: None,
+        updated: change.updated.clone(),
+    });
+    let mut state = ComposerState::from_change_sets(vec![share_set(vec![change])]);
+    state.dispatch(ComposerAction::OpenChangeSet("CS-12".into()));
+
+    let rows = ticket_rows(&state);
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["FIN-1", "FIN-1:attachment:1", "FIN-1:diagram:0"]
+    );
+    assert!(rows.iter().skip(1).all(|row| row.item.submitted));
+
+    state.dispatch(ComposerAction::SelectTicket(Some(
+        "FIN-1:attachment:1".into(),
+    )));
+    assert!(!state.selected_attachment_is_mutable());
+    state.dispatch(ComposerAction::SelectTicket(Some("FIN-1:diagram:0".into())));
+    assert!(!state.selected_mermaid_diagram_is_editable());
 }
 
 #[test]

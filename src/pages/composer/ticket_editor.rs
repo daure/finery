@@ -1636,10 +1636,12 @@ impl TicketEditor {
 
     fn open_ticket_action_dialog(&mut self, ctx: &mut EventCtx<()>) -> bool {
         if self.state.borrow().selected_attachment().is_some() {
-            return self.open_attachment_action_dialog(ctx);
+            return self.state.borrow().selected_attachment_is_mutable()
+                && self.open_attachment_action_dialog(ctx);
         }
         if self.state.borrow().selected_mermaid_diagram().is_some() {
-            return self.open_mermaid_diagram_action_dialog(ctx);
+            return self.state.borrow().selected_mermaid_diagram_is_editable()
+                && self.open_mermaid_diagram_action_dialog(ctx);
         }
         let Some(change) = self.state.borrow().selected_change().cloned() else {
             return false;
@@ -1878,6 +1880,9 @@ impl TicketEditor {
         let mut actions = Vec::new();
         let keys = self.composer_keys();
         if let Some(attachment) = self.state.borrow().selected_attachment().cloned() {
+            if !self.state.borrow().selected_attachment_is_mutable() {
+                return false;
+            }
             let message =
                 if attachment.change == crate::store::composer::AttachmentChangeKind::Deleted {
                     let restore_sink = Rc::clone(&self.pending);

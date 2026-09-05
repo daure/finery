@@ -2152,8 +2152,9 @@ fn create_issue(
     }
     apply_attachment_changes(client, base_url, email, token, &created.key, desired)
         .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
-    apply_mermaid_diagrams(client, base_url, email, token, &created.key, desired)
-        .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
+    let published_diagrams =
+        apply_mermaid_diagrams(client, base_url, email, token, &created.key, desired)
+            .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
     apply_web_link_changes(
         client,
         base_url,
@@ -2182,6 +2183,7 @@ fn create_issue(
         &created.key,
         story_points_field_id,
     )
+    .map(|ticket| with_published_mermaid_attachments(ticket, desired, &published_diagrams))
     .map_err(|message| created_issue_failure(message, created_desired, None))
 }
 
@@ -2225,7 +2227,8 @@ fn update_issue(
         )?;
     }
     apply_attachment_changes(client, base_url, email, token, &original.key, desired)?;
-    apply_mermaid_diagrams(client, base_url, email, token, &original.key, desired)?;
+    let published_diagrams =
+        apply_mermaid_diagrams(client, base_url, email, token, &original.key, desired)?;
     apply_web_link_changes(
         client,
         base_url,
@@ -2252,6 +2255,7 @@ fn update_issue(
         &original.key,
         story_points_field_id,
     )
+    .map(|ticket| with_published_mermaid_attachments(ticket, desired, &published_diagrams))
 }
 
 fn apply_attachment_changes(
@@ -2320,9 +2324,10 @@ fn apply_mermaid_diagrams(
     token: &str,
     issue_key: &str,
     desired: &Ticket,
-) -> Result<(), String> {
+) -> Result<HashMap<String, String>, String> {
     let renderer = MermaidRenderer::new();
     let active_theme = theme();
+    let mut attachment_ids = HashMap::new();
     for diagram in &desired.mermaid_diagrams {
         let png = if diagram.rendered_png.is_empty()
             || diagram.rendered_theme != active_theme.name().id()
@@ -2357,9 +2362,44 @@ fn apply_mermaid_diagrams(
             .multipart(form)
             .send()
             .map_err(|error| error.to_string())?;
-        ensure_success(response)?;
+        let attachments = response_json::<Vec<Value>>(response)?;
+        let attachment_id = attachments
+            .first()
+            .and_then(|attachment| attachment.get("id"))
+            .and_then(|id| {
+                id.as_str()
+                    .map(str::to_owned)
+                    .or_else(|| id.as_u64().map(|id| id.to_string()))
+            })
+            .ok_or_else(|| {
+                format!(
+                    "Jira did not return an attachment ID for Mermaid diagram {}",
+                    diagram.title
+                )
+            })?;
+        attachment_ids.insert(diagram.id.clone(), attachment_id);
     }
-    Ok(())
+    Ok(attachment_ids)
+}
+
+fn with_published_mermaid_attachments(
+    mut ticket: Ticket,
+    desired: &Ticket,
+    attachment_ids: &HashMap<String, String>,
+) -> Ticket {
+    ticket.mermaid_diagrams = desired
+        .mermaid_diagrams
+        .iter()
+        .cloned()
+        .map(|mut diagram| {
+            diagram.published_attachment_id = attachment_ids
+                .get(&diagram.id)
+                .cloned()
+                .or(diagram.published_attachment_id);
+            diagram
+        })
+        .collect();
+    ticket
 }
 
 fn mermaid_png_filename(title: &str) -> String {

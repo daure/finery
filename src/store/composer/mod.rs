@@ -105,6 +105,8 @@ pub(crate) struct MermaidDiagram {
     pub rendered_png: Vec<u8>,
     #[serde(default)]
     pub rendered_theme: String,
+    #[serde(default)]
+    pub published_attachment_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -666,6 +668,22 @@ impl ComposerState {
                                 .is_some_and(|attachment| {
                                     attachment.change == AttachmentChangeKind::Added
                                 })
+                    })
+            })
+    }
+
+    pub(crate) fn selected_attachment_is_mutable(&self) -> bool {
+        let Some((ticket_id, _)) = self.attachment_target() else {
+            return false;
+        };
+        self.view_mode == ComposerViewMode::Changes
+            && !self.active_change_set_is_submitting()
+            && self.active_set().is_some_and(|set| {
+                set.tickets
+                    .iter()
+                    .find(|change| change.id == ticket_id)
+                    .is_some_and(|change| {
+                        !change.is_submitted() && change.kind != ChangeKind::Deleted
                     })
             })
     }
@@ -1597,7 +1615,9 @@ impl ComposerState {
             .as_ref()
             .map(|ticket| ticket.mermaid_diagrams.clone())
             .unwrap_or_default();
-        if let Some(updated) = snapshot.updated.as_mut() {
+        if let Some(updated) = snapshot.updated.as_mut()
+            && updated.mermaid_diagrams.is_empty()
+        {
             updated.mermaid_diagrams = diagrams;
         }
         change.original = snapshot.original.clone();
@@ -1927,6 +1947,7 @@ impl ComposerState {
                 markup,
                 rendered_png,
                 rendered_theme,
+                published_attachment_id: None,
             });
         });
         let Some(index) = self

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::{Read, Write},
     net::TcpListener,
     thread,
@@ -21,14 +22,15 @@ use super::{
     story_points_field_id, story_points_warning, submit_failure, submit_ordered_changes, to_ticket,
     to_ticket_and_work_item, to_work_item, to_work_item_with_subtasks, update_payload,
     velocity_average, velocity_report, velocity_sprint_goals, web_link_payload, web_links,
+    with_published_mermaid_attachments,
 };
 use crate::{
     app_settings::AppSettings,
     jira::submit_changes,
     store::{
         composer::{
-            AttachmentChangeKind, ChangeKind, Ticket, TicketAttachment, TicketChange, TicketKind,
-            TicketWebLink,
+            AttachmentChangeKind, ChangeKind, MermaidDiagram, Ticket, TicketAttachment,
+            TicketChange, TicketKind, TicketWebLink,
         },
         work_items::RankPlan,
     },
@@ -424,6 +426,33 @@ fn jira_web_link_changes_delete_update_and_create_remote_links() {
     assert!(requests[1].contains("\"title\":\"Current\""));
     assert!(requests[2].starts_with("POST /rest/api/3/issue/FIN-1/remotelink"));
     assert!(requests[2].contains("\"url\":\"https://example.com/new\""));
+}
+
+#[test]
+fn submitted_mermaid_diagrams_retain_their_generated_attachment_ids() {
+    let mut desired = ticket("FIN-1", TicketKind::Task, None);
+    desired.mermaid_diagrams.push(MermaidDiagram {
+        id: "diagram-1".into(),
+        title: "Lifecycle".into(),
+        diagram_type: "state".into(),
+        markup: "stateDiagram-v2".into(),
+        rendered_png: Vec::new(),
+        rendered_theme: String::new(),
+        published_attachment_id: None,
+    });
+
+    let submitted = with_published_mermaid_attachments(
+        ticket("FIN-1", TicketKind::Task, None),
+        &desired,
+        &HashMap::from([("diagram-1".into(), "10039".into())]),
+    );
+
+    assert_eq!(
+        submitted.mermaid_diagrams[0]
+            .published_attachment_id
+            .as_deref(),
+        Some("10039")
+    );
 }
 
 #[test]

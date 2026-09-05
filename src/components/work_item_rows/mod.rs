@@ -143,14 +143,19 @@ pub(crate) fn attachment_summary_text(
     created: &str,
     size: u64,
     highlighted: bool,
+    submitted: bool,
 ) -> Text<'static> {
     let theme = tuicore::theme();
-    let text_style = Style::default().fg(if highlighted {
+    let text_style = Style::default().fg(if submitted {
+        theme.muted_fg()
+    } else if highlighted {
         theme.selected_fg()
     } else {
         theme.text_fg()
     });
-    let muted_style = Style::default().fg(if highlighted {
+    let muted_style = Style::default().fg(if submitted {
+        theme.muted_fg()
+    } else if highlighted {
         theme.selected_fg()
     } else {
         theme.muted_fg()
@@ -171,26 +176,36 @@ pub(crate) fn mermaid_diagram_summary_text(
     title: &str,
     diagram_type: &str,
     highlighted: bool,
+    submitted: bool,
+    published: bool,
 ) -> Text<'static> {
     let theme = tuicore::theme();
-    let text_style = Style::default().fg(if highlighted {
+    let text_style = Style::default().fg(if submitted {
+        theme.muted_fg()
+    } else if highlighted {
         theme.selected_fg()
     } else {
         theme.text_fg()
     });
-    let muted_style = Style::default().fg(if highlighted {
+    let muted_style = Style::default().fg(if submitted {
+        theme.muted_fg()
+    } else if highlighted {
         theme.selected_fg()
     } else {
         theme.muted_fg()
     });
-    Text::from(Line::from(vec![
+    let mut spans = vec![
         Span::styled("A", text_style),
         Span::styled(" ", text_style),
         Span::styled(" ", text_style),
         Span::styled(title.to_owned(), text_style.add_modifier(Modifier::BOLD)),
         Span::styled(" • ", muted_style),
         Span::styled(diagram_type_label(diagram_type), muted_style),
-    ]))
+    ];
+    if published {
+        spans.push(Span::styled(" • published", muted_style));
+    }
+    Text::from(Line::from(spans))
 }
 
 fn diagram_type_label(diagram_type: &str) -> String {

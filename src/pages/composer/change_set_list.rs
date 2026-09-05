@@ -925,8 +925,9 @@ fn append_share_line(
         .flatten()
         .unwrap_or_else(|| format!("Draft {}/{}", change_set.id, change.id));
     lines.push(format!(
-        "{prefix}{} {} - {reference}",
+        "{prefix}{} ({}) {} - {reference}",
         share_ticket_type_marker(ticket.kind),
+        share_change_kind_label(change.kind),
         ticket.title
     ));
 }
@@ -938,6 +939,15 @@ fn share_ticket_type_marker(kind: TicketKind) -> &'static str {
         TicketKind::Task => "[T]",
         TicketKind::Bug => "[B]",
         TicketKind::Subtask => "[ST]",
+    }
+}
+
+fn share_change_kind_label(kind: ChangeKind) -> &'static str {
+    match kind {
+        ChangeKind::Added => "Added",
+        ChangeKind::Modified => "Modified",
+        ChangeKind::Deleted => "Deleted",
+        ChangeKind::Synced => "Synced",
     }
 }
 

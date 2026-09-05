@@ -2,7 +2,7 @@
 
 ## Safety and operating rules
 
-> **This Atlassian site is a staging environment.** Agents may create, update, move, transition, and delete Jira work items as required by these cases. Do not use production Jira data. Still verify every Jira write directly; an MCP success response alone is not proof.
+> **This Jira environment is a test environment.** Agents may create, update, move, transition, and delete Jira work items as required by these cases. Each test case must establish and use its own made-up business context. Still verify every Jira write directly through the Atlassian MCP; a Finery MCP success response alone is not proof.
 
 - Give every run a marker such as `FINERY-TC-20260827-1430` in change-set names, summaries, and descriptions.
 - Use a fresh change set for each P0 case. Record the full `get_change_set` view and its **inner change-set revision** before every MCP mutation.

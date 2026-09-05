@@ -143,6 +143,7 @@ pub struct MermaidDiagramView {
     pub markup: String,
     pub rendered: bool,
     pub rendered_theme: String,
+    pub published_attachment_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2446,6 +2447,7 @@ impl From<Ticket> for TicketView {
                     markup: diagram.markup,
                     rendered: !diagram.rendered_png.is_empty(),
                     rendered_theme: diagram.rendered_theme,
+                    published_attachment_id: diagram.published_attachment_id,
                 })
                 .collect(),
             web_links: value.web_links.into_iter().map(Into::into).collect(),
