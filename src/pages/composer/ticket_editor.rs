@@ -24,7 +24,8 @@ use crate::{
     service::{AppService, ComposerSearchTicket},
     speed_reader_settings::SpeedReaderSettings,
     store::composer::{
-        ChangeKind, ComposerAction, ComposerState, PlacementTarget, TicketKind, TicketPresentation,
+        ChangeKind, ComposerAction, ComposerState, PlacementTarget, SubmissionPlan, TicketKind,
+        TicketPresentation,
     },
 };
 
@@ -36,7 +37,7 @@ use super::{
     speed_reader_text::clean_for_speed_reader,
     submission::SubmissionController,
     ticket_rows::{
-        TicketRow, display_key_for_ticket, set_active_ticket_style,
+        TicketRow, display_key_for_ticket, effective_ticket_selection, set_active_ticket_style,
         ticket_data_view_with_number_jump, ticket_row_ancestor_ids, ticket_rows,
     },
     ticket_toolbar::{ToolbarEvent, ToolbarEvents, ToolbarFeedback, toolbar},
@@ -53,14 +54,67 @@ type AddLayer = DialogLayer<CreateLayer, AddTicketMenu>;
 type TicketEditorView = DialogLayer<AddLayer, Dialog<()>>;
 type DescriptionReader = tuicore::DialogHost<SpeedReader, ()>;
 
+#[derive(Clone)]
+struct ConfirmedSubmission {
+    change_set_id: String,
+    plan: SubmissionPlan,
+}
+
+pub(super) fn submission_confirmation_is_current(
+    state: &ComposerState,
+    change_set_id: &str,
+    confirmed: &SubmissionPlan,
+) -> Result<bool, String> {
+    if state.active_change_set.as_deref() != Some(change_set_id) {
+        return Ok(false);
+    }
+    let explicit_now = state
+        .active_set()
+        .map(|set| {
+            set.selected_ticket_ids
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let explicit_confirmed = confirmed
+        .explicit_ids
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
+    if explicit_now != explicit_confirmed {
+        return Ok(false);
+    }
+    Ok(state.submission_plan(&confirmed.explicit_ids)? == *confirmed)
+}
+
 const TITLE_INPUT_SLOT: &str = "title-input";
 const ISSUE_TYPE_SLOT: &str = "issue-type";
 type EditorView = DialogLayer<TicketEditorView, DescriptionReader>;
 
 pub(super) fn selected_ticket_ids(row_ids: Vec<String>) -> Vec<String> {
+    // Artifact rows are nonselectable in the DataView; keep this projection as a
+    // defense at the UI/domain boundary so synthetic IDs never reach the planner.
     row_ids
         .into_iter()
         .filter(|id| !id.contains(":attachment:") && !id.contains(":diagram:"))
+        .collect()
+}
+
+pub(super) fn explicit_ticket_selection(
+    state: &ComposerState,
+    effective_row_ids: Vec<String>,
+) -> Vec<String> {
+    let current_explicit = state
+        .active_set()
+        .map(|set| set.selected_ticket_ids.clone())
+        .unwrap_or_default();
+    let current_required = state
+        .required_ancestor_ids(&current_explicit)
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    selected_ticket_ids(effective_row_ids)
+        .into_iter()
+        .filter(|id| !current_required.contains(id))
         .collect()
 }
 
@@ -343,6 +397,7 @@ pub(super) struct TicketEditor {
     submit_confirmation_requested: Rc<Cell<bool>>,
     reparent_confirmation_requested: Rc<Cell<bool>>,
     pending_reparent: Rc<RefCell<Option<ComposerAction>>>,
+    pending_submission: Option<ConfirmedSubmission>,
     submission: SubmissionController,
     source: SourceController,
     loading_view: ScrollContainer<Flex<()>>,
@@ -548,6 +603,7 @@ impl TicketEditor {
             submit_confirmation_requested,
             reparent_confirmation_requested,
             pending_reparent,
+            pending_submission: None,
             submission,
             source,
             loading_view: loading_view(),
@@ -601,23 +657,18 @@ impl TicketEditor {
     }
 
     pub(super) fn sync(&mut self) {
-        let (change_set_id, breadcrumb, rows, selected, selected_for_submission, is_open) = {
+        let (change_set_id, breadcrumb, rows, selected, effective_selection, is_open) = {
             let state = self.state.borrow();
             let breadcrumb = state.active_set().map_or_else(
                 || "Change sets".into(),
                 |set| format!("{} • {}", set.id, set.name),
             );
-            let selected_for_submission = state
-                .active_set()
-                .into_iter()
-                .flat_map(|set| set.selected_ticket_ids.clone())
-                .collect::<Vec<_>>();
             (
                 state.active_set().map(|set| set.id.clone()),
                 breadcrumb,
                 ticket_rows(&state),
                 state.selected_ticket.clone(),
-                selected_for_submission,
+                effective_ticket_selection(&state),
                 state.active_set().is_some_and(|set| !set.closed),
             )
         };
@@ -641,7 +692,7 @@ impl TicketEditor {
             table.restore_tree_expansion(expanded);
         }
         set_active_ticket_style(table, selected.clone());
-        restore_ticket_selection(table, selected_for_submission);
+        restore_ticket_selection(table, effective_selection);
         if let Some(selected) = &selected {
             table.highlight_id(selected);
         }
@@ -666,12 +717,13 @@ impl TicketEditor {
         };
         self.can_refresh
             .set(can_refresh && !self.submission.is_submitting());
-        let selected = self.table().selected_ids();
-        self.can_submit.set(
-            is_open
-                && !self.submission.is_submitting()
-                && self.state.borrow().changes_ready_for_submit(&selected),
-        );
+        let has_explicit_selection = self
+            .state
+            .borrow()
+            .active_set()
+            .is_some_and(|set| !set.selected_ticket_ids.is_empty());
+        self.can_submit
+            .set(is_open && !self.submission.is_submitting() && has_explicit_selection);
     }
 
     pub(super) fn is_submitting(&self) -> bool {
@@ -808,14 +860,17 @@ impl TicketEditor {
         }
         let submit_confirmed = self.submit_confirmation_requested.replace(false);
         let reparent_confirmed = self.reparent_confirmation_requested.replace(false);
-        if self.ticket_dialog_close_requested.replace(false)
-            || submit_confirmed
-            || reparent_confirmed
-        {
+        let ticket_dialog_closed = self.ticket_dialog_close_requested.replace(false);
+        if ticket_dialog_closed || submit_confirmed || reparent_confirmed {
             self.view.base_mut().set_active_with_context(false, ctx);
         }
+        if ticket_dialog_closed {
+            self.pending_submission = None;
+        }
         if submit_confirmed {
-            self.start_submit(ctx);
+            if let Some(confirmed) = self.pending_submission.take() {
+                self.start_submit(confirmed, ctx);
+            }
         }
         if reparent_confirmed && let Some(action) = self.pending_reparent.borrow_mut().take() {
             if let Err(error) = self.state.borrow_mut().dispatch(action) {
@@ -885,10 +940,37 @@ impl TicketEditor {
                     .pending
                     .borrow_mut()
                     .push(ComposerAction::SelectTicket(Some(row_id))),
-                DataViewTypedEvent::SelectionChanged { selected, .. } => self
-                    .pending
-                    .borrow_mut()
-                    .push(ComposerAction::SetSelectedTickets(selected)),
+                DataViewTypedEvent::SelectionChanged {
+                    selected, removed, ..
+                } => {
+                    let (explicit, required_deselected) = {
+                        let state = self.state.borrow();
+                        let explicit = explicit_ticket_selection(&state, selected);
+                        let required_after = state
+                            .required_ancestor_ids(&explicit)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect::<std::collections::HashSet<_>>();
+                        let required_deselected = removed
+                            .iter()
+                            .find(|id| required_after.contains(*id))
+                            .cloned();
+                        (explicit, required_deselected)
+                    };
+                    if let Some(id) = required_deselected {
+                        let key = display_key_for_ticket(&self.state.borrow(), &id).unwrap_or(id);
+                        self.service
+                            .report_notification(tuicore::Notification::warning(
+                                "Can't deselect parent",
+                                format!(
+                                    "{key} is required by a selected descendant. Deselect the descendant first."
+                                ),
+                            ));
+                    }
+                    self.pending
+                        .borrow_mut()
+                        .push(ComposerAction::SetSelectedTickets(explicit));
+                }
                 _ => {}
             }
         }
@@ -1179,20 +1261,31 @@ impl TicketEditor {
         }
     }
 
-    fn start_submit(&mut self, ctx: &mut EventCtx<()>) {
+    fn start_submit(&mut self, confirmed: ConfirmedSubmission, ctx: &mut EventCtx<()>) {
         if self.submission.is_submitting() {
             return;
         }
-        let selected = selected_ticket_ids(self.table().selected_ids());
-        let changes = match self.state.borrow().commit_changes(&selected) {
-            Ok(changes) => changes,
+        let current = {
+            let state = self.state.borrow();
+            submission_confirmation_is_current(&state, &confirmed.change_set_id, &confirmed.plan)
+        };
+        match current {
+            Ok(true) => {}
+            Ok(false) => {
+                self.service
+                    .report_notification(tuicore::Notification::warning(
+                        "Commit scope changed",
+                        "Selection or ticket data changed while confirmation was open. Review the updated scope and commit again.",
+                    ));
+                return;
+            }
             Err(error) => {
                 self.service
                     .report_notification(tuicore::Notification::error("Commit blocked", error));
                 return;
             }
-        };
-        self.submission.start(changes, ctx);
+        }
+        self.submission.start(confirmed.plan.explicit_ids, ctx);
         self.sync();
     }
 
@@ -1202,9 +1295,14 @@ impl TicketEditor {
         }
         self.ticket_dialog_close_requested.set(false);
         self.submit_confirmation_requested.set(false);
-        let selected = selected_ticket_ids(self.table().selected_ids());
-        let changes = match self.state.borrow().commit_changes(&selected) {
-            Ok(changes) => changes,
+        let selected = self
+            .state
+            .borrow()
+            .active_set()
+            .map(|set| set.selected_ticket_ids.clone())
+            .unwrap_or_default();
+        let plan = match self.state.borrow().submission_plan(&selected) {
+            Ok(plan) => plan,
             Err(error) => {
                 self.service
                     .report_notification(tuicore::Notification::error("Commit blocked", error));
@@ -1216,14 +1314,34 @@ impl TicketEditor {
         let keys = self.composer_keys();
         let content = {
             let state = self.state.borrow();
-            let mut content = vec![format!(
-                "Commit {} selected changes to Jira?",
-                changes.len()
-            )];
-            for change in &changes {
+            let required = plan
+                .required_ids
+                .iter()
+                .collect::<std::collections::HashSet<_>>();
+            let mut content = vec![if required.is_empty() {
+                format!("Commit {} selected tickets to Jira?", plan.changes.len())
+            } else {
+                format!(
+                    "Commit {} tickets to Jira ({} chosen, {} parents added automatically)?",
+                    plan.changes.len(),
+                    plan.explicit_ids.len(),
+                    required.len()
+                )
+            }];
+            // The dialog is the audit boundary: show the effective Jira scope and
+            // distinguish automatic draft-parent dependencies from explicit intent.
+            for change in &plan.changes {
                 let Some(ticket) = state.changes_for_change(change) else {
                     continue;
                 };
+                let key = display_key_for_ticket(&state, &change.id)
+                    .unwrap_or_else(|| ticket.key.clone());
+                let source = if required.contains(&change.id) {
+                    "Auto-selected parent"
+                } else {
+                    "Selected"
+                };
+                content.push(format!("{source}: {key} — {}", ticket.title));
                 if let Some(warning) = ticket.description_overwrite_warning.as_deref() {
                     content.push(format!(
                         "Warning — {}: Jira description contains {warning}.",
@@ -1233,6 +1351,13 @@ impl TicketEditor {
             }
             content
         };
+        let Some(change_set_id) = self.state.borrow().active_change_set.clone() else {
+            return;
+        };
+        self.pending_submission = Some(ConfirmedSubmission {
+            change_set_id,
+            plan,
+        });
         let dialog = self.view.base_mut().layer_mut();
         dialog.set_top_left("Commit changes");
         dialog.set_actions([

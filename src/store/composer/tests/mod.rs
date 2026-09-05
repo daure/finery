@@ -248,7 +248,7 @@ fn unresolved_create_attempt_blocks_retry_after_restart() {
     assert!(restored.change_sets[1].tickets[0].create_attempt);
     assert!(
         restored
-            .commit_changes(&["NEW-1".into()])
+            .submission_plan(&["NEW-1".into()])
             .unwrap_err()
             .contains("unresolved Jira create attempt")
     );
@@ -324,7 +324,7 @@ fn stale_source_responses_do_not_update_another_change_set_or_retry_blocked_tick
     });
     assert!(
         state
-            .commit_changes(&["NEW-1".into()])
+            .submission_plan(&["NEW-1".into()])
             .unwrap_err()
             .contains("may already have been created")
     );

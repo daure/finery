@@ -22,7 +22,9 @@ use super::property_fields::{BoundFixVersionsDropdown, BoundPropertyDropdown};
 use super::source::SourceController;
 use super::speed_reader_text::clean_for_speed_reader;
 use super::submission::SubmissionController;
-use super::ticket_editor::TicketEditor;
+use super::ticket_editor::{
+    TicketEditor, explicit_ticket_selection, submission_confirmation_is_current,
+};
 use super::{
     ticket_editor::selected_ticket_ids,
     ticket_rows::{ticket_data_view, ticket_rows},
@@ -1236,7 +1238,7 @@ fn submit_requires_confirmation() {
 }
 
 #[test]
-fn submit_confirmation_uses_generic_text() {
+fn submit_confirmation_lists_the_effective_scope() {
     tuicore::init();
     let mut page = composer_page();
     page.open_change_set_for_test("CS-1");
@@ -1254,8 +1256,10 @@ fn submit_confirmation_uses_generic_text() {
     );
 
     let dialog_text = render_text(&mut page);
-    assert!(dialog_text.contains("Commit 2 selected changes to Jira?"));
-    assert!(!dialog_text.contains("NEW-1"));
+    assert!(dialog_text.contains("Commit 2 selected tickets to Jira?"));
+    assert!(dialog_text.contains("Selected:"));
+    assert!(dialog_text.contains("Parent task"));
+    assert!(dialog_text.contains("Child sub-task"));
 }
 
 #[test]
@@ -1941,12 +1945,14 @@ fn preflight_failure_clears_only_its_durable_create_attempt_marker() {
         title: "New local ticket".into(),
         project_key: "FIN".into(),
     });
-    let changes = state.commit_changes(&["NEW-2".into()]).unwrap();
     let state = Rc::new(RefCell::new(state));
     let service = AppService::for_tests();
     let mut submission = SubmissionController::new(Rc::clone(&state), service.clone());
 
-    submission.start(changes, &mut EventCtx::default());
+    submission.start(vec!["NEW-2".into()], &mut EventCtx::default());
+    state
+        .borrow_mut()
+        .dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
     for _ in 0..100 {
         submission.drain_results();
         if !submission.is_submitting() {
@@ -1955,17 +1961,21 @@ fn preflight_failure_clears_only_its_durable_create_attempt_marker() {
         std::thread::sleep(Duration::from_millis(10));
     }
 
+    assert!(!state.borrow().change_set_is_submitting("CS-2"));
+    state
+        .borrow_mut()
+        .dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
     let state = state.borrow();
     let tickets = &state.active_set().unwrap().tickets;
     assert!(tickets[0].create_attempt);
     assert!(!tickets[1].create_attempt);
     assert!(
         state
-            .commit_changes(&["NEW-1".into()])
+            .submission_plan(&["NEW-1".into()])
             .unwrap_err()
             .contains("unresolved Jira create attempt")
     );
-    assert!(state.commit_changes(&["NEW-2".into()]).is_ok());
+    assert!(state.submission_plan(&["NEW-2".into()]).is_ok());
     assert!(
         service
             .change_set_for_tests("CS-2")
@@ -1985,11 +1995,10 @@ fn delayed_marker_persistence_does_not_block_submission_polling() {
         title: "New local ticket".into(),
         project_key: "FIN".into(),
     });
-    let changes = state.commit_changes(&["NEW-1".into()]).unwrap();
     let state = Rc::new(RefCell::new(state));
     let mut submission = SubmissionController::new(state, service);
 
-    submission.start(changes, &mut EventCtx::default());
+    submission.start(vec!["NEW-1".into()], &mut EventCtx::default());
     let started = Instant::now();
 
     assert!(!submission.drain_results());
@@ -2028,11 +2037,10 @@ fn jira_submission_waits_for_durable_create_marker_confirmation() {
         title: "New local ticket".into(),
         project_key: "FIN".into(),
     });
-    let changes = state.commit_changes(&["NEW-1".into()]).unwrap();
     let state = Rc::new(RefCell::new(state));
     let mut submission = SubmissionController::new(state, service);
 
-    submission.start(changes, &mut EventCtx::default());
+    submission.start(vec!["NEW-1".into()], &mut EventCtx::default());
     assert!(!submission.drain_results());
     assert!(!jira_called.load(Ordering::SeqCst));
 
@@ -2071,12 +2079,11 @@ fn cancelled_durable_claim_never_contacts_jira() {
     });
     service.save_change_set(state.active_set().unwrap().clone());
     service.flush().unwrap();
-    let changes = state.commit_changes(&["NEW-1".into()]).unwrap();
     let state = Rc::new(RefCell::new(state));
     let resume = service.pause_durable_change_set_saves();
     let mut submission = SubmissionController::new(Rc::clone(&state), service.clone());
 
-    submission.start(changes, &mut EventCtx::default());
+    submission.start(vec!["NEW-1".into()], &mut EventCtx::default());
     service
         .composer_service()
         .apply_change_set_patch(
@@ -2920,6 +2927,7 @@ fn attachments_are_tree_children_before_ticket_children() {
     );
 
     let mut tickets = ticket_data_view(&state);
+    assert!(!tickets.toggle_selected("FIN-1:attachment:0".into()));
     assert!(tickets.toggle_selected("FIN-1".into()));
     assert!(tickets.selected_ids().contains(&"FIN-1".into()));
     let area = Rect::new(0, 0, TEST_WIDTH, 5);
@@ -3128,7 +3136,7 @@ fn local_attachment_bytes_survive_change_set_persistence() {
 }
 
 #[test]
-fn selecting_a_parent_ticket_selects_descendants_and_marks_partial_parents() {
+fn ticket_selection_does_not_cascade_downward_and_derives_required_parents() {
     tuicore::init();
     let mut state = ComposerState::demo();
     state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
@@ -3160,14 +3168,33 @@ fn selecting_a_parent_ticket_selects_descendants_and_marks_partial_parents() {
 
     let mut tickets = ticket_data_view(&state);
     assert!(tickets.toggle_selected("NEW-1".into()));
-    assert_eq!(tickets.selected_ids(), ["NEW-1", "NEW-2", "NEW-3"]);
+    assert_eq!(tickets.selected_ids(), ["NEW-1"]);
+    assert_eq!(tickets.check_state(&"NEW-2".into()), CheckState::Unchecked);
 
     tickets.toggle_selected("NEW-2".into());
-    assert_eq!(tickets.selected_ids(), ["NEW-3"]);
+    assert_eq!(tickets.selected_ids(), ["NEW-1", "NEW-2"]);
+    assert_eq!(tickets.check_state(&"NEW-1".into()), CheckState::Checked);
+
+    tickets.clear_selection();
+    tickets.toggle_selected("NEW-2".into());
+    assert_eq!(tickets.selected_ids(), ["NEW-2"]);
+    assert_eq!(tickets.check_state(&"NEW-1".into()), CheckState::Unchecked);
+
+    state.dispatch(ComposerAction::SetSelectedTickets(vec!["NEW-2".into()]));
+    let effective = ticket_data_view(&state);
+    assert_eq!(effective.selected_ids(), ["NEW-1", "NEW-2"]);
     assert_eq!(
-        tickets.check_state(&"NEW-1".into()),
-        CheckState::Indeterminate
+        explicit_ticket_selection(&state, vec!["NEW-1".into()]),
+        Vec::<String>::new()
     );
+    assert_eq!(
+        explicit_ticket_selection(&state, vec!["NEW-2".into()]),
+        ["NEW-2"]
+    );
+    let confirmed = state.submission_plan(&["NEW-2".into()]).unwrap();
+    assert!(submission_confirmation_is_current(&state, "CS-2", &confirmed).unwrap());
+    state.dispatch(ComposerAction::SetSelectedTickets(vec!["NEW-1".into()]));
+    assert!(!submission_confirmation_is_current(&state, "CS-2", &confirmed).unwrap());
 }
 
 #[test]

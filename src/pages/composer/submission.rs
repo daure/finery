@@ -6,13 +6,13 @@ use std::{
 
 use crate::{
     service::{AppService, SubmittedComposerChangeSet, composer_service::SubmitChangeSetOutcome},
-    store::composer::{ComposerState, TicketChange},
+    store::composer::ComposerState,
 };
 
 pub(super) struct SubmissionController {
     state: Rc<RefCell<ComposerState>>,
     service: AppService,
-    response: Option<Receiver<Result<SubmittedComposerChangeSet, String>>>,
+    response: Option<(String, Receiver<Result<SubmittedComposerChangeSet, String>>)>,
     preflight_error: Option<String>,
 }
 
@@ -34,8 +34,14 @@ impl SubmissionController {
         self.preflight_error.take()
     }
 
-    pub(super) fn start(&mut self, changes: Vec<TicketChange>, ctx: &mut tuicore::EventCtx<()>) {
-        if self.is_submitting() || changes.is_empty() {
+    /// Starts from explicit TUI intent. The service derives required `NEW-*`
+    /// ancestors from the revision-checked snapshot, just as it does for MCP.
+    pub(super) fn start(
+        &mut self,
+        selected_ticket_ids: Vec<String>,
+        ctx: &mut tuicore::EventCtx<()>,
+    ) {
+        if self.is_submitting() || selected_ticket_ids.is_empty() {
             return;
         }
         let Some(change_set_id) = self.state.borrow().active_change_set.clone() else {
@@ -57,7 +63,6 @@ impl SubmissionController {
             .find(|set| set.id == change_set_id)
             .cloned()
             .expect("submission target must exist");
-        let selected_ticket_ids = changes.into_iter().map(|change| change.id).collect();
         let service = self.service.clone();
         let (sender, receiver) = mpsc::channel();
         match std::thread::Builder::new()
@@ -67,7 +72,7 @@ impl SubmissionController {
                     sender.send(service.submit_change_set_from_snapshot(set, selected_ticket_ids));
             }) {
             Ok(_) => {
-                self.response = Some(receiver);
+                self.response = Some((change_set_id, receiver));
                 ctx.request_tick();
             }
             Err(error) => {
@@ -81,9 +86,10 @@ impl SubmissionController {
     }
 
     pub(super) fn drain_results(&mut self) -> bool {
-        let Some(response) = self.response.as_ref() else {
+        let Some((change_set_id, response)) = self.response.as_ref() else {
             return false;
         };
+        let change_set_id = change_set_id.clone();
         let result = match response.try_recv() {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return false,
@@ -92,10 +98,7 @@ impl SubmissionController {
             }
         };
         self.response = None;
-        let active_change_set = self.state.borrow().active_change_set.clone();
-        if let Some(change_set_id) = active_change_set.as_deref() {
-            self.state.borrow_mut().end_submission(change_set_id);
-        }
+        self.state.borrow_mut().end_submission(&change_set_id);
         match result {
             Ok(submitted) => {
                 self.state

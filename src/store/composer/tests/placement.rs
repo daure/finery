@@ -310,15 +310,27 @@ fn committing_selected_local_child_includes_unsent_local_ancestor() {
         placement: PlacementTarget::ChildOf("NEW-1".into()),
     });
 
-    let changes = state.commit_changes(&["NEW-2".into()]).unwrap();
+    let plan = state.submission_plan(&["NEW-2".into()]).unwrap();
 
+    assert_eq!(plan.explicit_ids, ["NEW-2"]);
+    assert_eq!(plan.required_ids, ["NEW-1"]);
     assert_eq!(
-        changes
+        plan.changes
             .iter()
             .map(|change| change.id.as_str())
             .collect::<Vec<_>>(),
         vec!["NEW-1", "NEW-2"]
     );
+
+    state.dispatch(ComposerAction::BlockTicketRetry {
+        change_set_id: "CS-1".into(),
+        id: "NEW-1".into(),
+    });
+    assert_eq!(
+        state.required_ancestor_ids(&["NEW-2".into()]).unwrap(),
+        ["NEW-1"]
+    );
+    assert!(state.submission_plan(&["NEW-2".into()]).is_err());
 }
 
 #[test]
@@ -354,7 +366,7 @@ fn submitted_local_parent_keeps_unsent_child_attached_by_resolved_key() {
         vec!["NEW-1", "NEW-2"]
     );
     assert_eq!(
-        state.commit_changes(&["NEW-2".into()]).unwrap()[0].id,
+        state.submission_plan(&["NEW-2".into()]).unwrap().changes[0].id,
         "NEW-2"
     );
     assert_eq!(
@@ -400,7 +412,7 @@ fn new_child_uses_committed_parent_key_instead_of_local_alias() {
         state.selected_changes().unwrap().parent_key.as_deref(),
         Some("FIN-101")
     );
-    assert!(state.commit_changes(&["NEW-2".into()]).is_ok());
+    assert!(state.submission_plan(&["NEW-2".into()]).is_ok());
 }
 
 #[test]

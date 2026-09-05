@@ -259,12 +259,25 @@ pub(crate) struct ChangeSet {
     pub id: String,
     pub name: String,
     pub tickets: Vec<TicketChange>,
+    /// Explicit TUI selection only. Jira hierarchy never expands this set;
+    /// required unsent draft ancestors are derived by `submission_plan`.
     #[serde(default)]
     pub selected_ticket_ids: Vec<String>,
     #[serde(default)]
     pub closed: bool,
     #[serde(default)]
     pub submission_attempt: Option<SubmissionAttempt>,
+}
+
+/// A submission preserves explicit intent while making mandatory draft parents visible.
+///
+/// `explicit_ids` come from the current caller. `required_ids` contains only unsent
+/// `NEW-*` ancestors. `changes` is their parent-first effective union.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SubmissionPlan {
+    pub explicit_ids: Vec<String>,
+    pub required_ids: Vec<String>,
+    pub changes: Vec<TicketChange>,
 }
 
 impl ChangeSet {
@@ -911,10 +924,6 @@ impl ComposerState {
         )
     }
 
-    pub(crate) fn changes_ready_for_submit(&self, ids: &[String]) -> bool {
-        self.commit_changes(ids).is_ok()
-    }
-
     pub(crate) fn removal_preview(&self, id: &str) -> Result<Vec<&TicketChange>, String> {
         let set = self
             .active_set()
@@ -940,14 +949,58 @@ impl ComposerState {
         Ok(changes)
     }
 
-    pub(crate) fn commit_changes(&self, ids: &[String]) -> Result<Vec<TicketChange>, String> {
+    pub(crate) fn submission_plan(&self, ids: &[String]) -> Result<SubmissionPlan, String> {
         if ids.is_empty() {
             return Err("Select at least one ticket to commit".into());
         }
+        let explicit_ids = ids.to_vec();
+        let mut selected = ids.iter().cloned().collect::<HashSet<_>>();
+        let required_ids = self.required_ancestor_ids(ids)?;
+        selected.extend(required_ids.iter().cloned());
+        let changes = self
+            .ordered_changes()
+            .into_iter()
+            .filter(|change| selected.contains(&change.id) && !change.is_submitted())
+            .cloned()
+            .map(|mut change| {
+                if change.retry_blocked {
+                    return Err(format!(
+                        "Commit blocked: {} may already have been created in Jira; refresh or remove it before retrying",
+                        change.id
+                    ));
+                }
+                if change.create_attempt {
+                    return Err(format!(
+                        "Commit blocked: {} has an unresolved Jira create attempt; refresh or remove it before retrying",
+                        change.id
+                    ));
+                }
+                if change.kind != ChangeKind::Added && change.original.is_none() {
+                    change.original =
+                        Some(self.active_source_for_change(&change).cloned().ok_or_else(|| {
+                            format!("Jira source for {} must load before committing", change.id)
+                        })?);
+                }
+                Ok(change)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SubmissionPlan {
+            explicit_ids,
+            required_ids,
+            changes,
+        })
+    }
+
+    /// Returns only structurally required unsent draft ancestors. This remains
+    /// available when readiness validation fails so the TUI can explain scope.
+    pub(crate) fn required_ancestor_ids(&self, ids: &[String]) -> Result<Vec<String>, String> {
         let set = self
             .active_set()
             .ok_or_else(|| "Open a change set before committing".to_string())?;
-        let mut selected = ids.iter().collect::<std::collections::HashSet<_>>();
+        // Selection is independent per ticket. The only implicit expansion is upward
+        // through unsent local parents that Jira requires us to create first.
+        let mut selected = ids.iter().cloned().collect::<HashSet<_>>();
+        let mut required = HashSet::new();
         let mut pending = ids.to_vec();
         while let Some(id) = pending.pop() {
             let change = set
@@ -981,36 +1034,17 @@ impl ComposerState {
                     change.id
                 ));
             }
-            if selected.insert(&parent_change.id) {
+            if selected.insert(parent_change.id.clone()) {
+                required.insert(parent_change.id.clone());
                 pending.push(parent_change.id.clone());
             }
         }
-        set.tickets
+        Ok(set
+            .tickets
             .iter()
-            .filter(|change| selected.contains(&change.id) && !change.is_submitted())
-            .cloned()
-            .map(|mut change| {
-                if change.retry_blocked {
-                    return Err(format!(
-                        "Commit blocked: {} may already have been created in Jira; refresh or remove it before retrying",
-                        change.id
-                    ));
-                }
-                if change.create_attempt {
-                    return Err(format!(
-                        "Commit blocked: {} has an unresolved Jira create attempt; refresh or remove it before retrying",
-                        change.id
-                    ));
-                }
-                if change.kind != ChangeKind::Added && change.original.is_none() {
-                    change.original =
-                        Some(self.active_source_for_change(&change).cloned().ok_or_else(|| {
-                            format!("Jira source for {} must load before committing", change.id)
-                        })?);
-                }
-                Ok(change)
-            })
-            .collect()
+            .filter(|change| required.contains(&change.id))
+            .map(|change| change.id.clone())
+            .collect())
     }
 
     pub(crate) fn dispatch(&mut self, action: ComposerAction) -> Result<(), PlacementError> {
@@ -1783,6 +1817,8 @@ impl ComposerState {
         let Some(set) = self.active_set_mut() else {
             return;
         };
+        // Persist direct intent only. Required draft parents are deliberately
+        // recomputed so hierarchy changes and MCP calls cannot inherit stale scope.
         set.selected_ticket_ids = ids.into_iter().fold(Vec::new(), |mut selected, id| {
             if !selected.contains(&id)
                 && set

@@ -44,6 +44,7 @@ pub struct ChangeSetCatalogChangeSetView {
     pub id: String,
     pub name: String,
     pub closed: bool,
+    /// Persisted explicit TUI intent. MCP submit requests never inherit this list.
     pub selected_ticket_ids: Vec<String>,
     pub tickets: Vec<CatalogTicketChangeView>,
     pub has_attachments: bool,
@@ -56,6 +57,8 @@ pub struct CatalogTicketChangeView {
     pub original: Option<CatalogTicketView>,
     pub updated: Option<CatalogTicketView>,
     pub submitted: bool,
+    /// Whether this ticket is explicitly selected in the persisted TUI state.
+    /// Required unsent draft parents are derived only when a submission is planned.
     pub selected_for_commit: bool,
     pub retry_blocked: bool,
     pub create_attempt: bool,
@@ -92,6 +95,7 @@ pub struct ChangeSetView {
     pub id: String,
     pub name: String,
     pub closed: bool,
+    /// Persisted explicit TUI intent. MCP submit requests never inherit this list.
     pub selected_ticket_ids: Vec<String>,
     pub tickets: Vec<TicketChangeView>,
 }
@@ -103,6 +107,8 @@ pub struct TicketChangeView {
     pub original: Option<TicketView>,
     pub updated: Option<TicketView>,
     pub submitted: bool,
+    /// Whether this ticket is explicitly selected in the persisted TUI state.
+    /// This does not include parents that a draft submission may require.
     pub selected_for_commit: bool,
     pub retry_blocked: bool,
     pub create_attempt: bool,
@@ -982,9 +988,13 @@ impl ComposerService {
                 });
             }
         }
+        // MCP IDs are the complete explicit authority for this invocation. Never
+        // union persisted TUI selection; submission_plan may add only mandatory
+        // unsent NEW-* ancestors.
         let changes = state
-            .commit_changes(&selected_ticket_ids)
-            .map_err(invalid)?;
+            .submission_plan(&selected_ticket_ids)
+            .map_err(invalid)?
+            .changes;
         if changes.is_empty() {
             return Err(invalid("submission selection contains no pending tickets"));
         }

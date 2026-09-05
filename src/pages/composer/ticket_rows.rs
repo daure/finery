@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use ratatui::{layout::Constraint, style::Style};
 use tuicore::{
     ActivationMode, CellContext, Column, DataView, SelectionGlyphs, SelectionMode,
-    SelectionPropagation, SelectionTrigger, TreeAdapter, theme,
+    SelectionTrigger, TreeAdapter, theme,
 };
 
 use crate::{
@@ -33,6 +33,7 @@ pub(super) struct TicketRow {
     attachment: Option<crate::store::composer::TicketAttachment>,
     mermaid_diagrams: Vec<crate::store::composer::MermaidDiagram>,
     mermaid_diagram: Option<crate::store::composer::MermaidDiagram>,
+    selected_descendant_count: usize,
 }
 
 #[cfg(test)]
@@ -56,10 +57,13 @@ pub(super) fn ticket_data_view_with_number_jump(
         .row_height_by(|row| row.row_height())
         .activation_mode(ActivationMode::OnNavigate)
         .selection_mode(SelectionMode::Multi)
-        .selection_propagation(SelectionPropagation::CascadeDescendants)
+        // Jira hierarchy never cascades downward. Checkboxes render the effective
+        // commit scope; required parents are derived upward without becoming explicit.
         .selection_trigger(SelectionTrigger::OnActivate)
         .selection_glyphs(SelectionGlyphs::NERD_FONT)
-        .selection_disabled_by(|row| row.item.submitted)
+        .selection_disabled_by(|row| {
+            row.item.submitted || row.attachment.is_some() || row.mermaid_diagram.is_some()
+        })
         .selection_glyph_hidden_by(|row| row.attachment.is_some() || row.mermaid_diagram.is_some())
         .selection_disabled_glyph("󱋭")
         .tree(TreeAdapter::parent_id(|row: &TicketRow| {
@@ -71,13 +75,7 @@ pub(super) fn ticket_data_view_with_number_jump(
                 .map(|row| row.item.id)
                 .collect::<Vec<_>>(),
         )
-        .selected(
-            state
-                .active_set()
-                .into_iter()
-                .flat_map(|set| set.selected_ticket_ids.clone())
-                .collect::<Vec<_>>(),
-        )
+        .selected(effective_ticket_selection(state))
         .copy_hotkey("yu", move |row| {
             (!row.item.key.starts_with("NEW-")).then(|| {
                 jira_base_url
@@ -90,6 +88,20 @@ pub(super) fn ticket_data_view_with_number_jump(
     }
     set_active_ticket_style(&mut view, state.selected_ticket.clone());
     view
+}
+
+pub(super) fn effective_ticket_selection(state: &ComposerState) -> Vec<String> {
+    let mut effective = state
+        .active_set()
+        .map(|set| set.selected_ticket_ids.clone())
+        .unwrap_or_default();
+    let required = state.required_ancestor_ids(&effective).unwrap_or_default();
+    for id in required {
+        if !effective.contains(&id) {
+            effective.push(id);
+        }
+    }
+    effective
 }
 
 pub(super) fn set_active_ticket_style(
@@ -154,6 +166,21 @@ pub(super) fn ticket_rows(state: &ComposerState) -> Vec<TicketRow> {
         .collect::<HashMap<_, _>>();
     for row in &mut rows {
         row.depth = ticket_row_depth(&row.parent_id, &parents);
+    }
+    let explicit = state
+        .active_set()
+        .map(|set| set.selected_ticket_ids.clone())
+        .unwrap_or_default();
+    let mut selected_below = HashMap::<String, usize>::new();
+    for id in &explicit {
+        let mut parent = parents.get(id).and_then(Option::as_ref);
+        while let Some(parent_id) = parent {
+            *selected_below.entry(parent_id.clone()).or_default() += 1;
+            parent = parents.get(parent_id).and_then(Option::as_ref);
+        }
+    }
+    for row in &mut rows {
+        row.selected_descendant_count = selected_below.get(&row.item.id).copied().unwrap_or(0);
     }
     rows
 }
@@ -282,6 +309,7 @@ fn ticket_row(
             .map(|ticket| ticket.mermaid_diagrams.clone())
             .unwrap_or_default(),
         mermaid_diagram: None,
+        selected_descendant_count: 0,
     })
 }
 
@@ -311,6 +339,11 @@ fn ticket_columns(number_jump: Rc<RefCell<TicketNumberJump>>) -> Vec<Column<Tick
                         diagram.published_attachment_id.is_some(),
                     );
                 }
+                let mut annotations = row.parent_delta.iter().cloned().collect::<Vec<_>>();
+                if !context.expanded && row.selected_descendant_count > 0 {
+                    annotations.push(format!("{} selected below", row.selected_descendant_count));
+                }
+                let annotation = (!annotations.is_empty()).then(|| annotations.join(" • "));
                 ticket_summary_text(
                     &row.item,
                     number_jump.borrow().query(),
@@ -319,7 +352,7 @@ fn ticket_columns(number_jump: Rc<RefCell<TicketNumberJump>>) -> Vec<Column<Tick
                         subtask_progress: row.subtask_progress,
                         fix_versions: &row.fix_versions,
                         epic_name: row.epic_name.as_deref(),
-                        annotation: row.parent_delta.as_deref(),
+                        annotation: annotation.as_deref(),
                     },
                 )
             },
@@ -370,6 +403,7 @@ impl TicketRow {
             attachment: Some(attachment),
             mermaid_diagrams: Vec::new(),
             mermaid_diagram: None,
+            selected_descendant_count: 0,
         }
     }
 
@@ -406,6 +440,7 @@ impl TicketRow {
             attachment: None,
             mermaid_diagrams: Vec::new(),
             mermaid_diagram: Some(diagram),
+            selected_descendant_count: 0,
         }
     }
 

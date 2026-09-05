@@ -16,6 +16,7 @@ Every application using this architecture must adhere to these invariants:
 - **Semantic Themes:** Every UI style and color resolves through semantic roles in `tuicore::Theme` (loaded from `tui.toml`). Per-role overrides must be supported.
 - **Dynamic Help:** Shortcut help is dynamic, reflectively generated from resolved keybindings using `KeySpec::label()`. Hard-coded shortcut labels are prohibited.
 - **Explicit Side Effects:** Remote writes or state modifications are explicit, user-visible actions. Destructive operations require confirmation, and failures must become visible UI states.
+- **Explicit Composer Selection:** Composer hierarchy never expands ticket selection downward. TUI and MCP submission follow the explicit/required/effective contract in [`docs/composer-selection.md`](docs/composer-selection.md).
 - **Accessible Design:** Icons enhance the visual layout, but text carries the primary meaning. Every Nerd Font icon must have a clear ASCII/Unicode fallback or be omitted when no fallback exists.
 
 ## Design Goals

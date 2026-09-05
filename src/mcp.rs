@@ -147,6 +147,9 @@ struct RefreshChangeSet {
 struct SubmitChangeSet {
     change_set_id: String,
     expected_revision: i64,
+    /// Explicit tickets to submit for this invocation. Stored TUI selection is
+    /// ignored. Finery may add only unsent local NEW-* ancestors required to
+    /// create a selected draft, and submits those ancestors parent-first.
     #[schemars(length(min = 1))]
     selected_ticket_ids: Vec<String>,
     #[serde(rename = "updateTitle", alias = "update_title")]

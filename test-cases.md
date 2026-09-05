@@ -11,7 +11,7 @@
 - For direct Atlassian MCP verification, use cloud ID `f9a8cf64-4f00-42cb-9962-bc6ce7780a77`.
 - Use a fresh change set for each P0 case. Record the full `get_change_set` view and its **inner change-set revision** before every MCP mutation.
 - After every local mutation, refresh, submit, or error, reread the change set. After every Jira submit attempt, fetch every affected Jira issue directly.
-- Use explicit `selected_ticket_ids` for submission. Stored UI selection must never be treated as permission to submit additional tickets.
+- Use explicit `selected_ticket_ids` for submission. Stored UI selection must never be treated as permission to submit additional tickets. Jira hierarchy never selects descendants implicitly; only unsent local `NEW-*` ancestors may be added as required dependencies.
 - Run destructive Jira cases last. Record created Jira keys so they can be cleaned up afterwards.
 - Do not expect a fixed revision increment for submissions containing drafts: durable create-attempt persistence may add an intermediate revision.
 - After completing and verifying a test case, delete its change set locally. Reread it first and use its current revision; this never deletes Jira fixtures.
@@ -99,7 +99,7 @@ Prepare two valid, visibly different diagrams with the current run marker in the
 - [ ] **H-01 — Include and render every work-item kind.** Include `E-A`, `E-B`, `S-A`, `T-A`, `B-A`, and `ST-A`. The UI renders a depth-first hierarchy. All included items are synced, not modified.
 - [ ] **H-02 — Valid moves preserve unrelated structure.** In separate patches move `S-A` from `E-A` to `E-B`, `ST-A` from `S-A` to `T-A`, `T-A` to Root, and `B-A` to Root then under `E-B`. Confirm only moved rows gain a parent delta and every unrelated sibling/descendant retains its parent.
 - [ ] **H-03 — Invalid moves are rejected atomically.** In a multi-operation patch, change a title then attempt an invalid move. Separately attempt a subtask to Root, a parent beneath its descendant, and a ticket beneath a missing parent. Each fails without persisting the preceding title change.
-- [ ] **H-04 — Draft hierarchy submits parent-first.** Add a local epic, story under it, and subtask under that story, all with long content. Submit only the child ID. The service includes unsent ancestors, creates Epic → Story → Sub-task, replaces every local `NEW-*` parent reference with real Jira keys, and leaves unrelated drafts untouched.
+- [ ] **H-04 — Draft hierarchy submits parent-first.** Add a local epic, story under it, and subtask under that story, all with long content. Select only the child: required unsent ancestors become checked automatically, trying to uncheck a required parent is blocked with a warning, and no descendants are selected implicitly. Submit only the child ID. The service includes unsent ancestors, creates Epic → Story → Sub-task, replaces every local `NEW-*` parent reference with real Jira keys, and leaves unrelated drafts untouched.
 - [ ] **H-05 — Draft labels are presentation only.** A pending added KAN ticket renders `A • KAN-DRAFT • To Do` while preserving its internal `NEW-*` identity. After submit it shows its actual Jira key, remains submitted, and no longer uses the draft label.
 
 ### Jira creates, updates, and field preservation
