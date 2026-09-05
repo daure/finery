@@ -132,6 +132,8 @@ fn attachment_calls_return_images_text_blobs_and_partial_errors() {
                 local_data: Some(b"%PDF-1.7".to_vec()),
             },
         ],
+        mermaid_diagrams: Vec::new(),
+        web_links: Vec::new(),
     };
     service.save_change_set(ChangeSet {
         id: "CS-images".into(),

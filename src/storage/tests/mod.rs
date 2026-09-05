@@ -28,6 +28,8 @@ fn ticket(key: &str, title: &str) -> Ticket {
         parent_kind: None,
         has_children: false,
         attachments: Vec::new(),
+        mermaid_diagrams: Vec::new(),
+        web_links: Vec::new(),
     }
 }
 

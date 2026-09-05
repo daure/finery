@@ -10,17 +10,21 @@ use ratatui::{Frame, layout::Rect, style::Style};
 use tuicore::{
     AnimationSettings, Dropdown, DropdownSearchMode, DropdownVariant, EventCtx, EventOutcome,
     EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusTarget, LayoutCtx, LayoutProposal,
-    LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, TickResult, TuiEvent, TuiNode, theme,
+    LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, ScrollContainer, ScrollbarConfig,
+    TickResult, TuiEvent, TuiNode, theme,
 };
 
 use crate::{
     app_settings::{ComposerKeyBindings, ComposerSequenceBinding},
     jira::{JiraAssignee, JiraFieldOptions, JiraFixVersion, JiraOption},
     service::AppService,
-    store::composer::{ComposerAction, ComposerState, PlacementTarget, Ticket, TicketKind},
+    store::composer::{
+        ComposerAction, ComposerState, ComposerViewMode, PlacementTarget, Ticket, TicketKind,
+    },
 };
 
 use super::fields::{BoundLabelsInput, BoundTicketPropertyInput, TicketPropertyText};
+use super::web_links::BoundWebLinks;
 
 type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
 type PropertyDropdown = Dropdown<JiraOption, String>;
@@ -59,7 +63,7 @@ pub(super) struct PropertyFields {
     state: Rc<RefCell<ComposerState>>,
     service: AppService,
     shared: Rc<RefCell<SharedOptions>>,
-    root: Flex<()>,
+    root: ScrollContainer<Flex<()>>,
     sender: Sender<(u64, String, Result<JiraFieldOptions, String>)>,
     receiver: Receiver<(u64, String, Result<JiraFieldOptions, String>)>,
     generation: u64,
@@ -73,7 +77,7 @@ impl PropertyFields {
         keys: ComposerKeyBindings,
     ) -> Self {
         let shared = Rc::new(RefCell::new(SharedOptions::default()));
-        let root = Flex::column()
+        let fields = Flex::column()
             .child(
                 "kind",
                 BoundPropertyDropdown::new(
@@ -163,7 +167,20 @@ impl PropertyFields {
                     keys.labels.clone(),
                 ),
                 FlexItem::fixed(3),
+            )
+            .child(
+                "web-links",
+                BoundWebLinks::new(
+                    Rc::clone(&state),
+                    Rc::clone(&pending),
+                    service.clone(),
+                    keys.web_links.clone(),
+                ),
+                FlexItem::fixed(6),
             );
+        let root = ScrollContainer::vertical(fields)
+            .scrollbars(ScrollbarConfig::default())
+            .focus_reveal(true);
         let (sender, receiver) = mpsc::channel();
         Self {
             state,
@@ -233,7 +250,7 @@ impl PropertyFields {
     }
 }
 
-struct BoundFixVersionsDropdown {
+pub(super) struct BoundFixVersionsDropdown {
     state: Rc<RefCell<ComposerState>>,
     service: AppService,
     control: FixVersionsDropdown,
@@ -243,6 +260,7 @@ struct BoundFixVersionsDropdown {
     ticket_id: Option<String>,
     versions: Vec<JiraFixVersion>,
     selected: Vec<String>,
+    synced_diff: Option<(Vec<String>, Vec<String>)>,
 }
 
 impl BoundFixVersionsDropdown {
@@ -260,6 +278,7 @@ impl BoundFixVersionsDropdown {
         )
         .variant(DropdownVariant::Bordered)
         .label("Fix versions")
+        .show_multi_labels(true)
         .hotkey(hotkey.sequence())
         .on_select(move |names| {
             sink.borrow_mut()
@@ -276,21 +295,60 @@ impl BoundFixVersionsDropdown {
             ticket_id: None,
             versions: Vec::new(),
             selected: Vec::new(),
+            synced_diff: None,
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn for_test(
+        state: Rc<RefCell<ComposerState>>,
+        pending: PendingActions,
+        service: AppService,
+        versions: Vec<JiraFixVersion>,
+    ) -> Self {
+        let mut dropdown = Self::new(
+            state,
+            pending,
+            service,
+            ComposerKeyBindings::default().fix_versions,
+        );
+        dropdown.versions = versions;
+        dropdown.control.set_rows(dropdown.versions.clone());
+        dropdown
+    }
+
     fn sync(&mut self) -> bool {
-        let (ticket_id, project_key, selected, editable, remote_queries_allowed) = {
+        let (ticket_id, project_key, selected, editable, remote_queries_allowed, diff) = {
             let state = self.state.borrow();
-            let ticket = state.selected_changes();
+            let ticket = state.selected_ticket();
+            let selected = ticket
+                .map(|ticket| ticket.fix_versions.clone())
+                .unwrap_or_default();
+            let diff = (state.view_mode == ComposerViewMode::Diff).then(|| {
+                let previous = state
+                    .selected_change()
+                    .and_then(|change| change.original.as_ref())
+                    .map(|ticket| ticket.fix_versions.as_slice())
+                    .unwrap_or_default();
+                let added = selected
+                    .iter()
+                    .filter(|version| !previous.contains(version))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let removed = previous
+                    .iter()
+                    .filter(|version| !selected.contains(version))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (added, removed)
+            });
             (
                 ticket.map(|ticket| ticket.key.clone()),
                 ticket.map(jira_project_key),
-                ticket
-                    .map(|ticket| ticket.fix_versions.clone())
-                    .unwrap_or_default(),
+                selected,
                 state.selected_is_editable(),
                 state.remote_queries_allowed(),
+                diff,
             )
         };
         let mut changed = false;
@@ -312,6 +370,41 @@ impl BoundFixVersionsDropdown {
         if self.selected != selected {
             self.control.set_selected(selected.clone());
             self.selected = selected;
+            changed = true;
+        }
+        if self.synced_diff != diff {
+            if let Some((added, removed)) = &diff {
+                let unchanged = added.is_empty() && removed.is_empty();
+                let added = added.clone();
+                self.control.set_selected_style_by(move |version| {
+                    added.contains(version).then(|| {
+                        let theme = theme();
+                        Style::default()
+                            .fg(theme.diff_added_fg())
+                            .bg(theme.diff_added_bg())
+                    })
+                });
+                if unchanged {
+                    self.control.set_bottom_left("(unchanged)");
+                    self.control.clear_bottom_left_style();
+                } else if removed.is_empty() {
+                    self.control.clear_bottom_left();
+                    self.control.clear_bottom_left_style();
+                } else {
+                    self.control.set_bottom_left(removed.join(", "));
+                    let theme = theme();
+                    self.control.set_bottom_left_style(
+                        Style::default()
+                            .fg(theme.diff_removed_fg())
+                            .bg(theme.diff_removed_bg()),
+                    );
+                }
+            } else {
+                self.control.clear_selected_style_by();
+                self.control.clear_bottom_left();
+                self.control.clear_bottom_left_style();
+            }
+            self.synced_diff = diff;
             changed = true;
         }
         changed

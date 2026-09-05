@@ -167,6 +167,51 @@ pub(crate) fn attachment_summary_text(
     ]))
 }
 
+pub(crate) fn mermaid_diagram_summary_text(
+    title: &str,
+    diagram_type: &str,
+    highlighted: bool,
+) -> Text<'static> {
+    let theme = tuicore::theme();
+    let text_style = Style::default().fg(if highlighted {
+        theme.selected_fg()
+    } else {
+        theme.text_fg()
+    });
+    let muted_style = Style::default().fg(if highlighted {
+        theme.selected_fg()
+    } else {
+        theme.muted_fg()
+    });
+    Text::from(Line::from(vec![
+        Span::styled("A", text_style),
+        Span::styled(" ", text_style),
+        Span::styled(" ", text_style),
+        Span::styled(title.to_owned(), text_style.add_modifier(Modifier::BOLD)),
+        Span::styled(" • ", muted_style),
+        Span::styled(diagram_type_label(diagram_type), muted_style),
+    ]))
+}
+
+fn diagram_type_label(diagram_type: &str) -> String {
+    diagram_type
+        .split_whitespace()
+        .map(|word| match word.to_ascii_lowercase().as_str() {
+            "er" => "ER".into(),
+            "xy" => "XY".into(),
+            "c4" => "C4".into(),
+            _ => {
+                let mut characters = word.chars();
+                let Some(first) = characters.next() else {
+                    return String::new();
+                };
+                format!("{}{}", first.to_uppercase(), characters.as_str())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn attachment_change_badge(change: crate::store::composer::AttachmentChangeKind) -> &'static str {
     match change {
         crate::store::composer::AttachmentChangeKind::Synced => "S",

@@ -10,17 +10,17 @@ use serde_json::json;
 use super::{
     AgileBoard, AgileIssuePage, BACKLOG_FIELDS, BACKLOG_JQL, COMPOSER_FIELDS, ISSUE_FIELDS,
     JiraIssue, JiraSprint, MAX_VELOCITY_GOAL_LOOKUPS, SubmitBatchOutcome, ambiguous_create_failure,
-    apply_attachment_changes, backlog_page_complete, board_backlog, board_backlog_query,
-    board_sprints, commit_order, composer_fields, create_available_statuses_from_value,
-    create_issue_fields, create_issue_type, create_issue_types_from_value, create_response_failure,
-    created_issue_failure, discover_story_points, fetch_composer_issues, fix_versions,
-    hydrate_sprint_subtasks, is_ticket_number_query, issue_fields, issue_key_jql, labels,
-    move_payload, options_from_values, rank_payload, same_jira_content, search_composer_issues,
-    search_jql, select_backlog_board, should_discover_story_points, sprint_issues,
-    story_points_field_for_load, story_points_field_id, story_points_warning, submit_failure,
-    submit_ordered_changes, to_ticket, to_ticket_and_work_item, to_work_item,
-    to_work_item_with_subtasks, update_payload, velocity_average, velocity_report,
-    velocity_sprint_goals,
+    apply_attachment_changes, apply_web_link_changes, backlog_page_complete, board_backlog,
+    board_backlog_query, board_sprints, commit_order, composer_fields,
+    create_available_statuses_from_value, create_issue_fields, create_issue_type,
+    create_issue_types_from_value, create_response_failure, created_issue_failure,
+    discover_story_points, fetch_composer_issues, fix_versions, hydrate_sprint_subtasks,
+    is_ticket_number_query, issue_fields, issue_key_jql, labels, move_payload, options_from_values,
+    rank_payload, same_jira_content, search_composer_issues, search_jql, select_backlog_board,
+    should_discover_story_points, sprint_issues, story_points_field_for_load,
+    story_points_field_id, story_points_warning, submit_failure, submit_ordered_changes, to_ticket,
+    to_ticket_and_work_item, to_work_item, to_work_item_with_subtasks, update_payload,
+    velocity_average, velocity_report, velocity_sprint_goals, web_link_payload, web_links,
 };
 use crate::{
     app_settings::AppSettings,
@@ -28,6 +28,7 @@ use crate::{
     store::{
         composer::{
             AttachmentChangeKind, ChangeKind, Ticket, TicketAttachment, TicketChange, TicketKind,
+            TicketWebLink,
         },
         work_items::RankPlan,
     },
@@ -54,6 +55,8 @@ fn ticket(key: &str, kind: TicketKind, parent_key: Option<&str>) -> Ticket {
         parent_kind: None,
         has_children: false,
         attachments: Vec::new(),
+        mermaid_diagrams: Vec::new(),
+        web_links: Vec::new(),
     }
 }
 
@@ -86,6 +89,26 @@ fn one_request_server(listener: TcpListener, body: String) -> thread::JoinHandle
             String::from_utf8_lossy(&request[..size]).into_owned(),
             extra_request,
         )
+    })
+}
+
+fn request_server(listener: TcpListener, bodies: Vec<String>) -> thread::JoinHandle<Vec<String>> {
+    thread::spawn(move || {
+        bodies
+            .into_iter()
+            .map(|body| {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let size = stream.read(&mut request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                )
+                .unwrap();
+                String::from_utf8_lossy(&request[..size]).into_owned()
+            })
+            .collect()
     })
 }
 
@@ -274,38 +297,132 @@ fn composer_fetch_fields_combine_ticket_and_presentation_fields() {
 }
 
 #[test]
-fn composer_source_fetch_uses_one_bulk_request_and_maps_both_models() {
+fn composer_source_fetch_loads_issue_fields_and_web_links() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let settings = jira_settings(format!("http://{}", listener.local_addr().unwrap()));
-    let server = one_request_server(
+    let server = request_server(
         listener,
-        json!({
-            "issues": [{
-                "key": "FIN-1",
-                "fields": {
-                    "summary": "Ship search",
-                    "project": { "key": "FIN" },
-                    "issuetype": { "name": "Story" },
-                    "fixVersions": [{ "name": "1.0" }],
-                    "customfield_10016": 3
-                }
-            }]
-        })
-        .to_string(),
+        vec![
+            json!({
+                "issues": [{
+                    "key": "FIN-1",
+                    "fields": {
+                        "summary": "Ship search",
+                        "project": { "key": "FIN" },
+                        "issuetype": { "name": "Story" },
+                        "fixVersions": [{ "name": "1.0" }],
+                        "customfield_10016": 3
+                    }
+                }]
+            })
+            .to_string(),
+            "[]".into(),
+        ],
     );
 
     let issues = fetch_composer_issues(&settings, &["FIN-1".into()]).unwrap();
-    let (request, extra_request) = server.join().unwrap();
+    let requests = server.join().unwrap();
 
     let issue = issues.get("FIN-1").unwrap();
     assert_eq!(issue.ticket.title, "Ship search");
     assert_eq!(issue.work_item.fix_versions, ["1.0"]);
     assert_eq!(issue.work_item.story_points, Some(3.0));
-    assert!(request.starts_with("POST /rest/api/3/issue/bulkfetch"));
-    assert!(request.contains("\"description\""));
-    assert!(request.contains("\"fixVersions\""));
-    assert!(request.contains("\"customfield_10016\""));
-    assert!(!extra_request);
+    assert!(requests[0].starts_with("POST /rest/api/3/issue/bulkfetch"));
+    assert!(requests[0].contains("\"description\""));
+    assert!(requests[0].contains("\"fixVersions\""));
+    assert!(requests[0].contains("\"customfield_10016\""));
+    assert!(requests[1].starts_with("GET /rest/api/3/issue/FIN-1/remotelink"));
+}
+
+#[test]
+fn jira_web_links_round_trip_unknown_remote_payload_fields() {
+    let value = json!([{
+        "id": 10001,
+        "globalId": "system=https://example.com&id=docs",
+        "application": { "type": "com.example.docs", "name": "Docs" },
+        "object": {
+            "title": "Old title",
+            "url": "https://example.com/old",
+            "icon": { "url16x16": "https://example.com/icon.png" },
+            "status": { "resolved": false }
+        }
+    }]);
+
+    let mut links = web_links(&value);
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].id, "10001");
+    assert_eq!(
+        links[0].global_id.as_deref(),
+        Some("system=https://example.com&id=docs")
+    );
+    links[0].title = "Current title".into();
+    links[0].url = "https://example.com/current".into();
+
+    let payload = web_link_payload(&links[0]);
+    assert_eq!(payload["object"]["title"], "Current title");
+    assert_eq!(payload["object"]["url"], "https://example.com/current");
+    assert_eq!(
+        payload["object"]["icon"]["url16x16"],
+        "https://example.com/icon.png"
+    );
+    assert_eq!(payload["application"]["name"], "Docs");
+}
+
+#[test]
+fn jira_web_link_changes_delete_update_and_create_remote_links() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = request_server(listener, vec!["{}".into(), "{}".into(), "{}".into()]);
+    let original = vec![
+        TicketWebLink {
+            id: "10001".into(),
+            global_id: None,
+            title: "Remove".into(),
+            url: "https://example.com/remove".into(),
+            remote_payload: None,
+        },
+        TicketWebLink {
+            id: "10002".into(),
+            global_id: None,
+            title: "Old".into(),
+            url: "https://example.com/old".into(),
+            remote_payload: None,
+        },
+    ];
+    let desired = vec![
+        TicketWebLink {
+            id: "10002".into(),
+            global_id: None,
+            title: "Current".into(),
+            url: "https://example.com/current".into(),
+            remote_payload: None,
+        },
+        TicketWebLink {
+            id: "local-docs".into(),
+            global_id: None,
+            title: "New".into(),
+            url: "https://example.com/new".into(),
+            remote_payload: None,
+        },
+    ];
+
+    apply_web_link_changes(
+        &reqwest::blocking::Client::new(),
+        &base_url,
+        "user@example.com",
+        "token",
+        "FIN-1",
+        &original,
+        &desired,
+    )
+    .unwrap();
+
+    let requests = server.join().unwrap();
+    assert!(requests[0].starts_with("DELETE /rest/api/3/issue/FIN-1/remotelink/10001"));
+    assert!(requests[1].starts_with("PUT /rest/api/3/issue/FIN-1/remotelink/10002"));
+    assert!(requests[1].contains("\"title\":\"Current\""));
+    assert!(requests[2].starts_with("POST /rest/api/3/issue/FIN-1/remotelink"));
+    assert!(requests[2].contains("\"url\":\"https://example.com/new\""));
 }
 
 #[test]

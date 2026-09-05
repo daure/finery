@@ -7,12 +7,13 @@ use std::{
 use reqwest::{StatusCode, blocking::Client};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value, json};
+use tuicore::{MermaidRasterOptions, MermaidRenderer, theme};
 
 use crate::{
     app_settings::AppSettings,
     store::composer::{
         AttachmentChangeKind, ChangeKind, SubmissionSnapshot, Ticket, TicketChange, TicketKind,
-        change_parent, jira_adf::markdown_to_adf,
+        TicketWebLink, change_parent, jira_adf::markdown_to_adf,
     },
     store::work_items::{
         BacklogSnapshot, RankPlan, RunwayCapacitySource, Sprint, VelocityReport, VelocitySprint,
@@ -282,38 +283,6 @@ fn is_ticket_number_query(query: &str) -> bool {
             .all(|character| character.is_ascii_digit())
 }
 
-#[cfg(test)]
-pub(crate) fn fetch_tickets(
-    settings: &AppSettings,
-    keys: &[String],
-) -> Result<HashMap<String, Ticket>, String> {
-    if keys.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let (client, base_url, email, token) = configured_client(settings)?;
-    let tickets = bulk_fetch_tickets(
-        &client,
-        &base_url,
-        &email,
-        &token,
-        keys,
-        story_points_field_for_load(settings, None),
-    )?;
-    let missing = keys
-        .iter()
-        .filter(|key| !tickets.contains_key(*key))
-        .cloned()
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
-        Ok(tickets)
-    } else {
-        Err(format!(
-            "Jira did not return requested tickets: {}",
-            missing.join(", ")
-        ))
-    }
-}
-
 pub(crate) fn fetch_recent_work_items(
     settings: &AppSettings,
     keys: &[String],
@@ -396,12 +365,13 @@ pub(crate) fn fetch_composer_issues(
     let issues = response
         .issues
         .into_iter()
-        .map(|issue| {
-            let (ticket, work_item) = to_ticket_and_work_item(issue, story_points_field_id);
+        .map(|issue| -> Result<_, String> {
+            let (mut ticket, work_item) = to_ticket_and_work_item(issue, story_points_field_id);
+            ticket.web_links = fetch_web_links(&client, &base_url, &email, &token, &ticket.key)?;
             let key = ticket.key.clone();
-            (key, JiraComposerIssue { ticket, work_item })
+            Ok((key, JiraComposerIssue { ticket, work_item }))
         })
-        .collect::<HashMap<_, _>>();
+        .collect::<Result<HashMap<_, _>, _>>()?;
     let missing = keys
         .iter()
         .filter(|key| !issues.contains_key(*key))
@@ -2016,12 +1986,15 @@ fn bulk_fetch_tickets(
     }
     let fields = ticket_fields(story_points_field_id);
     let response = request_bulk_fetch(client, base_url, email, token, keys, &fields)?;
-    Ok(response
+    response
         .issues
         .into_iter()
-        .map(|issue| to_ticket_with_story_points(issue, story_points_field_id))
-        .map(|ticket| (ticket.key.clone(), ticket))
-        .collect())
+        .map(|issue| {
+            let mut ticket = to_ticket_with_story_points(issue, story_points_field_id);
+            ticket.web_links = fetch_web_links(client, base_url, email, token, &ticket.key)?;
+            Ok((ticket.key.clone(), ticket))
+        })
+        .collect()
 }
 
 fn request_bulk_fetch(
@@ -2056,8 +2029,26 @@ fn fetch_ticket(
         .query(&[("fields", ticket_fields(story_points_field_id).join(","))])
         .send()
         .map_err(|error| error.to_string())?;
-    response_json::<JiraIssue>(response)
-        .map(|issue| to_ticket_with_story_points(issue, story_points_field_id))
+    let mut ticket = response_json::<JiraIssue>(response)
+        .map(|issue| to_ticket_with_story_points(issue, story_points_field_id))?;
+    ticket.web_links = fetch_web_links(client, base_url, email, token, key)?;
+    Ok(ticket)
+}
+
+fn fetch_web_links(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    key: &str,
+) -> Result<Vec<TicketWebLink>, String> {
+    let response = client
+        .get(format!("{base_url}/rest/api/3/issue/{key}/remotelink"))
+        .basic_auth(email, Some(token))
+        .header("Accept", "application/json")
+        .send()
+        .map_err(|error| error.to_string())?;
+    response_json::<Value>(response).map(|value| web_links(&value))
 }
 
 fn ticket_fields(story_points_field_id: Option<&str>) -> Vec<&str> {
@@ -2159,6 +2150,18 @@ fn create_issue(
     }
     apply_attachment_changes(client, base_url, email, token, &created.key, desired)
         .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
+    apply_mermaid_diagrams(client, base_url, email, token, &created.key, desired)
+        .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
+    apply_web_link_changes(
+        client,
+        base_url,
+        email,
+        token,
+        &created.key,
+        &[],
+        &desired.web_links,
+    )
+    .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
     fetch_ticket(
         client,
         base_url,
@@ -2210,6 +2213,16 @@ fn update_issue(
         )?;
     }
     apply_attachment_changes(client, base_url, email, token, &original.key, desired)?;
+    apply_mermaid_diagrams(client, base_url, email, token, &original.key, desired)?;
+    apply_web_link_changes(
+        client,
+        base_url,
+        email,
+        token,
+        &original.key,
+        &original.web_links,
+        &desired.web_links,
+    )?;
     fetch_ticket(
         client,
         base_url,
@@ -2277,6 +2290,139 @@ fn apply_attachment_changes(
         ensure_success(response)?;
     }
     Ok(())
+}
+
+fn apply_mermaid_diagrams(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    issue_key: &str,
+    desired: &Ticket,
+) -> Result<(), String> {
+    let renderer = MermaidRenderer::new();
+    let active_theme = theme();
+    for diagram in &desired.mermaid_diagrams {
+        let png = if diagram.rendered_png.is_empty()
+            || diagram.rendered_theme != active_theme.name().id()
+        {
+            renderer
+                .render_png_with_theme(
+                    &diagram.markup,
+                    &MermaidRasterOptions::default(),
+                    &active_theme,
+                )
+                .map_err(|error| {
+                    format!(
+                        "Could not render Mermaid diagram {}: {error}",
+                        diagram.title
+                    )
+                })?
+        } else {
+            diagram.rendered_png.clone()
+        };
+        let part = reqwest::blocking::multipart::Part::bytes(png)
+            .file_name(mermaid_png_filename(&diagram.title))
+            .mime_str("image/png")
+            .map_err(|error| error.to_string())?;
+        let form = reqwest::blocking::multipart::Form::new().part("file", part);
+        let response = client
+            .post(format!(
+                "{base_url}/rest/api/3/issue/{issue_key}/attachments"
+            ))
+            .basic_auth(email, Some(token))
+            .header("Accept", "application/json")
+            .header("X-Atlassian-Token", "no-check")
+            .multipart(form)
+            .send()
+            .map_err(|error| error.to_string())?;
+        ensure_success(response)?;
+    }
+    Ok(())
+}
+
+fn mermaid_png_filename(title: &str) -> String {
+    let stem = title
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    format!("{}.png", if stem.is_empty() { "diagram" } else { &stem })
+}
+
+fn apply_web_link_changes(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    issue_key: &str,
+    original: &[TicketWebLink],
+    desired: &[TicketWebLink],
+) -> Result<(), String> {
+    for link in original
+        .iter()
+        .filter(|link| !desired.iter().any(|desired| desired.id == link.id))
+    {
+        let response = client
+            .delete(format!(
+                "{base_url}/rest/api/3/issue/{issue_key}/remotelink/{}",
+                link.id
+            ))
+            .basic_auth(email, Some(token))
+            .send()
+            .map_err(|error| error.to_string())?;
+        ensure_success(response)?;
+    }
+    for link in desired {
+        let previous = original.iter().find(|original| original.id == link.id);
+        if previous.is_some_and(|previous| previous.title == link.title && previous.url == link.url)
+        {
+            continue;
+        }
+        let payload = web_link_payload(link);
+        let request = if previous.is_some() && !link.id.starts_with("local-") {
+            client.put(format!(
+                "{base_url}/rest/api/3/issue/{issue_key}/remotelink/{}",
+                link.id
+            ))
+        } else {
+            client.post(format!(
+                "{base_url}/rest/api/3/issue/{issue_key}/remotelink"
+            ))
+        };
+        let response = request
+            .basic_auth(email, Some(token))
+            .header("Accept", "application/json")
+            .json(&payload)
+            .send()
+            .map_err(|error| error.to_string())?;
+        ensure_success(response)?;
+    }
+    Ok(())
+}
+
+fn web_link_payload(link: &TicketWebLink) -> Value {
+    let mut payload = link
+        .remote_payload
+        .clone()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let mut object = payload
+        .remove("object")
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    object.insert("title".into(), json!(link.title));
+    object.insert("url".into(), json!(link.url));
+    payload.insert("object".into(), Value::Object(object));
+    Value::Object(payload)
 }
 
 fn delete_issue(
@@ -2571,6 +2717,7 @@ fn same_jira_content(left: &Ticket, right: &Ticket) -> bool {
         && left.labels == right.labels
         && left.parent_key == right.parent_key
         && left.attachments == right.attachments
+        && left.web_links == right.web_links
 }
 
 fn response_json<T: for<'de> Deserialize<'de>>(

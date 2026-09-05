@@ -16,8 +16,9 @@ use tuicore::{
 };
 
 use super::change_set_list::change_set_share_text;
+use super::fields::{BoundLabelsInput, BoundTicketPropertyInput, TicketPropertyText};
 use super::page::ComposerPage;
-use super::property_fields::BoundPropertyDropdown;
+use super::property_fields::{BoundFixVersionsDropdown, BoundPropertyDropdown};
 use super::source::SourceController;
 use super::speed_reader_text::clean_for_speed_reader;
 use super::submission::SubmissionController;
@@ -26,6 +27,7 @@ use super::{
     ticket_rows::{ticket_data_view, ticket_rows},
 };
 use crate::{
+    app_settings::AppSettings,
     jira::JiraOption,
     service::{AppService, composer_service::ChangeSetPatchOperation},
     store::composer::{
@@ -61,6 +63,8 @@ fn share_ticket(key: &str, title: &str, kind: TicketKind, parent_key: Option<&st
         parent_kind: None,
         has_children: false,
         attachments: Vec::new(),
+        mermaid_diagrams: Vec::new(),
+        web_links: Vec::new(),
     }
 }
 
@@ -361,6 +365,18 @@ fn last_target(page: &mut ComposerPage, id: &str) -> tuicore::FocusTarget {
         .clone()
 }
 
+fn last_visible_target(page: &mut ComposerPage, id: &str) -> tuicore::FocusTarget {
+    let mut layout = LayoutCtx::new();
+    page.layout(Rect::new(0, 0, TEST_WIDTH, 40), &mut layout);
+    layout
+        .focus_targets()
+        .iter()
+        .rev()
+        .find(|target| target.id == FocusId::new(id) && !target.area.is_empty())
+        .unwrap()
+        .clone()
+}
+
 fn open_new_ticket(page: &mut ComposerPage) {
     page.open_new_ticket(&mut EventCtx::default());
 }
@@ -597,6 +613,31 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     page.event(
         &TuiEvent::Key(KeyEvent::from(Key::Esc)),
         &mut EventCtx::default(),
+    );
+}
+
+#[test]
+fn desktop_composer_keeps_the_ticket_list_as_the_only_primary_data_view() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 1);
+    let mut layout = LayoutCtx::new();
+
+    page.layout(Rect::new(0, 0, 140, 40), &mut layout);
+
+    assert_eq!(
+        layout
+            .focus_targets()
+            .iter()
+            .filter(|target| target.id == FocusId::new("data-view"))
+            .count(),
+        1
+    );
+    assert!(
+        layout
+            .focus_targets()
+            .iter()
+            .any(|target| target.id == FocusId::new("web-links-data-view"))
     );
 }
 
@@ -1444,7 +1485,7 @@ fn property_unfocus_first_exits_the_control_then_returns_to_tickets() {
     let tickets = focus(&mut page, "data-view");
     page.dispatch_focus(&tickets, false, &mut FocusCtx::default());
 
-    let story_points = last_target(&mut page, "input");
+    let story_points = last_visible_target(&mut page, "input");
     page.dispatch_focus(&story_points, true, &mut FocusCtx::default());
     page.dispatch_event(
         &EventRoute::new(story_points.path.clone()),
@@ -2140,6 +2181,129 @@ fn changed_diff_property_values_use_diff_colors() {
     let previous = buffer.cell((3, 2)).unwrap();
     assert_eq!(previous.fg, theme.diff_removed_fg());
     assert_eq!(previous.bg, theme.diff_removed_bg());
+}
+
+#[test]
+fn changed_diff_labels_show_added_and_removed_tags() {
+    tuicore::init();
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    state.selected_ticket = Some("FIN-142".into());
+    state.dispatch(ComposerAction::UpdateLabels(vec!["frontend".into()]));
+    state.dispatch(ComposerAction::SetViewMode(ComposerViewMode::Diff));
+    let state = Rc::new(RefCell::new(state));
+    let mut labels = BoundLabelsInput::new(
+        state,
+        Rc::new(RefCell::new(Vec::new())),
+        AppService::for_tests(),
+        AppSettings::default().composer_keys.labels,
+    );
+    let area = Rect::new(0, 0, 60, 3);
+    labels.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            labels.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let text = (0..area.height)
+        .flat_map(|y| (0..area.width).map(move |x| buffer.cell((x, y)).unwrap().symbol()))
+        .collect::<String>();
+    let theme = theme();
+    assert!(text.contains("checkout"));
+    assert!(text.contains("frontend"));
+    assert!(
+        buffer.content().iter().any(|cell| {
+            cell.fg == theme.diff_removed_fg() && cell.bg == theme.diff_removed_bg()
+        })
+    );
+    assert!(
+        buffer
+            .content()
+            .iter()
+            .any(|cell| cell.fg == theme.diff_added_fg() && cell.bg == theme.diff_added_bg())
+    );
+}
+
+#[test]
+fn changed_diff_story_points_show_current_and_previous_values() {
+    tuicore::init();
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    state.selected_ticket = Some("FIN-142".into());
+    state.dispatch(ComposerAction::UpdateStoryPoints(Some(8.0)));
+    state.dispatch(ComposerAction::SetViewMode(ComposerViewMode::Diff));
+    let mut story_points = BoundTicketPropertyInput::new(
+        Rc::new(RefCell::new(state)),
+        Rc::new(RefCell::new(Vec::new())),
+        TicketPropertyText::StoryPoints,
+        AppSettings::default().composer_keys.story_points,
+    );
+    let area = Rect::new(0, 0, 32, 3);
+    story_points.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| story_points.render(frame, area, &mut RenderCtx::new()))
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let theme = theme();
+    assert!(buffer.content().iter().any(|cell| {
+        cell.symbol() == "8" && cell.fg == theme.diff_added_fg() && cell.bg == theme.diff_added_bg()
+    }));
+    assert!(buffer.content().iter().any(|cell| {
+        cell.symbol() == "3"
+            && cell.fg == theme.diff_removed_fg()
+            && cell.bg == theme.diff_removed_bg()
+    }));
+}
+
+#[test]
+fn changed_diff_fix_versions_style_added_values_and_show_removed_values() {
+    tuicore::init();
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    state.selected_ticket = Some("FIN-142".into());
+    state.dispatch(ComposerAction::UpdateFixVersions(vec!["2.0".into()]));
+    state.dispatch(ComposerAction::SetViewMode(ComposerViewMode::Diff));
+    let versions = [
+        serde_json::json!({ "id": "1", "name": "1.0" }),
+        serde_json::json!({ "id": "2", "name": "2.0" }),
+    ]
+    .into_iter()
+    .map(|value| serde_json::from_value(value).unwrap())
+    .collect();
+    let mut fix_versions = BoundFixVersionsDropdown::for_test(
+        Rc::new(RefCell::new(state)),
+        Rc::new(RefCell::new(Vec::new())),
+        AppService::for_tests(),
+        versions,
+    );
+    let area = Rect::new(0, 0, 40, 3);
+    fix_versions.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            fix_versions.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let theme = theme();
+    assert!(buffer.content().iter().any(|cell| {
+        cell.symbol() == "2" && cell.fg == theme.diff_added_fg() && cell.bg == theme.diff_added_bg()
+    }));
+    assert!(buffer.content().iter().any(|cell| {
+        cell.symbol() == "1"
+            && cell.fg == theme.diff_removed_fg()
+            && cell.bg == theme.diff_removed_bg()
+    }));
 }
 
 #[test]

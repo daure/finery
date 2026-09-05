@@ -70,6 +70,10 @@ No retry may create a second authorization.
 
 Change one factual line near `BEGIN`, `MIDDLE`, and `END` during diff tests.
 
+## Attachment fixture
+
+Create local files named with the current run marker: a small UTF-8 text file, a PDF, and valid PNG and JPEG images. Record each file's byte length and SHA-256. Make the text file and PDF available from a disposable HTTPS endpoint as well. Prepare invalid fixtures: an empty file, a file larger than 5 MiB, a PNG renamed `.jpg`, and a non-image file named `.png`.
+
 ## Test cases
 
 ### Local MCP and revision safety
@@ -97,6 +101,16 @@ Change one factual line near `BEGIN`, `MIDDLE`, and `END` during diff tests.
 - [ ] **J-05 — Status, priority, and assignee are distinct changes.** Change all three on an existing ticket. Diff distinguishes them. Submit and verify the Jira status, priority, and account ID. A failed transition/assignment remains pending and displays an error instead of silently applying a subset.
 - [ ] **J-06 — Unsupported ADF is not overwritten implicitly.** Seed an issue with unsupported content such as media or underline. A title-only submission preserves that description. A staged description rewrite must be blocked or visibly fail while leaving Jira unchanged.
 - [ ] **J-07 — Unmanaged Jira fields survive.** Stage a title change. Change labels, components, fix versions, or another unmanaged field directly in Jira. Submit. The local title changes, while Jira-only unmanaged fields remain intact.
+
+### Attachments, previews, and submission
+
+- [ ] **A-01 — Add local and HTTPS attachments without touching Jira.** On a staged existing ticket, add the text file and PNG from local paths, then add the PDF from HTTPS. Exercise inferred and explicit filename/MIME type. The patch advances once, preserves bytes and metadata in the updated snapshot, marks every new file `added`, and makes no Jira history entry. The original snapshot remains unchanged.
+- [ ] **A-02 — Attachment input validation is atomic.** In separate attempts add the empty file, over-5-MiB file, a directory, a non-HTTP(S) URL, a filename with a path/control character, the renamed PNG, and the fake PNG. Each fails before persistence: the revision, attachment list, and Jira history remain unchanged. A valid non-image file may use a non-image MIME type; a valid image must have matching bytes, extension, and MIME type.
+- [ ] **A-03 — Attachment snapshots and MCP reads are precise.** Read the change set, then fetch the original remote attachment and each staged file using its ticket ID, snapshot, attachment ID, and current revision. Confirm original/updated selection is exact; local bytes match their recorded SHA-256; image, UTF-8 text, and other binary responses use their intended MCP content form. Request one missing attachment alongside valid files: valid files still return, while the missing request reports its own error. Verify the 5 MiB per-file and 20 MiB batch limits fail safely.
+- [ ] **A-04 — Removal and recovery distinguish local from Jira files.** Remove a locally added attachment and confirm it disappears from the updated snapshot with no Jira write. Remove a synced Jira attachment and confirm it remains in the snapshot as `deleted`; remove it again and expect rejection. Restore it and confirm it returns to `synced`. Before submission, direct Jira reads must still show the original attachment.
+- [ ] **A-05 — Attachment UI actions target the selected file.** Select an added attachment, a synced attachment, and a deleted attachment in turn. `Ctrl+X` shows only the applicable Remove/Delete/Restore action, never Open; successful actions close the dialog. `Ctrl+R` on a deleted attachment opens Restore rather than “No ticket is selected”, restores it, and closes the dialog. `Ctrl+Enter` remains the explicit open-file shortcut. Verify the row badge and detail pane reflect `A`, `S`, and `D` states, and a local-file rename persists after navigation and restart.
+- [ ] **A-06 — Submit attachment additions and deletions exactly once.** Submit an existing ticket with one staged addition and one staged deletion, then fetch Jira directly. The deletion is absent; the addition has the intended filename, MIME type, byte length, and SHA-256. The ticket is reconciled as submitted and a later submit does not upload/delete again. Repeat with a draft ticket: Jira creates the ticket before its attachment upload, and the uploaded file matches the source.
+- [ ] **A-07 — Attachment failures do not falsely reconcile.** Use a controlled invalid upload or fault injector to fail an attachment upload after other ticket updates are possible. The change set surfaces the failure and does not mark the ticket submitted. Fetch Jira before recovery, record which attachment operations landed, and do not blindly retry a possibly completed deletion or upload.
 
 ### Refresh and concurrency
 
@@ -128,6 +142,7 @@ Change one factual line near `BEGIN`, `MIDDLE`, and `END` during diff tests.
 - [ ] Inspect Jira history for unexpected updates or transitions.
 - [ ] Search every unique create marker and assert zero or one match.
 - [ ] Fetch every unselected issue separately and prove it was untouched.
+- [ ] For every attachment case that submits, fetch Jira attachment metadata and content directly. Confirm each expected filename, MIME type, byte length, and checksum; confirm every staged deletion is absent.
 - [ ] On any timeout, partial response, conflict, or persistence error, stop and reconcile from Jira before retrying.
 
 ## Deliberate non-goals

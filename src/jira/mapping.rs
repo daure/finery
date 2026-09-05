@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use crate::store::{
     composer::{
-        AttachmentChangeKind, Ticket, TicketAttachment, TicketKind,
+        AttachmentChangeKind, Ticket, TicketAttachment, TicketKind, TicketWebLink,
         jira_adf::{adf_is_safe_to_overwrite, adf_overwrite_warning, adf_to_markdown},
     },
     work_items::{BacklogSnapshot, SubtaskProgress, WorkItem, is_done_status},
@@ -54,7 +54,38 @@ pub(super) fn to_ticket(issue: JiraIssue) -> Ticket {
             .as_array()
             .is_some_and(|subtasks| !subtasks.is_empty()),
         attachments: attachments(field("attachment")),
+        mermaid_diagrams: Vec::new(),
+        web_links: Vec::new(),
     }
+}
+
+pub(super) fn web_links(value: &Value) -> Vec<TicketWebLink> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|link| {
+            let object = link.get("object")?;
+            let id = link.get("id")?.as_u64()?.to_string();
+            let title = object.get("title")?.as_str()?.to_owned();
+            let url = object.get("url")?.as_str()?.to_owned();
+            let mut payload = link.clone();
+            if let Some(payload) = payload.as_object_mut() {
+                payload.remove("id");
+                payload.remove("self");
+            }
+            Some(TicketWebLink {
+                id,
+                global_id: link
+                    .get("globalId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                title,
+                url,
+                remote_payload: Some(payload),
+            })
+        })
+        .collect()
 }
 
 pub(super) fn to_ticket_with_story_points(

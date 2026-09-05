@@ -50,6 +50,21 @@ pub(crate) struct Ticket {
     pub has_children: bool,
     #[serde(default)]
     pub attachments: Vec<TicketAttachment>,
+    #[serde(default)]
+    pub mermaid_diagrams: Vec<MermaidDiagram>,
+    #[serde(default)]
+    pub web_links: Vec<TicketWebLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct TicketWebLink {
+    pub id: String,
+    #[serde(default)]
+    pub global_id: Option<String>,
+    pub title: String,
+    pub url: String,
+    #[serde(default)]
+    pub remote_payload: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +82,18 @@ pub(crate) struct TicketAttachment {
     pub change: AttachmentChangeKind,
     #[serde(default)]
     pub local_data: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct MermaidDiagram {
+    pub id: String,
+    pub title: String,
+    pub diagram_type: String,
+    pub markup: String,
+    #[serde(default)]
+    pub rendered_png: Vec<u8>,
+    #[serde(default)]
+    pub rendered_theme: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -316,6 +343,17 @@ pub(crate) enum ComposerAction {
         name: String,
         account_id: String,
     },
+    AddWebLink {
+        id: String,
+        title: String,
+        url: String,
+    },
+    UpdateWebLink {
+        id: String,
+        title: String,
+        url: String,
+    },
+    RemoveWebLink(String),
     AddAttachment {
         filename: String,
         mime_type: Option<String>,
@@ -325,6 +363,27 @@ pub(crate) enum ComposerAction {
     DeleteSelectedAttachment,
     RestoreSelectedAttachment,
     RemoveSelectedAttachment,
+    AddMermaidDiagram {
+        title: String,
+        diagram_type: String,
+        markup: String,
+        rendered_png: Vec<u8>,
+        rendered_theme: String,
+    },
+    RenameSelectedMermaidDiagram(String),
+    UpdateSelectedMermaidDiagramMarkup {
+        markup: String,
+        rendered_png: Vec<u8>,
+        rendered_theme: String,
+    },
+    CacheMermaidDiagram {
+        ticket_id: String,
+        diagram_id: String,
+        markup: String,
+        rendered_png: Vec<u8>,
+        rendered_theme: String,
+    },
+    RemoveSelectedMermaidDiagram,
     CompleteSubmission {
         change_set_id: String,
         id: String,
@@ -553,6 +612,16 @@ impl ComposerState {
         self.ticket_for_change(change)?.attachments.get(index)
     }
 
+    pub(crate) fn selected_mermaid_diagram(&self) -> Option<&MermaidDiagram> {
+        let (ticket_id, index) = self.mermaid_diagram_target()?;
+        let change = self
+            .active_set()?
+            .tickets
+            .iter()
+            .find(|change| change.id == ticket_id)?;
+        self.changes_for_change(change)?.mermaid_diagrams.get(index)
+    }
+
     pub(crate) fn selected_attachment_is_editable(&self) -> bool {
         let Some((ticket_id, index)) = self.attachment_target() else {
             return false;
@@ -577,18 +646,35 @@ impl ComposerState {
     }
 
     pub(crate) fn selected_can_add_attachment(&self) -> bool {
-        let Some(selected) = self.selected_ticket.as_deref() else {
+        let Some(ticket_id) = self.selected_parent_ticket_id() else {
             return false;
         };
-        let ticket_id = selected
-            .rsplit_once(":attachment:")
-            .map_or(selected, |(ticket_id, _)| ticket_id);
         self.view_mode == ComposerViewMode::Changes
             && !self.active_change_set_is_submitting()
             && self
                 .active_set()
                 .and_then(|set| set.tickets.iter().find(|change| change.id == ticket_id))
                 .is_some_and(|change| change.can_edit(true))
+    }
+
+    pub(crate) fn selected_mermaid_diagram_is_editable(&self) -> bool {
+        let Some((ticket_id, index)) = self.mermaid_diagram_target() else {
+            return false;
+        };
+        self.view_mode == ComposerViewMode::Changes
+            && !self.active_change_set_is_submitting()
+            && self.active_set().is_some_and(|set| {
+                set.tickets
+                    .iter()
+                    .find(|change| change.id == ticket_id)
+                    .is_some_and(|change| {
+                        !change.is_submitted()
+                            && change.kind != ChangeKind::Deleted
+                            && self
+                                .changes_for_change(change)
+                                .is_some_and(|ticket| ticket.mermaid_diagrams.get(index).is_some())
+                    })
+            })
     }
 
     pub(crate) fn selected_existing_ticket_key(&self) -> Option<String> {
@@ -991,6 +1077,30 @@ impl ComposerState {
                 ticket.assignee = name;
                 ticket.assignee_account_id = account_id;
             }),
+            ComposerAction::AddWebLink { id, title, url } => {
+                self.edit_selected(|ticket| {
+                    if !ticket.web_links.iter().any(|link| link.id == id) {
+                        ticket.web_links.push(TicketWebLink {
+                            id,
+                            global_id: None,
+                            title,
+                            url,
+                            remote_payload: None,
+                        });
+                    }
+                });
+            }
+            ComposerAction::UpdateWebLink { id, title, url } => {
+                self.edit_selected(|ticket| {
+                    if let Some(link) = ticket.web_links.iter_mut().find(|link| link.id == id) {
+                        link.title = title;
+                        link.url = url;
+                    }
+                });
+            }
+            ComposerAction::RemoveWebLink(id) => self.edit_selected(|ticket| {
+                ticket.web_links.retain(|link| link.id != id);
+            }),
             ComposerAction::AddAttachment {
                 filename,
                 mime_type,
@@ -1020,6 +1130,43 @@ impl ComposerState {
                 })
             }
             ComposerAction::RemoveSelectedAttachment => self.remove_selected_attachment(),
+            ComposerAction::AddMermaidDiagram {
+                title,
+                diagram_type,
+                markup,
+                rendered_png,
+                rendered_theme,
+            } => {
+                self.add_mermaid_diagram(title, diagram_type, markup, rendered_png, rendered_theme)
+            }
+            ComposerAction::RenameSelectedMermaidDiagram(title) => {
+                if !title.trim().is_empty() {
+                    self.edit_selected_mermaid_diagram(|diagram| diagram.title = title)
+                }
+            }
+            ComposerAction::UpdateSelectedMermaidDiagramMarkup {
+                markup,
+                rendered_png,
+                rendered_theme,
+            } => self.edit_selected_mermaid_diagram(|diagram| {
+                diagram.markup = markup;
+                diagram.rendered_png = rendered_png;
+                diagram.rendered_theme = rendered_theme;
+            }),
+            ComposerAction::CacheMermaidDiagram {
+                ticket_id,
+                diagram_id,
+                markup,
+                rendered_png,
+                rendered_theme,
+            } => self.cache_mermaid_diagram(
+                ticket_id,
+                diagram_id,
+                markup,
+                rendered_png,
+                rendered_theme,
+            ),
+            ComposerAction::RemoveSelectedMermaidDiagram => self.remove_selected_mermaid_diagram(),
             ComposerAction::CompleteSubmission {
                 change_set_id,
                 id,
@@ -1186,6 +1333,8 @@ impl ComposerState {
             parent_kind: None,
             has_children: false,
             attachments: Vec::new(),
+            mermaid_diagrams: Vec::new(),
+            web_links: Vec::new(),
         };
         self.validate_new_placement(ticket.kind, &placement, None)?;
         ticket.parent_key = self.resolved_parent_key(&placement);
@@ -1376,7 +1525,7 @@ impl ComposerState {
         &mut self,
         change_set_id: &str,
         id: &str,
-        snapshot: SubmissionSnapshot,
+        mut snapshot: SubmissionSnapshot,
     ) -> Result<(), PlacementError> {
         let set = self
             .change_set_mut(change_set_id)
@@ -1386,6 +1535,14 @@ impl ComposerState {
             .iter_mut()
             .find(|change| change.id == id)
             .ok_or(PlacementError::UnknownTicket)?;
+        let diagrams = change
+            .updated
+            .as_ref()
+            .map(|ticket| ticket.mermaid_diagrams.clone())
+            .unwrap_or_default();
+        if let Some(updated) = snapshot.updated.as_mut() {
+            updated.mermaid_diagrams = diagrams;
+        }
         change.original = snapshot.original.clone();
         change.updated = snapshot.updated.clone();
         change.submitted = Some(snapshot);
@@ -1603,9 +1760,25 @@ impl ComposerState {
         edit(ticket);
     }
 
+    fn selected_parent_ticket_id(&self) -> Option<&str> {
+        let selected = self.selected_ticket.as_deref()?;
+        Some(
+            selected
+                .rsplit_once(":attachment:")
+                .or_else(|| selected.rsplit_once(":diagram:"))
+                .map_or(selected, |(ticket_id, _)| ticket_id),
+        )
+    }
+
     fn attachment_target(&self) -> Option<(String, usize)> {
         let selected = self.selected_ticket.as_deref()?;
         let (ticket_id, index) = selected.rsplit_once(":attachment:")?;
+        Some((ticket_id.to_owned(), index.parse().ok()?))
+    }
+
+    fn mermaid_diagram_target(&self) -> Option<(String, usize)> {
+        let selected = self.selected_ticket.as_deref()?;
+        let (ticket_id, index) = selected.rsplit_once(":diagram:")?;
         Some((ticket_id.to_owned(), index.parse().ok()?))
     }
 
@@ -1613,7 +1786,12 @@ impl ComposerState {
         let selected = self.selected_ticket.clone();
         let ticket_id = selected
             .as_deref()
-            .and_then(|selected| selected.rsplit_once(":attachment:").map(|(id, _)| id))
+            .and_then(|selected| {
+                selected
+                    .rsplit_once(":attachment:")
+                    .or_else(|| selected.rsplit_once(":diagram:"))
+                    .map(|(id, _)| id)
+            })
             .or(selected.as_deref())
             .map(str::to_owned);
         let Some(ticket_id) = ticket_id else {
@@ -1670,6 +1848,86 @@ impl ComposerState {
             }
         });
         self.selected_ticket = Some(ticket_id);
+    }
+
+    fn add_mermaid_diagram(
+        &mut self,
+        title: String,
+        diagram_type: String,
+        markup: String,
+        rendered_png: Vec<u8>,
+        rendered_theme: String,
+    ) {
+        let Some(ticket_id) = self.selected_parent_ticket_id().map(str::to_owned) else {
+            return;
+        };
+        self.selected_ticket = Some(ticket_id.clone());
+        self.edit_selected(|ticket| {
+            ticket.mermaid_diagrams.push(MermaidDiagram {
+                id: local_mermaid_diagram_id(),
+                title,
+                diagram_type,
+                markup,
+                rendered_png,
+                rendered_theme,
+            });
+        });
+        let Some(index) = self
+            .selected_ticket()
+            .map(|ticket| ticket.mermaid_diagrams.len().saturating_sub(1))
+        else {
+            return;
+        };
+        self.selected_ticket = Some(format!("{ticket_id}:diagram:{index}"));
+    }
+
+    fn edit_selected_mermaid_diagram(&mut self, edit: impl FnOnce(&mut MermaidDiagram)) {
+        let Some((ticket_id, index)) = self.mermaid_diagram_target() else {
+            return;
+        };
+        self.selected_ticket = Some(ticket_id.clone());
+        self.edit_selected(|ticket| {
+            if let Some(diagram) = ticket.mermaid_diagrams.get_mut(index) {
+                edit(diagram);
+            }
+        });
+        self.selected_ticket = Some(format!("{ticket_id}:diagram:{index}"));
+    }
+
+    fn remove_selected_mermaid_diagram(&mut self) {
+        let Some((ticket_id, index)) = self.mermaid_diagram_target() else {
+            return;
+        };
+        self.selected_ticket = Some(ticket_id.clone());
+        self.edit_selected(|ticket| {
+            if index < ticket.mermaid_diagrams.len() {
+                ticket.mermaid_diagrams.remove(index);
+            }
+        });
+        self.selected_ticket = Some(ticket_id);
+    }
+
+    fn cache_mermaid_diagram(
+        &mut self,
+        ticket_id: String,
+        diagram_id: String,
+        markup: String,
+        rendered_png: Vec<u8>,
+        rendered_theme: String,
+    ) {
+        let selected = self.selected_ticket.clone();
+        self.selected_ticket = Some(ticket_id);
+        self.edit_selected(|ticket| {
+            if let Some(diagram) = ticket
+                .mermaid_diagrams
+                .iter_mut()
+                .find(|diagram| diagram.id == diagram_id && diagram.markup == markup)
+            {
+                diagram.rendered_png = rendered_png;
+                diagram.rendered_theme = rendered_theme;
+            }
+        });
+        self.selected_ticket = selected;
     }
 
     fn update_selected_kind(&mut self, kind: TicketKind) -> Result<(), PlacementError> {
@@ -1961,6 +2219,15 @@ fn local_attachment_id() -> String {
     format!("local-{timestamp}-{sequence}")
 }
 
+fn local_mermaid_diagram_id() -> String {
+    static NEXT_DIAGRAM: AtomicU64 = AtomicU64::new(1);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let sequence = NEXT_DIAGRAM.fetch_add(1, Ordering::Relaxed);
+    format!("local-diagram-{timestamp}-{sequence}")
+}
+
 pub(crate) fn change_parent(change: &TicketChange) -> Option<String> {
     let ticket = if change.kind == ChangeKind::Deleted {
         change.original.as_ref()
@@ -2012,6 +2279,12 @@ pub(crate) fn rebase_ticket(original: &Ticket, updated: &Ticket, refreshed: &Tic
     }
     if original.attachments != updated.attachments {
         rebased.attachments = updated.attachments.clone();
+    }
+    if original.mermaid_diagrams != updated.mermaid_diagrams {
+        rebased.mermaid_diagrams = updated.mermaid_diagrams.clone();
+    }
+    if original.web_links != updated.web_links {
+        rebased.web_links = updated.web_links.clone();
     }
     rebased
 }
@@ -2092,6 +2365,9 @@ impl ComposerAction {
                 | Self::UpdateFixVersions(_)
                 | Self::UpdateLabels(_)
                 | Self::UpdateAssignee { .. }
+                | Self::AddWebLink { .. }
+                | Self::UpdateWebLink { .. }
+                | Self::RemoveWebLink(_)
                 | Self::RenameSelectedAttachment(_)
                 | Self::DeleteSelectedAttachment
                 | Self::RestoreSelectedAttachment
@@ -2124,10 +2400,18 @@ impl ComposerAction {
                 | Self::UpdateFixVersions(_)
                 | Self::UpdateLabels(_)
                 | Self::UpdateAssignee { .. }
+                | Self::AddWebLink { .. }
+                | Self::UpdateWebLink { .. }
+                | Self::RemoveWebLink(_)
                 | Self::RenameSelectedAttachment(_)
                 | Self::DeleteSelectedAttachment
                 | Self::RestoreSelectedAttachment
                 | Self::RemoveSelectedAttachment
+                | Self::AddMermaidDiagram { .. }
+                | Self::RenameSelectedMermaidDiagram(_)
+                | Self::UpdateSelectedMermaidDiagramMarkup { .. }
+                | Self::CacheMermaidDiagram { .. }
+                | Self::RemoveSelectedMermaidDiagram
                 | Self::BlockTicketRetry { .. }
                 | Self::MarkCreateAttempts { .. }
                 | Self::ResolveCreateAttempt { .. }
@@ -2160,6 +2444,8 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             parent_kind: None,
             has_children: false,
             attachments: Vec::new(),
+            mermaid_diagrams: Vec::new(),
+            web_links: Vec::new(),
         },
         Ticket {
             key: "FIN-157".into(),
@@ -2181,6 +2467,8 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             parent_kind: None,
             has_children: false,
             attachments: Vec::new(),
+            mermaid_diagrams: Vec::new(),
+            web_links: Vec::new(),
         },
         Ticket {
             key: "FIN-131".into(),
@@ -2202,6 +2490,8 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             parent_kind: None,
             has_children: false,
             attachments: Vec::new(),
+            mermaid_diagrams: Vec::new(),
+            web_links: Vec::new(),
         },
         Ticket {
             key: "FIN-166".into(),
@@ -2223,6 +2513,8 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             parent_kind: None,
             has_children: false,
             attachments: Vec::new(),
+            mermaid_diagrams: Vec::new(),
+            web_links: Vec::new(),
         },
     ]
 }

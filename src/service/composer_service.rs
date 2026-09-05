@@ -10,6 +10,7 @@ use reqwest::Url;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
+use tuicore::{MermaidRasterOptions, MermaidRenderer, theme};
 
 use crate::{
     service::composer_attachments::{
@@ -23,7 +24,7 @@ use crate::{
     store::composer::{
         ChangeKind, ChangeSet, ComposerAction, ComposerState, PlacementError, PlacementTarget,
         SubmissionAttemptPhase, SubmissionSnapshot, Ticket, TicketChange, TicketKind,
-        rebase_ticket, submission_attempt_owner,
+        TicketWebLink, rebase_ticket, submission_attempt_owner,
     },
 };
 
@@ -82,6 +83,7 @@ pub struct CatalogTicketView {
     pub parent_kind: Option<TicketKindView>,
     pub has_children: bool,
     pub has_attachments: bool,
+    pub has_web_links: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -127,6 +129,26 @@ pub struct TicketView {
     pub parent_kind: Option<TicketKindView>,
     pub has_children: bool,
     pub attachments: Vec<AttachmentView>,
+    pub mermaid_diagrams: Vec<MermaidDiagramView>,
+    pub web_links: Vec<WebLinkView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MermaidDiagramView {
+    pub id: String,
+    pub title: String,
+    pub diagram_type: String,
+    pub markup: String,
+    pub rendered: bool,
+    pub rendered_theme: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WebLinkView {
+    pub id: String,
+    pub global_id: Option<String>,
+    pub title: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -217,6 +239,22 @@ pub enum ChangeSetPatchOperation {
         ticket_id: String,
         assignee: Option<AssigneeInput>,
     },
+    AddWebLink {
+        ticket_id: String,
+        link_id: String,
+        title: String,
+        url: String,
+    },
+    UpdateWebLink {
+        ticket_id: String,
+        link_id: String,
+        title: String,
+        url: String,
+    },
+    RemoveWebLink {
+        ticket_id: String,
+        link_id: String,
+    },
     AddAttachment {
         ticket_id: String,
         filename: Option<String>,
@@ -226,6 +264,26 @@ pub enum ChangeSetPatchOperation {
     RemoveAttachment {
         ticket_id: String,
         attachment_id: String,
+    },
+    AddMermaidDiagram {
+        ticket_id: String,
+        title: String,
+        diagram_type: String,
+        markup: String,
+    },
+    UpdateMermaidDiagramTitle {
+        ticket_id: String,
+        diagram_id: String,
+        title: String,
+    },
+    UpdateMermaidDiagramMarkup {
+        ticket_id: String,
+        diagram_id: String,
+        markup: String,
+    },
+    RemoveMermaidDiagram {
+        ticket_id: String,
+        diagram_id: String,
     },
     MoveTicket {
         ticket_id: String,
@@ -1223,6 +1281,28 @@ impl ComposerService {
                 update_assignee(state, &ticket_id, assignee)?;
                 Ok(vec![ticket_id])
             }
+            ChangeSetPatchOperation::AddWebLink {
+                ticket_id,
+                link_id,
+                title,
+                url,
+            } => {
+                add_web_link(state, &ticket_id, link_id, title, url)?;
+                Ok(vec![ticket_id])
+            }
+            ChangeSetPatchOperation::UpdateWebLink {
+                ticket_id,
+                link_id,
+                title,
+                url,
+            } => {
+                update_web_link(state, &ticket_id, link_id, title, url)?;
+                Ok(vec![ticket_id])
+            }
+            ChangeSetPatchOperation::RemoveWebLink { ticket_id, link_id } => {
+                remove_web_link(state, &ticket_id, link_id)?;
+                Ok(vec![ticket_id])
+            }
             ChangeSetPatchOperation::AddAttachment {
                 ticket_id,
                 filename,
@@ -1248,6 +1328,76 @@ impl ComposerService {
                 attachment_id,
             } => {
                 remove_attachment(state, &ticket_id, &attachment_id)?;
+                Ok(vec![ticket_id])
+            }
+            ChangeSetPatchOperation::AddMermaidDiagram {
+                ticket_id,
+                title,
+                diagram_type,
+                markup,
+            } => {
+                let (rendered_png, rendered_theme) =
+                    render_mermaid_diagram(&title, &diagram_type, &markup)?;
+                select(state, &ticket_id)?;
+                dispatch(
+                    state,
+                    ComposerAction::AddMermaidDiagram {
+                        title,
+                        diagram_type,
+                        markup,
+                        rendered_png,
+                        rendered_theme,
+                    },
+                )?;
+                Ok(vec![ticket_id])
+            }
+            ChangeSetPatchOperation::UpdateMermaidDiagramTitle {
+                ticket_id,
+                diagram_id,
+                title,
+            } => {
+                let index = mermaid_diagram_index(state, &ticket_id, &diagram_id)?;
+                if title.trim().is_empty() {
+                    return Err(invalid("diagram title must not be empty"));
+                }
+                select_mermaid_diagram(state, &ticket_id, index)?;
+                dispatch(state, ComposerAction::RenameSelectedMermaidDiagram(title))?;
+                Ok(vec![ticket_id])
+            }
+            ChangeSetPatchOperation::UpdateMermaidDiagramMarkup {
+                ticket_id,
+                diagram_id,
+                markup,
+            } => {
+                let index = mermaid_diagram_index(state, &ticket_id, &diagram_id)?;
+                let diagram_type = editable_ticket(state, &ticket_id)?
+                    .mermaid_diagrams
+                    .get(index)
+                    .map(|diagram| diagram.diagram_type.as_str())
+                    .ok_or_else(|| ServiceError::NotFound {
+                        resource: "mermaid diagram".into(),
+                        id: diagram_id.clone(),
+                    })?;
+                let (rendered_png, rendered_theme) =
+                    render_mermaid_diagram("diagram", diagram_type, &markup)?;
+                select_mermaid_diagram(state, &ticket_id, index)?;
+                dispatch(
+                    state,
+                    ComposerAction::UpdateSelectedMermaidDiagramMarkup {
+                        markup,
+                        rendered_png,
+                        rendered_theme,
+                    },
+                )?;
+                Ok(vec![ticket_id])
+            }
+            ChangeSetPatchOperation::RemoveMermaidDiagram {
+                ticket_id,
+                diagram_id,
+            } => {
+                let index = mermaid_diagram_index(state, &ticket_id, &diagram_id)?;
+                select_mermaid_diagram(state, &ticket_id, index)?;
+                dispatch(state, ComposerAction::RemoveSelectedMermaidDiagram)?;
                 Ok(vec![ticket_id])
             }
             ChangeSetPatchOperation::MoveTicket {
@@ -1604,6 +1754,131 @@ fn update_assignee(
     select(state, ticket_id)?;
     dispatch(state, ComposerAction::UpdateAssignee { name, account_id })
 }
+
+fn add_web_link(
+    state: &mut ComposerState,
+    ticket_id: &str,
+    link_id: String,
+    title: String,
+    url: String,
+) -> Result<(), ServiceError> {
+    if !link_id.starts_with("local-") || link_id.trim() == "local-" {
+        return Err(invalid("new web-link IDs must start with local-"));
+    }
+    let (title, url) = validate_web_link(title, url)?;
+    let change = editable_change(state, ticket_id)?;
+    if change
+        .updated
+        .as_ref()
+        .or(change.original.as_ref())
+        .is_some_and(|ticket| ticket.web_links.iter().any(|link| link.id == link_id))
+    {
+        return Err(ServiceError::AlreadyExists {
+            resource: "web link".into(),
+            id: link_id,
+        });
+    }
+    select(state, ticket_id)?;
+    dispatch(
+        state,
+        ComposerAction::AddWebLink {
+            id: link_id,
+            title,
+            url,
+        },
+    )
+}
+
+fn update_web_link(
+    state: &mut ComposerState,
+    ticket_id: &str,
+    link_id: String,
+    title: String,
+    url: String,
+) -> Result<(), ServiceError> {
+    let (title, url) = validate_web_link(title, url)?;
+    ensure_web_link(state, ticket_id, &link_id)?;
+    select(state, ticket_id)?;
+    dispatch(
+        state,
+        ComposerAction::UpdateWebLink {
+            id: link_id,
+            title,
+            url,
+        },
+    )
+}
+
+fn remove_web_link(
+    state: &mut ComposerState,
+    ticket_id: &str,
+    link_id: String,
+) -> Result<(), ServiceError> {
+    ensure_web_link(state, ticket_id, &link_id)?;
+    select(state, ticket_id)?;
+    dispatch(state, ComposerAction::RemoveWebLink(link_id))
+}
+
+fn ensure_web_link(
+    state: &ComposerState,
+    ticket_id: &str,
+    link_id: &str,
+) -> Result<(), ServiceError> {
+    let change = editable_change(state, ticket_id)?;
+    let ticket = change.updated.as_ref().or(change.original.as_ref());
+    if ticket.is_some_and(|ticket| ticket.web_links.iter().any(|link| link.id == link_id)) {
+        Ok(())
+    } else {
+        Err(ServiceError::NotFound {
+            resource: "web link".into(),
+            id: link_id.into(),
+        })
+    }
+}
+
+pub(crate) fn validate_web_link(
+    title: String,
+    url: String,
+) -> Result<(String, String), ServiceError> {
+    let title = title.trim().to_owned();
+    let url = url.trim();
+    if title.is_empty() {
+        return Err(invalid("web-link title must not be empty"));
+    }
+    let url = if url.contains("://") {
+        url.to_owned()
+    } else {
+        format!("https://{url}")
+    };
+    let parsed = Url::parse(&url).map_err(|_| invalid("web-link URL is invalid"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(invalid("web-link URL must use http or https"));
+    }
+    let valid_host = parsed.host_str().is_some_and(|host| {
+        host.contains('.')
+            && host.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && label
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric() || character == '-')
+                    && label
+                        .chars()
+                        .next()
+                        .is_some_and(|character| character.is_ascii_alphanumeric())
+                    && label
+                        .chars()
+                        .last()
+                        .is_some_and(|character| character.is_ascii_alphanumeric())
+            })
+    });
+    if !valid_host {
+        return Err(invalid(
+            "web-link URL must contain a valid domain with at least one dot",
+        ));
+    }
+    Ok((title, url))
+}
 fn read_attachment(source: &AttachmentSourceInput) -> Result<(String, Vec<u8>), ServiceError> {
     match source {
         AttachmentSourceInput::FilePath { path } => read_attachment_file(path),
@@ -1800,6 +2075,66 @@ fn remove_attachment(
             ComposerAction::DeleteSelectedAttachment
         },
     )
+}
+
+fn editable_ticket<'a>(
+    state: &'a ComposerState,
+    ticket_id: &str,
+) -> Result<&'a Ticket, ServiceError> {
+    let change = editable_change(state, ticket_id)?;
+    change
+        .updated
+        .as_ref()
+        .or(change.original.as_ref())
+        .ok_or_else(|| invalid("ticket has no editable snapshot"))
+}
+
+fn mermaid_diagram_index(
+    state: &ComposerState,
+    ticket_id: &str,
+    diagram_id: &str,
+) -> Result<usize, ServiceError> {
+    editable_ticket(state, ticket_id)?
+        .mermaid_diagrams
+        .iter()
+        .position(|diagram| diagram.id == diagram_id)
+        .ok_or_else(|| ServiceError::NotFound {
+            resource: "mermaid diagram".into(),
+            id: diagram_id.into(),
+        })
+}
+
+fn select_mermaid_diagram(
+    state: &mut ComposerState,
+    ticket_id: &str,
+    index: usize,
+) -> Result<(), ServiceError> {
+    select(state, ticket_id)?;
+    dispatch(
+        state,
+        ComposerAction::SelectTicket(Some(format!("{ticket_id}:diagram:{index}"))),
+    )
+}
+
+fn render_mermaid_diagram(
+    title: &str,
+    diagram_type: &str,
+    markup: &str,
+) -> Result<(Vec<u8>, String), ServiceError> {
+    if title.trim().is_empty() {
+        return Err(invalid("diagram title must not be empty"));
+    }
+    if diagram_type.trim().is_empty() {
+        return Err(invalid("diagram type must not be empty"));
+    }
+    if markup.trim().is_empty() {
+        return Err(invalid("diagram markup must not be empty"));
+    }
+    let active_theme = theme();
+    MermaidRenderer::new()
+        .render_png_with_theme(markup, &MermaidRasterOptions::default(), &active_theme)
+        .map(|png| (png, active_theme.name().id().to_owned()))
+        .map_err(|error| invalid(format!("invalid Mermaid diagram: {error}")))
 }
 fn clean_values(values: Vec<String>) -> Vec<String> {
     values
@@ -2018,6 +2353,19 @@ impl From<Ticket> for TicketView {
             parent_kind: value.parent_kind.map(Into::into),
             has_children: value.has_children,
             attachments: value.attachments.into_iter().map(Into::into).collect(),
+            mermaid_diagrams: value
+                .mermaid_diagrams
+                .into_iter()
+                .map(|diagram| MermaidDiagramView {
+                    id: diagram.id,
+                    title: diagram.title,
+                    diagram_type: diagram.diagram_type,
+                    markup: diagram.markup,
+                    rendered: !diagram.rendered_png.is_empty(),
+                    rendered_theme: diagram.rendered_theme,
+                })
+                .collect(),
+            web_links: value.web_links.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -2043,6 +2391,18 @@ impl From<Ticket> for CatalogTicketView {
             parent_kind: value.parent_kind.map(Into::into),
             has_children: value.has_children,
             has_attachments: !value.attachments.is_empty(),
+            has_web_links: !value.web_links.is_empty(),
+        }
+    }
+}
+
+impl From<TicketWebLink> for WebLinkView {
+    fn from(value: TicketWebLink) -> Self {
+        Self {
+            id: value.id,
+            global_id: value.global_id,
+            title: value.title,
+            url: value.url,
         }
     }
 }

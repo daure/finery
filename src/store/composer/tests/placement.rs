@@ -24,6 +24,8 @@ fn ticket(id: &str, kind: TicketKind) -> Ticket {
         parent_kind: None,
         has_children: false,
         attachments: Vec::new(),
+        mermaid_diagrams: Vec::new(),
+        web_links: Vec::new(),
     }
 }
 
@@ -527,6 +529,8 @@ fn tasks_allow_subtask_children() {
                 parent_kind: None,
                 has_children: false,
                 attachments: Vec::new(),
+                mermaid_diagrams: Vec::new(),
+                web_links: Vec::new(),
             }),
             updated: None,
             kind: ChangeKind::Synced,

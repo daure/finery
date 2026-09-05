@@ -15,7 +15,7 @@ use tuicore::{
     EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, Key, KeyEvent,
     KeyModifiers, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, MainAlign,
     Panel, PanelHost, Paragraph, RenderCtx, ScrollAxes, ScrollContainer, SpeedReader, Spinner,
-    Split, TextInput, TextInputKeyBindings, TickResult, TuiEvent, TuiNode, keybindings,
+    Split, TextInput, TextInputKeyBindings, TickResult, TuiEvent, TuiNode, keybindings, theme,
 };
 
 use crate::{
@@ -60,7 +60,7 @@ type EditorView = DialogLayer<TicketEditorView, DescriptionReader>;
 pub(super) fn selected_ticket_ids(row_ids: Vec<String>) -> Vec<String> {
     row_ids
         .into_iter()
-        .filter(|id| !id.contains(":attachment:"))
+        .filter(|id| !id.contains(":attachment:") && !id.contains(":diagram:"))
         .collect()
 }
 
@@ -325,6 +325,7 @@ impl TuiNode for CreateTicketForm {
 pub(super) struct TicketEditor {
     state: Rc<RefCell<ComposerState>>,
     pending: PendingActions,
+    diagram_cache_updates: PendingActions,
     description_actions: PendingDescriptionActions,
     settings: Arc<RwLock<AppSettings>>,
     service: AppService,
@@ -358,6 +359,7 @@ impl TicketEditor {
         service: AppService,
     ) -> Self {
         let pending = Rc::new(RefCell::new(Vec::new()));
+        let diagram_cache_updates = Rc::new(RefCell::new(Vec::new()));
         let description_actions = Rc::new(RefCell::new(Vec::new()));
         let keys = settings
             .read()
@@ -386,6 +388,7 @@ impl TicketEditor {
             Rc::clone(&description_actions),
             service.clone(),
             keys.clone(),
+            Rc::clone(&diagram_cache_updates),
         );
         let body = Split::vertical(ticket_list, detail).ratio(1, 2);
         let toolbar_events = Rc::new(RefCell::new(Vec::new()));
@@ -526,6 +529,7 @@ impl TicketEditor {
         Self {
             state,
             pending,
+            diagram_cache_updates,
             description_actions,
             settings,
             service,
@@ -752,6 +756,36 @@ impl TicketEditor {
         }
     }
 
+    fn drain_diagram_cache_updates(&mut self) -> bool {
+        let active_theme = theme().name().id();
+        let actions = self
+            .diagram_cache_updates
+            .borrow_mut()
+            .drain(..)
+            .filter(|action| {
+                matches!(
+                    action,
+                    ComposerAction::CacheMermaidDiagram { rendered_theme, .. }
+                        if rendered_theme == active_theme
+                )
+            })
+            .collect::<Vec<_>>();
+        if actions.is_empty() {
+            return false;
+        }
+        for action in actions {
+            self.state
+                .borrow_mut()
+                .dispatch(action)
+                .expect("diagram cache updates are valid");
+        }
+        if let Some(set) = self.state.borrow().active_set().cloned() {
+            self.service.save_change_set(set);
+        }
+        self.sync();
+        true
+    }
+
     fn drain_outputs(&mut self, ctx: &mut EventCtx<()>) {
         self.drain_description_actions(ctx);
         if self.create_dialog_close_requested.replace(false) {
@@ -859,6 +893,7 @@ impl TicketEditor {
             .iter()
             .any(|action| matches!(action, ComposerAction::SetViewMode(_)));
         let mut ticket_action = false;
+        let mut diagram_removal_target = None;
         let mut persist = false;
         for action in actions {
             if let ComposerAction::ReparentTicket { .. } = action
@@ -872,6 +907,10 @@ impl TicketEditor {
                 self.service
                     .report_notification(tuicore::Notification::error("Remove blocked", error));
                 continue;
+            }
+            let remove_diagram = matches!(action, ComposerAction::RemoveSelectedMermaidDiagram);
+            if remove_diagram {
+                diagram_removal_target = self.adjacent_ticket_row_id();
             }
             ticket_action |= matches!(
                 action,
@@ -890,7 +929,13 @@ impl TicketEditor {
                         "Change blocked",
                         error.to_string(),
                     ));
+                if remove_diagram {
+                    diagram_removal_target = None;
+                }
             }
+        }
+        if let Some(row_id) = diagram_removal_target {
+            self.focus_ticket_row(row_id);
         }
         if persist && let Some(set) = self.state.borrow().active_set().cloned() {
             self.service.save_change_set(set);
@@ -1593,6 +1638,9 @@ impl TicketEditor {
         if self.state.borrow().selected_attachment().is_some() {
             return self.open_attachment_action_dialog(ctx);
         }
+        if self.state.borrow().selected_mermaid_diagram().is_some() {
+            return self.open_mermaid_diagram_action_dialog(ctx);
+        }
         let Some(change) = self.state.borrow().selected_change().cloned() else {
             return false;
         };
@@ -1721,6 +1769,34 @@ impl TicketEditor {
         true
     }
 
+    fn open_mermaid_diagram_action_dialog(&mut self, ctx: &mut EventCtx<()>) -> bool {
+        if self.state.borrow().selected_mermaid_diagram().is_none() {
+            return false;
+        }
+        let keys = self.composer_keys();
+        let sink = Rc::clone(&self.pending);
+        let cancel = Rc::clone(&self.ticket_dialog_close_requested);
+        let close = Rc::clone(&self.ticket_dialog_close_requested);
+        self.ticket_dialog_close_requested.set(false);
+        let dialog = self.view.base_mut().layer_mut();
+        dialog.set_top_left("Diagram action");
+        dialog.set_content(["Remove this local Mermaid diagram from the change set."]);
+        dialog.set_actions(vec![
+            DialogAction::new("Remove")
+                .hotkey(keys.remove.spec())
+                .on_trigger(move || {
+                    sink.borrow_mut()
+                        .push(ComposerAction::RemoveSelectedMermaidDiagram);
+                    close.set(true);
+                }),
+            DialogAction::new("Cancel")
+                .hotkey(keys.dialog_cancel.spec())
+                .on_trigger(move || cancel.set(true)),
+        ]);
+        self.view.base_mut().set_active_with_context(true, ctx);
+        true
+    }
+
     fn handle_open_attachment(
         &mut self,
         event: &TuiEvent,
@@ -1747,6 +1823,54 @@ impl TicketEditor {
         });
         ctx.stop_propagation();
         Some(EventOutcome::Handled)
+    }
+
+    fn handle_open_mermaid_diagram(
+        &mut self,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> Option<EventOutcome> {
+        if !matches!(
+            event,
+            TuiEvent::Key(KeyEvent {
+                code: Key::Enter,
+                modifiers: KeyModifiers::CONTROL,
+            })
+        ) {
+            return None;
+        }
+        let diagram = self.state.borrow().selected_mermaid_diagram()?.clone();
+        let service = self.service.clone();
+        std::thread::spawn(move || {
+            if let Err(error) = service.open_mermaid_diagram(&diagram) {
+                service.report_notification(tuicore::Notification::error(
+                    "Could not open diagram",
+                    error,
+                ));
+            }
+        });
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
+    }
+
+    fn adjacent_ticket_row_id(&self) -> Option<String> {
+        let state = self.state.borrow();
+        let selected = state.selected_ticket.as_ref()?;
+        let rows = ticket_rows(&state);
+        let index = rows.iter().position(|row| &row.item.id == selected)?;
+        rows.get(index + 1)
+            .or_else(|| index.checked_sub(1).and_then(|index| rows.get(index)))
+            .map(|row| row.item.id.clone())
+    }
+
+    fn focus_ticket_row(&mut self, row_id: String) {
+        self.state
+            .borrow_mut()
+            .dispatch(ComposerAction::SelectTicket(Some(row_id.clone())))
+            .expect("adjacent ticket row must exist");
+        let table = self.table_mut();
+        table.highlight_id(&row_id);
+        table.reveal_highlighted_centered();
     }
 
     fn open_restore_reset_dialog(&mut self, ctx: &mut EventCtx<()>) -> bool {
@@ -2036,6 +2160,9 @@ impl TuiNode for TicketEditor {
         if let Some(outcome) = self.handle_open_attachment(event, ctx) {
             return outcome;
         }
+        if let Some(outcome) = self.handle_open_mermaid_diagram(event, ctx) {
+            return outcome;
+        }
         let outcome = self.view.event(event, ctx);
         self.drain_outputs(ctx);
         self.handle_exit(
@@ -2096,6 +2223,9 @@ impl TuiNode for TicketEditor {
             return outcome;
         }
         if let Some(outcome) = self.handle_open_attachment(event, ctx) {
+            return outcome;
+        }
+        if let Some(outcome) = self.handle_open_mermaid_diagram(event, ctx) {
             return outcome;
         }
         let outcome = self.view.dispatch_event(route, event, ctx);
@@ -2178,9 +2308,10 @@ impl TuiNode for TicketEditor {
                     .map_or(TickResult::IDLE, TickResult::scheduled_after)
             }
         };
-        self.view
-            .tick(dt, settings)
-            .merge(if changed || source_changed {
+        let view_result = self.view.tick(dt, settings);
+        let cache_changed = self.drain_diagram_cache_updates();
+        view_result
+            .merge(if changed || source_changed || cache_changed {
                 TickResult::CHANGED
             } else {
                 TickResult::IDLE

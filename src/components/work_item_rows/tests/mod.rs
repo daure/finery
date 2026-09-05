@@ -2,13 +2,22 @@ use ratatui::style::Modifier;
 
 use super::{
     ChangeBadge, TicketRowDetails, WorkItemKind, WorkItemRow, attachment_summary_text,
-    story_points_label, ticket_menu_max_height, ticket_summary_text,
+    mermaid_diagram_summary_text, story_points_label, ticket_menu_max_height, ticket_summary_text,
     work_item_title_with_key_line_with_match,
 };
 
 #[test]
 fn ticket_menu_height_cap_uses_sixty_percent_of_the_viewport() {
     assert_eq!(ticket_menu_max_height(50), 30);
+}
+
+#[test]
+fn mermaid_rows_capitalize_the_diagram_type() {
+    tuicore::init();
+
+    let text = mermaid_diagram_summary_text("Lifecycle", "state", false);
+
+    assert_eq!(text.lines[0].spans.last().unwrap().content, "State");
 }
 
 #[test]

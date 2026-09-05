@@ -29,8 +29,6 @@ use crate::{
     },
 };
 
-#[cfg(test)]
-use super::components::backlog_tree;
 use super::components::{
     BacklogDestination, BacklogQuickMenu, BacklogQuickMenuEvent, BacklogSectionEvent, BacklogTree,
     backlog_tree_with_filters,

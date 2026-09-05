@@ -33,6 +33,7 @@ use super::fields::{
     BoundDescription, BoundDescriptionDiffStyle, BoundTextField, BoundViewMode, DescriptionAction,
     DescriptionEditRequest, PendingDescriptionActions,
 };
+use super::mermaid::{DiagramContent, DiagramMarkup, DiagramTitle};
 use super::property_fields::PropertyFields;
 
 type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
@@ -43,6 +44,8 @@ type TicketFields = Split<BoundTextField, ResponsiveDetails>;
 type TicketDetail = Split<Flex<()>, TicketFields>;
 type FileFields = Split<AttachmentFilename, Tabs<()>>;
 type FileDetail = Split<Flex<()>, FileFields>;
+type DiagramFields = Split<DiagramTitle, Tabs<()>>;
+type DiagramDetail = Split<Flex<()>, DiagramFields>;
 
 const WIDE_BREAKPOINT: u16 = 100;
 
@@ -86,6 +89,7 @@ pub(super) struct DetailPane {
     service: AppService,
     detail: TicketDetail,
     file: FileDetail,
+    diagram: DiagramDetail,
     empty: SeasonalEmptyState,
 }
 
@@ -96,6 +100,7 @@ impl DetailPane {
         description_actions: PendingDescriptionActions,
         service: AppService,
         keys: ComposerKeyBindings,
+        diagram_cache_updates: PendingActions,
     ) -> Self {
         let title =
             BoundTextField::title(Rc::clone(&state), Rc::clone(&pending), keys.title.clone());
@@ -243,6 +248,38 @@ impl DetailPane {
         .constraints(Constraint::Length(3), Constraint::Fill(1));
         let file = Split::vertical(file_mode, file_fields)
             .constraints(Constraint::Length(1), Constraint::Fill(1));
+        let diagram_tabs = Tabs::new(vec![
+            Tab::new(
+                "Diagram",
+                DiagramContent::new(Rc::clone(&state), diagram_cache_updates),
+            ),
+            Tab::new("Markup", DiagramMarkup::new(Rc::clone(&state))),
+        ])
+        .variant(TabsVariant::Underline)
+        .bordered(true);
+        let diagram_mode = Flex::row()
+            .gap(2)
+            .child(
+                "mode",
+                BoundViewMode::new(Rc::clone(&state), Rc::clone(&pending), keys.view.clone()),
+                FlexItem::fit_content(),
+            )
+            .child(
+                "description-diff-style",
+                BoundDescriptionDiffStyle::new(
+                    Rc::clone(&state),
+                    Rc::clone(&pending),
+                    keys.description_inline.clone(),
+                ),
+                FlexItem::fit_content(),
+            );
+        let diagram_fields = Split::vertical(
+            DiagramTitle::new(Rc::clone(&state), Rc::clone(&pending)),
+            diagram_tabs,
+        )
+        .constraints(Constraint::Length(3), Constraint::Fill(1));
+        let diagram = Split::vertical(diagram_mode, diagram_fields)
+            .constraints(Constraint::Length(1), Constraint::Fill(1));
         Self {
             state,
             description_actions,
@@ -252,13 +289,16 @@ impl DetailPane {
             detail: Split::vertical(mode, fields)
                 .constraints(Constraint::Length(1), Constraint::Fill(1)),
             file,
+            diagram,
             empty: SeasonalEmptyState::new("No tickets added"),
         }
     }
 
     fn active(&self) -> &dyn TuiNode<()> {
         let state = self.state.borrow();
-        if state.selected_attachment().is_some() {
+        if state.selected_mermaid_diagram().is_some() {
+            &self.diagram
+        } else if state.selected_attachment().is_some() {
             &self.file
         } else if state.selected_ticket.is_some() {
             &self.detail
@@ -268,8 +308,11 @@ impl DetailPane {
     }
 
     fn active_mut(&mut self) -> &mut dyn TuiNode<()> {
+        let selected_mermaid_diagram = self.state.borrow().selected_mermaid_diagram().is_some();
         let selected_attachment = self.state.borrow().selected_attachment().is_some();
-        if selected_attachment {
+        if selected_mermaid_diagram {
+            &mut self.diagram
+        } else if selected_attachment {
             &mut self.file
         } else if self.state.borrow().selected_ticket.is_some() {
             &mut self.detail
@@ -331,7 +374,9 @@ impl DetailPane {
     }
 
     fn sync(&mut self) {
-        if self.state.borrow().selected_attachment().is_some() {
+        if self.state.borrow().selected_attachment().is_some()
+            || self.state.borrow().selected_mermaid_diagram().is_some()
+        {
             return;
         }
         let fields = self.detail.second_mut();
@@ -973,12 +1018,15 @@ impl TuiNode for DetailPane {
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         self.sync();
-        if self.state.borrow().selected_attachment().is_some() {
+        if self.state.borrow().selected_mermaid_diagram().is_some() {
+            self.diagram.tick(dt, settings)
+        } else if self.state.borrow().selected_attachment().is_some() {
             self.file.tick(dt, settings)
         } else {
             self.active_mut()
                 .tick(dt, settings)
                 .merge(self.file.tick(dt, settings))
+                .merge(self.diagram.tick(dt, settings))
         }
     }
 
@@ -993,23 +1041,27 @@ impl TuiNode for DetailPane {
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.detail.init(ctx);
         self.file.init(ctx);
+        self.diagram.init(ctx);
         self.empty.init(ctx);
     }
 
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.detail.mount(ctx);
         self.file.mount(ctx);
+        self.diagram.mount(ctx);
         self.empty.mount(ctx);
     }
 
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.empty.unmount(ctx);
+        self.diagram.unmount(ctx);
         self.file.unmount(ctx);
         self.detail.unmount(ctx);
     }
 
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.empty.destroy(ctx);
+        self.diagram.destroy(ctx);
         self.file.destroy(ctx);
         self.detail.destroy(ctx);
     }
@@ -1057,6 +1109,8 @@ mod file_content_tests {
             parent_kind: None,
             has_children: false,
             attachments: vec![attachment],
+            mermaid_diagrams: Vec::new(),
+            web_links: Vec::new(),
         };
         let mut state = ComposerState::from_change_sets(vec![ChangeSet {
             id: "CS-1".into(),
@@ -1119,6 +1173,8 @@ mod file_content_tests {
             parent_kind: None,
             has_children: false,
             attachments: vec![attachment],
+            mermaid_diagrams: Vec::new(),
+            web_links: Vec::new(),
         };
         let mut state = ComposerState::from_change_sets(vec![ChangeSet {
             id: "CS-1".into(),
@@ -1235,6 +1291,8 @@ mod file_content_tests {
             parent_kind: None,
             has_children: false,
             attachments,
+            mermaid_diagrams: Vec::new(),
+            web_links: Vec::new(),
         };
         let mut state = ComposerState::from_change_sets(vec![ChangeSet {
             id: "CS-1".into(),

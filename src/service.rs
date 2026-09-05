@@ -12,6 +12,7 @@ use std::{
 };
 
 use tokio::runtime::Runtime;
+use tuicore::{MermaidRasterOptions, MermaidRenderer, theme};
 
 use crate::{
     app_settings::{
@@ -923,6 +924,31 @@ impl AppService {
         open_external_file(&path)
     }
 
+    pub(crate) fn open_mermaid_diagram(
+        &self,
+        diagram: &crate::store::composer::MermaidDiagram,
+    ) -> Result<(), String> {
+        let active_theme = theme();
+        let data = if diagram.rendered_png.is_empty()
+            || diagram.rendered_theme != active_theme.name().id()
+        {
+            MermaidRenderer::new()
+                .render_png_with_theme(
+                    &diagram.markup,
+                    &MermaidRasterOptions::default(),
+                    &active_theme,
+                )
+                .map_err(|error| format!("Could not render diagram: {error}"))?
+        } else {
+            diagram.rendered_png.clone()
+        };
+        let directory = std::env::temp_dir().join("finery");
+        std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        let path = directory.join(format!("{}-diagram.png", diagram.id));
+        std::fs::write(&path, data).map_err(|error| error.to_string())?;
+        open_external_file(&path)
+    }
+
     fn download_jira_attachment(&self, content_url: &str) -> Result<Vec<u8>, String> {
         self.download_jira_attachment_with_limit(content_url, None)
     }
@@ -988,19 +1014,6 @@ impl AppService {
             ));
         }
         Ok(data)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fetch_jira_tickets(
-        &self,
-        keys: &[String],
-    ) -> Result<HashMap<String, Ticket>, String> {
-        let settings = self
-            .settings
-            .read()
-            .map_err(|_| "settings lock is unavailable".to_string())?
-            .clone();
-        jira::fetch_tickets(&settings, keys)
     }
 
     pub(crate) fn jira_field_options(

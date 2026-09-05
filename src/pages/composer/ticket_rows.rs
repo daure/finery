@@ -11,7 +11,7 @@ use crate::{
         ticket_number_jump::TicketNumberJump,
         work_item_rows::{
             ChangeBadge, TicketRowDetails, WorkItemKind, WorkItemRow, attachment_summary_text,
-            ticket_summary_text, work_item_title_prefix_width,
+            mermaid_diagram_summary_text, ticket_summary_text, work_item_title_prefix_width,
         },
     },
     store::{
@@ -31,6 +31,8 @@ pub(super) struct TicketRow {
     epic_name: Option<String>,
     attachments: Vec<crate::store::composer::TicketAttachment>,
     attachment: Option<crate::store::composer::TicketAttachment>,
+    mermaid_diagrams: Vec<crate::store::composer::MermaidDiagram>,
+    mermaid_diagram: Option<crate::store::composer::MermaidDiagram>,
 }
 
 #[cfg(test)]
@@ -58,7 +60,7 @@ pub(super) fn ticket_data_view_with_number_jump(
         .selection_trigger(SelectionTrigger::OnActivate)
         .selection_glyphs(SelectionGlyphs::NERD_FONT)
         .selection_disabled_by(|row| row.item.submitted)
-        .selection_glyph_hidden_by(|row| row.attachment.is_some())
+        .selection_glyph_hidden_by(|row| row.attachment.is_some() || row.mermaid_diagram.is_some())
         .selection_disabled_glyph("󱋭")
         .tree(TreeAdapter::parent_id(|row: &TicketRow| {
             row.parent_id.clone()
@@ -107,21 +109,25 @@ pub(super) fn set_active_ticket_style(
 pub(super) fn ticket_rows(state: &ComposerState) -> Vec<TicketRow> {
     let changes = state.ordered_changes();
     let temporary_keys = temporary_draft_keys(state, &changes);
-    let mut rows = changes
-        .into_iter()
-        .filter_map(|change| ticket_row(state, change, temporary_keys.get(&change.id)))
-        .flat_map(|row| {
-            let mut attachment_rows = row
-                .attachments
-                .iter()
-                .cloned()
-                .enumerate()
-                .map(|(index, attachment)| TicketRow::attachment_child(&row, attachment, index))
-                .collect::<Vec<_>>();
-            attachment_rows.insert(0, row);
-            attachment_rows
-        })
-        .collect::<Vec<_>>();
+    let mut rows =
+        changes
+            .into_iter()
+            .filter_map(|change| ticket_row(state, change, temporary_keys.get(&change.id)))
+            .flat_map(|row| {
+                let mut attachment_rows = row
+                    .attachments
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .map(|(index, attachment)| TicketRow::attachment_child(&row, attachment, index))
+                    .collect::<Vec<_>>();
+                attachment_rows.extend(row.mermaid_diagrams.iter().cloned().enumerate().map(
+                    |(index, diagram)| TicketRow::mermaid_diagram_child(&row, diagram, index),
+                ));
+                attachment_rows.insert(0, row);
+                attachment_rows
+            })
+            .collect::<Vec<_>>();
     let parents = rows
         .iter()
         .map(|row| (row.item.id.clone(), row.parent_id.clone()))
@@ -251,6 +257,11 @@ fn ticket_row(
         epic_name: presentation.and_then(|presentation| presentation.work_item.epic_name.clone()),
         attachments: ticket.attachments.clone(),
         attachment: None,
+        mermaid_diagrams: state
+            .changes_for_change(change)
+            .map(|ticket| ticket.mermaid_diagrams.clone())
+            .unwrap_or_default(),
+        mermaid_diagram: None,
     })
 }
 
@@ -267,6 +278,13 @@ fn ticket_columns(number_jump: Rc<RefCell<TicketNumberJump>>) -> Vec<Column<Tick
                         &attachment.filename,
                         &attachment.created,
                         attachment.size,
+                        context.highlighted,
+                    );
+                }
+                if let Some(diagram) = row.mermaid_diagram.as_ref() {
+                    return mermaid_diagram_summary_text(
+                        &diagram.title,
+                        &diagram.diagram_type,
                         context.highlighted,
                     );
                 }
@@ -327,11 +345,53 @@ impl TicketRow {
             epic_name: None,
             attachments: Vec::new(),
             attachment: Some(attachment),
+            mermaid_diagrams: Vec::new(),
+            mermaid_diagram: None,
+        }
+    }
+
+    fn mermaid_diagram_child(
+        parent: &Self,
+        diagram: crate::store::composer::MermaidDiagram,
+        index: usize,
+    ) -> Self {
+        Self {
+            item: WorkItemRow {
+                id: format!("{}:diagram:{index}", parent.item.id),
+                key: String::new(),
+                title: String::new(),
+                kind: WorkItemKind::Other,
+                priority: String::new(),
+                status: String::new(),
+                done: false,
+                assignee: String::new(),
+                labels: Vec::new(),
+                story_points: None,
+                show_story_points: false,
+                story_points_estimated: false,
+                story_points_from_average: false,
+                change_badge: None,
+                submitted: false,
+            },
+            parent_id: Some(parent.item.id.clone()),
+            depth: 0,
+            parent_delta: None,
+            subtask_progress: None,
+            fix_versions: Vec::new(),
+            epic_name: None,
+            attachments: Vec::new(),
+            attachment: None,
+            mermaid_diagrams: Vec::new(),
+            mermaid_diagram: Some(diagram),
         }
     }
 
     fn row_height(&self) -> u16 {
-        if self.attachment.is_some() { 1 } else { 2 }
+        if self.attachment.is_some() || self.mermaid_diagram.is_some() {
+            1
+        } else {
+            2
+        }
     }
 }
 

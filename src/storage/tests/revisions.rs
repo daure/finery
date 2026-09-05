@@ -174,6 +174,8 @@ fn snapshot_set(name: &str) -> ChangeSet {
                 parent_kind: None,
                 has_children: false,
                 attachments: Vec::new(),
+                mermaid_diagrams: Vec::new(),
+                web_links: Vec::new(),
             }),
             updated: None,
             kind: ChangeKind::Synced,

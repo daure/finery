@@ -162,6 +162,8 @@ fn ticket(key: &str) -> Ticket {
         parent_kind: None,
         has_children: false,
         attachments: Vec::new(),
+        mermaid_diagrams: Vec::new(),
+        web_links: Vec::new(),
     }
 }
 
@@ -543,6 +545,24 @@ fn patch_persists_multiple_operations_as_one_revision() {
                     ticket_id: "FIN-1".into(),
                     title: "Edited".into(),
                 },
+                ChangeSetPatchOperation::AddWebLink {
+                    ticket_id: "NEW-1".into(),
+                    link_id: "local-draft-docs".into(),
+                    title: "Draft docs".into(),
+                    url: "www.example.com/draft".into(),
+                },
+                ChangeSetPatchOperation::AddWebLink {
+                    ticket_id: "FIN-1".into(),
+                    link_id: "local-existing-docs".into(),
+                    title: "Old docs".into(),
+                    url: "https://example.com/old".into(),
+                },
+                ChangeSetPatchOperation::UpdateWebLink {
+                    ticket_id: "FIN-1".into(),
+                    link_id: "local-existing-docs".into(),
+                    title: "Current docs".into(),
+                    url: "https://example.com/current".into(),
+                },
                 ChangeSetPatchOperation::SetCommitSelection {
                     ticket_ids: vec!["FIN-1".into(), "NEW-1".into()],
                 },
@@ -551,7 +571,7 @@ fn patch_persists_multiple_operations_as_one_revision() {
         .unwrap();
 
     assert_eq!(response.change_set.revision, 2);
-    assert_eq!(response.applied.len(), 3);
+    assert_eq!(response.applied.len(), 6);
     assert_eq!(response.change_set.value.tickets.len(), 2);
     assert_eq!(
         response.change_set.value.tickets[0]
@@ -561,6 +581,20 @@ fn patch_persists_multiple_operations_as_one_revision() {
             .title,
         "Edited"
     );
+    let existing_link = &response.change_set.value.tickets[0]
+        .updated
+        .as_ref()
+        .unwrap()
+        .web_links[0];
+    assert_eq!(existing_link.title, "Current docs");
+    assert_eq!(existing_link.url, "https://example.com/current");
+    let draft_link = &response.change_set.value.tickets[1]
+        .updated
+        .as_ref()
+        .unwrap()
+        .web_links[0];
+    assert_eq!(draft_link.title, "Draft docs");
+    assert_eq!(draft_link.url, "https://www.example.com/draft");
     assert_eq!(
         response.change_set.value.selected_ticket_ids,
         vec!["FIN-1", "NEW-1"]
@@ -655,6 +689,130 @@ fn patch_adds_and_removes_a_file_attachment_in_persistent_storage() {
             .is_empty()
     );
     fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn patch_adds_updates_and_removes_a_local_mermaid_diagram() {
+    let service = service();
+    let added = service
+        .apply_change_set_patch(
+            "CS-1",
+            1,
+            vec![ChangeSetPatchOperation::AddMermaidDiagram {
+                ticket_id: "FIN-1".into(),
+                title: "Order lifecycle".into(),
+                diagram_type: "State".into(),
+                markup: "stateDiagram-v2\n  [*] --> Draft\n  Draft --> Done".into(),
+            }],
+        )
+        .unwrap();
+
+    let diagram = &added.change_set.value.tickets[0]
+        .updated
+        .as_ref()
+        .unwrap()
+        .mermaid_diagrams[0];
+    assert!(diagram.id.starts_with("local-diagram-"));
+    assert_eq!(diagram.title, "Order lifecycle");
+    assert_eq!(diagram.diagram_type, "State");
+    assert!(diagram.rendered);
+    assert_eq!(diagram.rendered_theme, tuicore::theme().name().id());
+    let diagram_id = diagram.id.clone();
+
+    let renamed = service
+        .apply_change_set_patch(
+            "CS-1",
+            2,
+            vec![ChangeSetPatchOperation::UpdateMermaidDiagramTitle {
+                ticket_id: "FIN-1".into(),
+                diagram_id: diagram_id.clone(),
+                title: "Order states".into(),
+            }],
+        )
+        .unwrap();
+    assert_eq!(
+        renamed.change_set.value.tickets[0]
+            .updated
+            .as_ref()
+            .unwrap()
+            .mermaid_diagrams[0]
+            .title,
+        "Order states"
+    );
+
+    let updated = service
+        .apply_change_set_patch(
+            "CS-1",
+            3,
+            vec![ChangeSetPatchOperation::UpdateMermaidDiagramMarkup {
+                ticket_id: "FIN-1".into(),
+                diagram_id: diagram_id.clone(),
+                markup: "stateDiagram-v2\n  [*] --> Open\n  Open --> Closed".into(),
+            }],
+        )
+        .unwrap();
+    let diagram = &updated.change_set.value.tickets[0]
+        .updated
+        .as_ref()
+        .unwrap()
+        .mermaid_diagrams[0];
+    assert_eq!(
+        diagram.markup,
+        "stateDiagram-v2\n  [*] --> Open\n  Open --> Closed"
+    );
+    assert!(diagram.rendered);
+    assert_eq!(diagram.rendered_theme, tuicore::theme().name().id());
+
+    let removed = service
+        .apply_change_set_patch(
+            "CS-1",
+            4,
+            vec![ChangeSetPatchOperation::RemoveMermaidDiagram {
+                ticket_id: "FIN-1".into(),
+                diagram_id,
+            }],
+        )
+        .unwrap();
+    assert!(
+        removed.change_set.value.tickets[0]
+            .updated
+            .as_ref()
+            .unwrap()
+            .mermaid_diagrams
+            .is_empty()
+    );
+}
+
+#[test]
+fn patch_rejects_invalid_mermaid_without_persisting_other_operations() {
+    let service = service();
+
+    let error = service
+        .apply_change_set_patch(
+            "CS-1",
+            1,
+            vec![
+                ChangeSetPatchOperation::UpdateTitle {
+                    ticket_id: "FIN-1".into(),
+                    title: "Changed title".into(),
+                },
+                ChangeSetPatchOperation::AddMermaidDiagram {
+                    ticket_id: "FIN-1".into(),
+                    title: "Broken diagram".into(),
+                    diagram_type: "Flow".into(),
+                    markup: "not Mermaid".into(),
+                },
+            ],
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, ServiceError::InvalidOperation { .. }));
+    let persisted = service.change_set("CS-1").unwrap();
+    assert_eq!(persisted.revision, 1);
+    assert_eq!(
+        persisted.value.tickets[0].original.as_ref().unwrap().title,
+        "Original"
+    );
 }
 
 #[test]

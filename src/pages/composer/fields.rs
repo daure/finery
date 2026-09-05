@@ -5,13 +5,13 @@ use std::{
     time::Duration,
 };
 
-use ratatui::{Frame, layout::Rect};
+use ratatui::{Frame, layout::Rect, style::Style};
 use tuicore::{
     AnimationSettings, BorderKind, DiffStyle, DiffViewer, Dropdown, DropdownLabelPosition,
     DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusRequest,
     FocusTarget, HotkeyEvent, InputChrome, Language, LayoutCtx, LayoutProposal, LayoutResult,
     LayoutSizeHint, LifecycleCtx, Panel, PanelHost, RenderCtx, TagInput, TagInputEvent, TextInput,
-    TextareaInput, TickResult, Toggle, TuiEvent, TuiNode,
+    TextareaInput, TickResult, Toggle, TuiEvent, TuiNode, theme,
 };
 
 use crate::{
@@ -44,6 +44,7 @@ pub(super) struct BoundTicketPropertyInput {
     state: Rc<RefCell<ComposerState>>,
     kind: TicketPropertyText,
     input: TextInput,
+    synced_previous_value: Option<String>,
 }
 
 impl BoundTicketPropertyInput {
@@ -67,25 +68,85 @@ impl BoundTicketPropertyInput {
         } else {
             input
         };
-        Self { state, kind, input }
+        Self {
+            state,
+            kind,
+            input,
+            synced_previous_value: None,
+        }
     }
 
     fn sync(&mut self) -> bool {
-        let state = self.state.borrow();
-        let value = state
-            .selected_ticket()
-            .map(|ticket| self.kind.value(ticket))
-            .unwrap_or_default();
-        let editable = state.selected_is_editable();
+        let (value, editable, previous, value_changed_in_diff) = {
+            let state = self.state.borrow();
+            let value = state
+                .selected_ticket()
+                .map(|ticket| self.kind.value(ticket))
+                .unwrap_or_default();
+            let previous_value = (state.view_mode == ComposerViewMode::Diff).then(|| {
+                state
+                    .selected_change()
+                    .and_then(|change| change.original.as_ref())
+                    .map(|ticket| self.kind.value(ticket))
+                    .unwrap_or_default()
+            });
+            let value_changed_in_diff = previous_value
+                .as_ref()
+                .is_some_and(|previous| previous != &value);
+            let previous = previous_value.map(|previous| {
+                if previous == value {
+                    "(unchanged)".into()
+                } else if previous.is_empty() {
+                    "(none)".into()
+                } else {
+                    previous
+                }
+            });
+            (
+                value,
+                state.selected_is_editable(),
+                previous,
+                value_changed_in_diff,
+            )
+        };
         let value_changed =
             (!self.input.insert_mode() || !editable) && self.input.current_value() != value;
         if value_changed {
-            self.input.set_value(value);
+            self.input.set_value(value.clone());
             self.input.move_cursor_to_end();
         }
         let disabled_changed = editable == self.input.is_disabled();
         self.input.set_disabled(!editable);
-        value_changed || disabled_changed
+        let previous_changed = self.synced_previous_value != previous;
+        if previous_changed {
+            if let Some(previous) = &previous {
+                self.input.set_bottom_left(previous.clone());
+            } else {
+                self.input.clear_bottom_left();
+            }
+            self.synced_previous_value = previous;
+        }
+        if value_changed_in_diff {
+            let theme = theme();
+            if value.is_empty() {
+                self.input.clear_field_text_style();
+            } else {
+                self.input.set_field_text_style(
+                    ratatui::style::Style::default()
+                        .fg(theme.diff_added_fg())
+                        .bg(theme.diff_added_bg()),
+                );
+            }
+            self.input.set_bottom_left_style(
+                ratatui::style::Style::default()
+                    .fg(theme.diff_removed_fg())
+                    .bg(theme.diff_removed_bg()),
+            );
+        } else {
+            self.input.clear_field_text_style();
+            self.input.clear_bottom_left_style();
+        }
+        value_changed || disabled_changed || previous_changed
     }
 }
 
@@ -133,8 +194,21 @@ pub(super) struct BoundLabelsInput {
     labels_generation: u64,
     labels_ticket: Option<String>,
     available_labels: Vec<String>,
-    synced_labels: Vec<String>,
+    synced_labels: Vec<LabelPresentation>,
     editable: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LabelDiff {
+    None,
+    Added,
+    Removed,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct LabelPresentation {
+    label: String,
+    diff: LabelDiff,
 }
 
 impl BoundLabelsInput {
@@ -149,7 +223,7 @@ impl BoundLabelsInput {
             state,
             service,
             pending,
-            input: labels_input(&hotkey, &[], Vec::new()),
+            input: labels_input(&hotkey, &[], &[]),
             hotkey,
             label_sender,
             label_receiver,
@@ -163,15 +237,12 @@ impl BoundLabelsInput {
 
     fn sync(&mut self) -> bool {
         let state = self.state.borrow();
-        let labels = state
-            .selected_ticket()
-            .map(|ticket| ticket.labels.clone())
-            .unwrap_or_default();
+        let labels = label_presentations(&state);
         let editable = state.selected_is_editable();
         if self.synced_labels == labels && self.editable == editable {
             return false;
         }
-        self.input = labels_input(&self.hotkey, &self.available_labels, labels.clone());
+        self.input = labels_input(&self.hotkey, &self.available_labels, &labels);
         self.synced_labels = labels;
         self.editable = editable;
         true
@@ -246,13 +317,77 @@ impl BoundLabelsInput {
 fn labels_input(
     hotkey: &ComposerSequenceBinding,
     options: &[String],
-    labels: Vec<String>,
+    labels: &[LabelPresentation],
 ) -> TagInput {
+    let styles = labels
+        .iter()
+        .map(|label| (label.label.clone(), label.diff))
+        .collect::<std::collections::HashMap<_, _>>();
     TagInput::new(options.iter().cloned())
-        .selected(labels)
+        .selected(labels.iter().map(|label| label.label.clone()))
+        .tag_style_by(move |tag| {
+            let theme = theme();
+            match styles.get(tag.label()).copied().unwrap_or(LabelDiff::None) {
+                LabelDiff::None => None,
+                LabelDiff::Added => Some(
+                    Style::default()
+                        .fg(theme.diff_added_fg())
+                        .bg(theme.diff_added_bg()),
+                ),
+                LabelDiff::Removed => Some(
+                    Style::default()
+                        .fg(theme.diff_removed_fg())
+                        .bg(theme.diff_removed_bg()),
+                ),
+            }
+        })
         .placeholder("Select...")
         .hotkey(hotkey.sequence())
         .panel("Labels")
+}
+
+fn label_presentations(state: &ComposerState) -> Vec<LabelPresentation> {
+    if state.view_mode != ComposerViewMode::Diff {
+        return state
+            .selected_ticket()
+            .into_iter()
+            .flat_map(|ticket| &ticket.labels)
+            .map(|label| LabelPresentation {
+                label: label.clone(),
+                diff: LabelDiff::None,
+            })
+            .collect();
+    }
+    let previous = state
+        .selected_change()
+        .and_then(|change| change.original.as_ref())
+        .map(|ticket| ticket.labels.as_slice())
+        .unwrap_or_default();
+    let current = state
+        .selected_changes()
+        .map(|ticket| ticket.labels.as_slice())
+        .unwrap_or_default();
+    let mut labels = previous
+        .iter()
+        .map(|label| LabelPresentation {
+            label: label.clone(),
+            diff: if current.contains(label) {
+                LabelDiff::None
+            } else {
+                LabelDiff::Removed
+            },
+        })
+        .collect::<Vec<_>>();
+    labels.extend(
+        current
+            .iter()
+            .filter(|label| !previous.contains(label))
+            .map(|label| LabelPresentation {
+                label: label.clone(),
+                diff: LabelDiff::Added,
+            }),
+    );
+    labels
 }
 
 impl TuiNode for BoundLabelsInput {
@@ -298,13 +433,8 @@ impl TuiNode for BoundLabelsInput {
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let options_changed = self.sync_available_labels();
         if options_changed {
-            let labels = self
-                .state
-                .borrow()
-                .selected_ticket()
-                .map(|ticket| ticket.labels.clone())
-                .unwrap_or_default();
-            self.input = labels_input(&self.hotkey, &self.available_labels, labels);
+            let labels = label_presentations(&self.state.borrow());
+            self.input = labels_input(&self.hotkey, &self.available_labels, &labels);
         }
         <TagInput as TuiNode<()>>::tick(&mut self.input, dt, settings).merge(
             if self.sync() || options_changed {
