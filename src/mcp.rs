@@ -1113,7 +1113,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Apply a nonempty ordered local patch atomically. Operations may add a draft and then add its web links, while also changing links on other tickets. New web-link IDs must start with local-. Attachment additions load up to 5 MiB from a local file path or an http(s) URL and store the bytes in the change set; optional filenames and MIME types default from the source where possible. Image signatures and filename extensions are validated. Removing a local addition drops it, while removing a synced attachment stages its Jira deletion. This persists once and never submits Jira."
+        description = "Apply a nonempty ordered local patch atomically. Operations may add a draft and then add its web links, while also changing links on other tickets. New web-link IDs must start with local-. Attachment additions load up to 5 MiB from a local file path or an http(s) URL and store the bytes in the change set; optional filenames and MIME types default from the source where possible. Image signatures and filename extensions are validated. Removing a local addition drops it, while removing a synced attachment stages its Jira deletion. Mermaid operations add, update, or remove diagrams; add_mermaid_diagram requires ticket_id, title, diagram_type, and markup. Supported diagram_types: flowchart, sequence, class, state, ER, gantt, mindmap, architecture, C4, kanban, git graph, pie, packet, timeline, journey, requirement, sankey, radar, info, treemap, block, quadrant chart, XY chart, tree view, ishikawa, event modeling, Venn (any non-empty Mermaid type). This persists once and never submits Jira."
     )]
     async fn apply_change_set_patch(
         &self,

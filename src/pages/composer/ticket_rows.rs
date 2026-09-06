@@ -23,7 +23,7 @@ use crate::{
 #[derive(Clone)]
 pub(super) struct TicketRow {
     pub(super) item: WorkItemRow,
-    parent_id: Option<String>,
+    pub(super) parent_id: Option<String>,
     depth: usize,
     parent_delta: Option<String>,
     subtask_progress: Option<(usize, usize)>,

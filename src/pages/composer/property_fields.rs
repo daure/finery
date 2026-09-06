@@ -9,9 +9,9 @@ use std::{
 use ratatui::{Frame, layout::Rect, style::Style};
 use tuicore::{
     AnimationSettings, Dropdown, DropdownSearchMode, DropdownVariant, EventCtx, EventOutcome,
-    EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusTarget, LayoutCtx, LayoutProposal,
-    LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, ScrollContainer, ScrollbarConfig,
-    TickResult, TuiEvent, TuiNode, theme,
+    EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, HotkeyEvent,
+    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx,
+    ScrollContainer, ScrollbarConfig, TickResult, TreePath, TuiEvent, TuiNode, theme,
 };
 
 use crate::{
@@ -31,6 +31,47 @@ type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
 type PropertyDropdown = Dropdown<JiraOption, String>;
 type FixVersionsDropdown = Dropdown<JiraFixVersion, String>;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
+
+fn property_shortcut_targets(
+    keys: &ComposerKeyBindings,
+) -> HashMap<String, PropertyShortcutTarget> {
+    [
+        (keys.issue_type.sequence(), vec!["body", "kind"], "input"),
+        (keys.parent.sequence(), vec!["body", "parent"], "input"),
+        (keys.status.sequence(), vec!["body", "status"], "input"),
+        (keys.priority.sequence(), vec!["body", "priority"], "input"),
+        (keys.assignee.sequence(), vec!["body", "assignee"], "input"),
+        (
+            keys.story_points.sequence(),
+            vec!["body", "story-points"],
+            "input",
+        ),
+        (
+            keys.fix_versions.sequence(),
+            vec!["body", "fix-versions"],
+            "input",
+        ),
+        (keys.labels.sequence(), vec!["body", "labels"], "tag-input"),
+        (
+            keys.web_links.sequence(),
+            vec!["body", "web-links", "data"],
+            "web-links-data-view",
+        ),
+        (
+            keys.issue_links.sequence(),
+            vec!["body", "issue-links", "data"],
+            "issue-links-data-view",
+        ),
+    ]
+    .into_iter()
+    .map(|(sequence, route, focus_id)| {
+        (
+            sequence.to_owned(),
+            PropertyShortcutTarget { route, focus_id },
+        )
+    })
+    .collect()
+}
 
 fn jira_project_key(ticket: &Ticket) -> String {
     (!ticket.key.starts_with("NEW-"))
@@ -60,6 +101,11 @@ struct SharedOptions {
     values: Option<JiraFieldOptions>,
 }
 
+struct PropertyShortcutTarget {
+    route: Vec<&'static str>,
+    focus_id: &'static str,
+}
+
 pub(super) struct PropertyFields {
     state: Rc<RefCell<ComposerState>>,
     service: AppService,
@@ -68,6 +114,7 @@ pub(super) struct PropertyFields {
     sender: Sender<(u64, String, Result<JiraFieldOptions, String>)>,
     receiver: Receiver<(u64, String, Result<JiraFieldOptions, String>)>,
     generation: u64,
+    shortcut_targets: HashMap<String, PropertyShortcutTarget>,
 }
 
 impl PropertyFields {
@@ -78,6 +125,7 @@ impl PropertyFields {
         keys: ComposerKeyBindings,
     ) -> Self {
         let shared = Rc::new(RefCell::new(SharedOptions::default()));
+        let shortcut_targets = property_shortcut_targets(&keys);
         let fields = Flex::column()
             .child(
                 "kind",
@@ -201,7 +249,33 @@ impl PropertyFields {
             sender,
             receiver,
             generation: 0,
+            shortcut_targets,
         }
+    }
+
+    pub(super) fn activate_shortcut(
+        &mut self,
+        sequence: &str,
+        path: TreePath,
+        ctx: &mut EventCtx<()>,
+    ) -> bool {
+        let Some(target) = self.shortcut_targets.get(sequence) else {
+            return false;
+        };
+        let route = TreePath::from_keys(target.route.iter().copied().map(tuicore::ChildKey::new));
+        self.root.dispatch_event(
+            &EventRoute::new(route),
+            &TuiEvent::Hotkey(HotkeyEvent::Commit(sequence.to_owned())),
+            ctx,
+        );
+        let focus_path = target.route.iter().fold(path, |path, segment| {
+            path.child(tuicore::ChildKey::new(*segment))
+        });
+        ctx.focus(FocusRequest::TargetAt {
+            path: focus_path,
+            id: FocusId::new(target.focus_id),
+        });
+        true
     }
 
     fn ensure_options(&mut self) {

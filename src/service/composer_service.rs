@@ -294,9 +294,14 @@ pub enum ChangeSetPatchOperation {
         ticket_id: String,
         attachment_id: String,
     },
+    /// Add a local Mermaid diagram. Requires ticket_id, title, diagram_type, and markup.
     AddMermaidDiagram {
         ticket_id: String,
         title: String,
+        /// Diagram type. Supported: flowchart, sequence, class, state, ER, gantt,
+        /// mindmap, architecture, C4, kanban, git graph, pie, packet, timeline,
+        /// journey, requirement, sankey, radar, info, treemap, block,
+        /// quadrant chart, XY chart, tree view, ishikawa, event modeling, Venn.
         diagram_type: String,
         markup: String,
     },

@@ -1,5 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     rc::Rc,
     sync::{Arc, RwLock, mpsc::Receiver},
     time::Duration,
@@ -673,7 +674,24 @@ impl TicketEditor {
             )
         };
         let changed_change_set = self.tree_change_set_id != change_set_id;
+        let previous_parents = self
+            .table()
+            .rows()
+            .iter()
+            .filter_map(|row| row.parent_id.clone())
+            .collect::<HashSet<_>>();
         let mut expanded = self.table().tree_expansion_snapshot();
+        let collapsed = previous_parents
+            .into_iter()
+            .filter(|id| !expanded.contains(id))
+            .collect::<HashSet<_>>();
+        for row in &rows {
+            if let Some(parent_id) = &row.parent_id {
+                if !collapsed.contains(parent_id) {
+                    expanded.insert(parent_id.clone());
+                }
+            }
+        }
         expanded.extend(ticket_row_ancestor_ids(&rows, selected.as_deref()));
         self.view
             .base_mut()
@@ -757,6 +775,30 @@ impl TicketEditor {
             .second()
             .second()
             .narrow_border_style()
+    }
+
+    #[cfg(test)]
+    pub(super) fn narrow_selected_index(&self) -> usize {
+        self.view
+            .base()
+            .base()
+            .base()
+            .base()
+            .second()
+            .second()
+            .narrow_selected_index()
+    }
+
+    #[cfg(test)]
+    pub(super) fn wide_panel_focus(&self) -> (bool, bool) {
+        self.view
+            .base()
+            .base()
+            .base()
+            .base()
+            .second()
+            .second()
+            .wide_panel_focus()
     }
 
     #[cfg(test)]

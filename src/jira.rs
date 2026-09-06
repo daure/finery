@@ -2428,11 +2428,10 @@ fn apply_web_link_changes(
     original: &[TicketWebLink],
     desired: &[TicketWebLink],
 ) -> Result<(), String> {
-    for link in original.iter().filter(|link| {
-        !desired
-            .iter()
-            .any(|desired| desired.id == link.id && desired == *link)
-    }) {
+    for link in original
+        .iter()
+        .filter(|link| !desired.iter().any(|desired| desired.id == link.id))
+    {
         let response = client
             .delete(format!(
                 "{base_url}/rest/api/3/issue/{issue_key}/remotelink/{}",

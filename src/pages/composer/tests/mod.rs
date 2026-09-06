@@ -11,8 +11,9 @@ use std::{
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use tuicore::{
     AnimationSettings, CheckState, EventCtx, EventOutcome, EventRoute, ExternalEditorResponse,
-    FocusCtx, FocusId, FocusRequest, HotkeyEvent, Key, KeyEvent, KeyModifiers, LayoutCtx,
-    LifecycleCtx, RenderCtx, TabsBodyBorderStyle, TuiEvent, TuiNode, theme,
+    FocusCtx, FocusId, FocusManager, FocusRequest, FocusTransition, HotkeyEvent, Key, KeyEvent,
+    KeyModifiers, LayoutCtx, LifecycleCtx, RenderCtx, TabsBodyBorderStyle, TuiEvent, TuiNode,
+    theme,
 };
 
 use super::change_set_list::change_set_share_text;
@@ -447,7 +448,10 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     let tabs_hotkeys = target(&mut page, "tabs");
     assert_eq!(
         tabs_hotkeys.hotkey_sequences,
-        vec!["shift+d", "shift+p", "dd", "do", "ds"]
+        vec![
+            "shift+d", "shift+p", "dd", "do", "ds", "it", "pa", "st", "pr", "ee", "sp", "fv", "be",
+            "uu", "ui",
+        ]
     );
     let description_hotkeys = target(&mut page, "textarea");
     assert!(description_hotkeys.hotkey_sequences.is_empty());
@@ -2533,6 +2537,177 @@ fn responsive_details_use_tabs_when_narrow_and_seventy_thirty_panels_when_wide()
 }
 
 #[test]
+fn responsive_details_preserve_the_focused_property_across_breakpoints() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 1);
+    let narrow_area = Rect::new(0, 0, 96, 40);
+    let wide_area = Rect::new(0, 0, 120, 40);
+
+    let tabs = target_at(&mut page, "tabs", narrow_area.width);
+    page.dispatch_event(
+        &EventRoute::new(tabs.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("shift+p".into())),
+        &mut EventCtx::default(),
+    );
+    let mut narrow = LayoutCtx::new();
+    page.layout(narrow_area, &mut narrow);
+    let priority = narrow
+        .focus_targets()
+        .iter()
+        .find(|target| target.hotkey_sequences == ["pr"])
+        .unwrap()
+        .clone();
+    let mut focus = FocusManager::new();
+    apply_focus_transition(
+        &mut page,
+        focus.apply_request(
+            &FocusRequest::TargetAt {
+                path: priority.path.clone(),
+                id: priority.id.clone(),
+            },
+            narrow.focus_targets(),
+        ),
+    );
+
+    for area in [wide_area, narrow_area] {
+        let mut layout = LayoutCtx::new();
+        page.layout(area, &mut layout);
+        apply_focus_transition(&mut page, focus.validate(layout.focus_targets()));
+        assert_eq!(
+            focus.current().unwrap().hotkey_sequences,
+            ["pr"],
+            "the focused property should survive a responsive layout change"
+        );
+    }
+}
+
+#[test]
+fn responsive_details_preserve_description_focus_across_breakpoints() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 1);
+    let narrow_area = Rect::new(0, 0, 96, 40);
+    let wide_area = Rect::new(0, 0, 120, 40);
+    let mut narrow = LayoutCtx::new();
+    page.layout(narrow_area, &mut narrow);
+    let description = narrow
+        .focus_targets()
+        .iter()
+        .find(|target| target.id == FocusId::new("textarea"))
+        .unwrap()
+        .clone();
+    let mut focus = FocusManager::new();
+    apply_focus_transition(
+        &mut page,
+        focus.apply_request(
+            &FocusRequest::TargetAt {
+                path: description.path.clone(),
+                id: description.id.clone(),
+            },
+            narrow.focus_targets(),
+        ),
+    );
+
+    for area in [wide_area, narrow_area] {
+        let mut layout = LayoutCtx::new();
+        page.layout(area, &mut layout);
+        apply_focus_transition(&mut page, focus.validate(layout.focus_targets()));
+        assert_eq!(focus.current().unwrap().id, FocusId::new("textarea"));
+    }
+}
+
+#[test]
+fn wide_panel_focus_selects_the_matching_narrow_tab() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 1);
+    let wide_area = Rect::new(0, 0, 120, 40);
+    let mut wide = LayoutCtx::new();
+    page.layout(wide_area, &mut wide);
+    let priority = wide
+        .focus_targets()
+        .iter()
+        .find(|target| target.hotkey_sequences == ["pr"])
+        .unwrap()
+        .clone();
+    let description = wide
+        .focus_targets()
+        .iter()
+        .find(|target| target.id == FocusId::new("textarea"))
+        .unwrap()
+        .clone();
+    page.layout(Rect::new(0, 0, 96, 40), &mut LayoutCtx::new());
+
+    page.dispatch_focus(&priority, true, &mut FocusCtx::default());
+    assert_eq!(page.narrow_selected_index(), 1);
+    assert_eq!(page.wide_panel_focus(), (false, true));
+
+    page.dispatch_focus(&priority, false, &mut FocusCtx::default());
+    page.dispatch_focus(&description, true, &mut FocusCtx::default());
+    assert_eq!(page.narrow_selected_index(), 0);
+    assert_eq!(page.wide_panel_focus(), (true, false));
+}
+
+#[test]
+fn narrow_property_shortcuts_open_the_properties_tab_and_focus_the_field() {
+    tuicore::init();
+    let area = Rect::new(0, 0, 96, 40);
+    for (sequence, field, focus_id) in [
+        ("it", "kind", "input"),
+        ("pa", "parent", "input"),
+        ("st", "status", "input"),
+        ("pr", "priority", "input"),
+        ("ee", "assignee", "input"),
+        ("sp", "story-points", "input"),
+        ("fv", "fix-versions", "input"),
+        ("be", "labels", "tag-input"),
+        ("uu", "web-links", "web-links-data-view"),
+        ("ui", "issue-links", "issue-links-data-view"),
+    ] {
+        let mut page = composer_page();
+        open_change_set(&mut page, 1);
+        let tabs = target_at(&mut page, "tabs", area.width);
+        let mut hotkey = EventCtx::default();
+
+        page.dispatch_event(
+            &EventRoute::new(tabs.path),
+            &TuiEvent::Hotkey(HotkeyEvent::Commit(sequence.into())),
+            &mut hotkey,
+        );
+        let mut layout = LayoutCtx::new();
+        page.layout(area, &mut layout);
+
+        assert!(render_text_at(&mut page, area.width).contains("Issue type"));
+        let request = hotkey
+            .focus_request()
+            .expect("the property shortcut should request field focus");
+        let mut focus = FocusManager::new();
+        focus.apply_request(request, layout.focus_targets());
+        let focused = focus.current().unwrap_or_else(|| {
+            panic!("shortcut {sequence} focus request should resolve: {request:?}")
+        });
+        assert_eq!(focused.id.as_str(), focus_id, "shortcut {sequence}");
+        assert!(
+            focused.path.keys().iter().any(|key| key.as_str() == field),
+            "shortcut {sequence} should focus {field}"
+        );
+    }
+}
+
+fn apply_focus_transition(page: &mut ComposerPage, transition: Option<FocusTransition>) {
+    let Some(transition) = transition else {
+        return;
+    };
+    if let Some(previous) = transition.previous {
+        page.dispatch_focus(&previous, false, &mut FocusCtx::default());
+    }
+    if let Some(current) = transition.current {
+        page.dispatch_focus(&current, true, &mut FocusCtx::default());
+    }
+}
+
+#[test]
 fn mode_controls_disable_inline_outside_diffs_and_source_uses_dashed_narrow_border() {
     tuicore::init();
     let mut page = composer_page();
@@ -2648,7 +2823,12 @@ fn deleted_ticket_hotkeys_and_escape_return_to_change_sets() {
     let description = target(&mut page, "textarea");
     assert!(description.hotkey_sequences.is_empty());
     let tabs = target(&mut page, "tabs");
-    assert_eq!(tabs.hotkey_sequences, vec!["shift+d", "shift+p", "ds"]);
+    assert_eq!(
+        tabs.hotkey_sequences,
+        vec![
+            "shift+d", "shift+p", "ds", "it", "pa", "st", "pr", "ee", "sp", "fv", "be", "uu", "ui",
+        ]
+    );
 
     let tabs = target(&mut page, "tabs");
     page.dispatch_event(
@@ -2808,6 +2988,55 @@ fn collapsing_a_ticket_parent_survives_the_next_layout() {
         .collect::<String>();
 
     assert!(!text.contains("Nested subtask"));
+}
+
+#[test]
+fn ticket_gaining_attachments_or_diagrams_automatically_expands_parent() {
+    tuicore::init();
+    let parent = share_change(
+        "parent",
+        share_ticket("FIN-1", "Parent story", TicketKind::Story, None),
+    );
+    let state = Rc::new(RefCell::new(ComposerState::from_change_sets(vec![
+        share_set(vec![parent]),
+    ])));
+    state
+        .borrow_mut()
+        .dispatch(ComposerAction::OpenChangeSet("CS-12".into()));
+    let service = AppService::for_tests();
+    let mut editor = TicketEditor::new(Rc::clone(&state), service.settings(), service);
+    let area = Rect::new(0, 0, TEST_WIDTH, 40);
+
+    editor.sync();
+    editor.layout(area, &mut LayoutCtx::new());
+
+    state
+        .borrow_mut()
+        .dispatch(ComposerAction::AddAttachment {
+            filename: "spec.png".into(),
+            mime_type: Some("image/png".into()),
+            data: vec![1, 2, 3],
+        })
+        .unwrap();
+
+    editor.sync();
+    editor.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            editor.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..area.height)
+        .flat_map(|y| {
+            (0..area.width).map(move |x| buffer.cell((x, y)).unwrap().symbol().to_owned())
+        })
+        .collect::<String>();
+
+    assert!(text.contains("spec.png"));
 }
 
 #[test]

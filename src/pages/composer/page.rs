@@ -367,6 +367,16 @@ impl ComposerPage {
     }
 
     #[cfg(test)]
+    pub(super) fn narrow_selected_index(&self) -> usize {
+        self.editor.narrow_selected_index()
+    }
+
+    #[cfg(test)]
+    pub(super) fn wide_panel_focus(&self) -> (bool, bool) {
+        self.editor.wide_panel_focus()
+    }
+
+    #[cfg(test)]
     pub(super) fn create_kind_menu_is_open(&self) -> bool {
         self.editor.create_kind_menu_is_open()
     }
