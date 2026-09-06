@@ -799,7 +799,11 @@ impl BoundPropertyDropdown {
             changed = true;
         }
         if let Some((current_style, previous_style)) = diff_styles {
-            self.control.set_field_text_style(current_style);
+            if let Some(current_style) = current_style {
+                self.control.set_field_text_style(current_style);
+            } else {
+                self.control.clear_field_text_style();
+            }
             self.control.set_bottom_left_style(previous_style);
         } else {
             self.control.clear_field_text_style();
@@ -831,7 +835,7 @@ impl BoundPropertyDropdown {
         let previous = state
             .selected_change()
             .and_then(|change| change.original.as_ref())
-            .and_then(|ticket| self.kind.previous_value(ticket));
+            .map(|ticket| self.kind.previous_value(ticket));
         match previous {
             Some((value, _)) if value == current => Some("(unchanged)".into()),
             Some((_, label)) => Some(label),
@@ -839,26 +843,30 @@ impl BoundPropertyDropdown {
         }
     }
 
-    fn diff_value_styles(&self, state: &ComposerState, current: &str) -> Option<(Style, Style)> {
+    fn diff_value_styles(
+        &self,
+        state: &ComposerState,
+        current: &str,
+    ) -> Option<(Option<Style>, Style)> {
         let previous = state
             .selected_change()
             .and_then(|change| change.original.as_ref())
-            .and_then(|ticket| self.kind.previous_value(ticket))?;
+            .map(|ticket| self.kind.previous_value(ticket))?;
         if state.view_mode != crate::store::composer::ComposerViewMode::Diff
             || previous.0 == current
-            || current.is_empty()
         {
             return None;
         }
         let theme = theme();
-        Some((
+        let current_style = (!current.is_empty()).then(|| {
             Style::default()
                 .fg(theme.diff_added_fg())
-                .bg(theme.diff_added_bg()),
-            Style::default()
-                .fg(theme.diff_removed_fg())
-                .bg(theme.diff_removed_bg()),
-        ))
+                .bg(theme.diff_added_bg())
+        });
+        let previous_style = Style::default()
+            .fg(theme.diff_removed_fg())
+            .bg(theme.diff_removed_bg());
+        Some((current_style, previous_style))
     }
 
     fn options(&self) -> Vec<JiraOption> {
@@ -1118,18 +1126,23 @@ impl PropertyKind {
         }
     }
 
-    fn previous_value(self, ticket: &Ticket) -> Option<(String, String)> {
+    fn previous_value(self, ticket: &Ticket) -> (String, String) {
         match self {
             Self::IssueType | Self::Status | Self::Priority => {
                 let value = self.value(ticket);
-                (!value.is_empty()).then(|| (value.clone(), value))
+                (value.clone(), value)
             }
-            Self::Parent => ticket
-                .parent_key
-                .as_ref()
-                .map(|parent| (parent.clone(), parent.clone())),
-            Self::Assignee => (!ticket.assignee_account_id.is_empty())
-                .then(|| (ticket.assignee_account_id.clone(), ticket.assignee.clone())),
+            Self::Parent => match &ticket.parent_key {
+                Some(parent) => (parent.clone(), parent.clone()),
+                None => (String::new(), "(none)".into()),
+            },
+            Self::Assignee => {
+                if ticket.assignee_account_id.is_empty() {
+                    (String::new(), "(none)".into())
+                } else {
+                    (ticket.assignee_account_id.clone(), ticket.assignee.clone())
+                }
+            }
         }
     }
 

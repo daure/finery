@@ -441,6 +441,7 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     assert!(text.contains("Description |D|"));
     assert!(text.contains("Properties |P|"));
     assert_eq!(text.matches("dd·do·ds").count(), 1);
+    assert!(!text.contains("dd·do·ds·it"));
     assert!(!text.contains("Jira description · Markdown"));
 
     let title_hotkey = target(&mut page, "input");
@@ -1103,6 +1104,8 @@ fn attachment_actions_close_the_dialog_and_restore_selected_attachments() {
     open_change_set(&mut page, 1);
 
     page.add_selected_attachment_for_test(AttachmentChangeKind::Added);
+    let filename_hotkey = target(&mut page, "input");
+    assert_eq!(filename_hotkey.hotkey_sequences, vec!["shift+t"]);
     let tickets = focus(&mut page, "data-view");
     page.dispatch_event(
         &EventRoute::new(tickets.path),
@@ -2219,6 +2222,50 @@ fn changed_diff_property_values_use_diff_colors() {
 
     let buffer = terminal.backend().buffer();
     let theme = theme();
+    let current = buffer.cell((1, 1)).unwrap();
+    assert_eq!(current.fg, theme.diff_added_fg());
+    assert_eq!(current.bg, theme.diff_added_bg());
+    let previous = buffer.cell((3, 2)).unwrap();
+    assert_eq!(previous.fg, theme.diff_removed_fg());
+    assert_eq!(previous.bg, theme.diff_removed_bg());
+
+    let mut assignee_state = ComposerState::demo();
+    assignee_state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    assignee_state.change_sets[0].tickets[0]
+        .original
+        .as_mut()
+        .unwrap()
+        .assignee_account_id = String::new();
+    assignee_state.change_sets[0].tickets[0]
+        .original
+        .as_mut()
+        .unwrap()
+        .assignee = "Unassigned".into();
+    assignee_state.selected_ticket = Some("FIN-142".into());
+    assignee_state.dispatch(ComposerAction::UpdateAssignee {
+        name: "Marlo Vlietstra".into(),
+        account_id: "557058".into(),
+    });
+    assignee_state.dispatch(ComposerAction::SetViewMode(ComposerViewMode::Diff));
+    let mut assignee_dropdown = BoundPropertyDropdown::assignee_for_test(
+        Rc::new(RefCell::new(assignee_state)),
+        Rc::new(RefCell::new(Vec::new())),
+        AppService::for_tests(),
+        vec![JiraOption {
+            id: "557058".into(),
+            label: "Marlo Vlietstra".into(),
+        }],
+    );
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    assignee_dropdown.layout(area, &mut LayoutCtx::new());
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            assignee_dropdown.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
     let current = buffer.cell((1, 1)).unwrap();
     assert_eq!(current.fg, theme.diff_added_fg());
     assert_eq!(current.bg, theme.diff_added_bg());

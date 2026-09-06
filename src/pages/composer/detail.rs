@@ -22,7 +22,7 @@ use tuicore::{
 };
 
 use crate::{
-    app_settings::ComposerKeyBindings,
+    app_settings::{ComposerKeyBinding, ComposerKeyBindings},
     service::AppService,
     store::composer::{
         ChangeKind, ComposerAction, ComposerState, ComposerViewMode, TicketAttachment,
@@ -584,7 +584,7 @@ impl DetailPane {
                 FlexItem::fit_content(),
             );
         let file_fields = Split::vertical(
-            AttachmentFilename::new(Rc::clone(&state), Rc::clone(&pending)),
+            AttachmentFilename::new(Rc::clone(&state), Rc::clone(&pending), keys.title.clone()),
             file_tabs,
         )
         .constraints(Constraint::Length(3), Constraint::Fill(1));
@@ -893,9 +893,14 @@ impl ResponsiveDetails {
 }
 
 impl AttachmentFilename {
-    fn new(state: Rc<RefCell<ComposerState>>, pending: PendingActions) -> Self {
+    fn new(
+        state: Rc<RefCell<ComposerState>>,
+        pending: PendingActions,
+        hotkey: ComposerKeyBinding,
+    ) -> Self {
         let input = tuicore::TextInput::new()
             .panel("File name")
+            .hotkey(hotkey.sequence())
             .on_edit_end(move |value| {
                 pending
                     .borrow_mut()
@@ -1254,6 +1259,8 @@ impl TuiNode for ResponsiveDetails {
         for sequence in &self.property_keys {
             self.narrow
                 .set_action_hotkey_enabled(sequence, use_tab_shortcuts);
+            self.narrow
+                .set_action_hotkey_visible(sequence, self.is_wide);
         }
         self.active_mut().layout(area, ctx)
     }
