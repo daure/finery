@@ -1808,6 +1808,7 @@ fn composer_rows_show_current_ticket_properties_with_presentation_only_details()
                     fix_versions: Vec::new(),
                     epic_name: Some("Checkout reliability".into()),
                     story_points: None,
+        status_changed_at: None,
                 },
                 story_points_configured: true,
                 assumed_story_points: 3.0,

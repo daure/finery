@@ -292,6 +292,8 @@ struct WorkspaceWorkItemView {
     has_children: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     story_points: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status_changed_at: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -917,6 +919,7 @@ impl From<WorkItem> for WorkspaceWorkItemView {
             parent: workspace_parent(ticket.parent_key, ticket.parent_title),
             has_children: ticket.has_children,
             story_points: ticket.story_points,
+            status_changed_at: ticket.status_changed_at.map(|dt| dt.to_rfc3339()),
         }
     }
 }

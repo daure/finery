@@ -316,6 +316,7 @@ fn work_item(index: usize) -> WorkItem {
         fix_versions: Vec::new(),
         epic_name: None,
         story_points: Some(index as f64),
+        status_changed_at: None,
     }
 }
 

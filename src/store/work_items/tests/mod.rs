@@ -20,6 +20,7 @@ fn work_item(key: &str, story_points: Option<f64>) -> WorkItem {
         fix_versions: Vec::new(),
         epic_name: None,
         story_points,
+        status_changed_at: None,
     }
 }
 
@@ -182,6 +183,7 @@ fn capacity_uses_pointed_bugs_but_never_assumes_unestimated_bugs() {
         WorkItem {
             kind: "BUG".into(),
             story_points: None,
+        status_changed_at: None,
             ..work_item("FIN-11", None)
         },
         WorkItem {
@@ -193,6 +195,7 @@ fn capacity_uses_pointed_bugs_but_never_assumes_unestimated_bugs() {
     snapshot.work_items = vec![WorkItem {
         kind: "Bug".into(),
         story_points: None,
+        status_changed_at: None,
         ..work_item("FIN-1", None)
     }];
 
@@ -220,11 +223,13 @@ fn capacity_without_an_assumption_keeps_all_bug_loads() {
     snapshot.sprints[0].work_items = vec![WorkItem {
         kind: "Bug".into(),
         story_points: None,
+        status_changed_at: None,
         ..work_item("FIN-10", None)
     }];
     snapshot.work_items = vec![WorkItem {
         kind: "BUG".into(),
         story_points: None,
+        status_changed_at: None,
         ..work_item("FIN-1", None)
     }];
 

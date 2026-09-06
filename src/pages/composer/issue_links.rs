@@ -446,6 +446,7 @@ fn ticket_summary_for_search_result(ticket: &ComposerSearchTicket) -> Text<'stat
             story_points_from_average: false,
             change_badge: None,
             submitted: false,
+            status_changed_at: ticket.work_item.status_changed_at,
         },
         None,
         None,
@@ -506,6 +507,7 @@ fn issue_link_work_item(key: &str, title: &str) -> WorkItemRow {
         story_points_from_average: false,
         change_badge: None,
         submitted: false,
+        status_changed_at: None,
     }
 }
 

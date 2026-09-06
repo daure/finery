@@ -15,6 +15,7 @@ pub(crate) struct WorkItem {
     pub fix_versions: Vec<String>,
     pub epic_name: Option<String>,
     pub story_points: Option<f64>,
+    pub status_changed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub(crate) fn is_done_status(status: &str) -> bool {

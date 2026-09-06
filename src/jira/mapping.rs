@@ -208,6 +208,9 @@ fn to_work_item_fields(key: &str, fields: &Value, story_points_field_id: Option<
                 .as_f64()
                 .or_else(|| field(field_id).as_str()?.parse().ok())
         }),
+        status_changed_at: field("statuscategorychangedate")
+            .as_str()
+            .and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok()),
     }
 }
 

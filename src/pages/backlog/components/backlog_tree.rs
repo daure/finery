@@ -1383,6 +1383,7 @@ fn work_item_row(
                     && assumed_ticket_size.is_some_and(|(_, from_average)| from_average),
                 change_badge: None,
                 submitted: false,
+                status_changed_at: item.status_changed_at,
             },
             runway,
             alternate_background,

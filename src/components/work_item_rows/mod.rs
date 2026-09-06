@@ -30,6 +30,7 @@ pub(crate) struct WorkItemRow {
     pub story_points_from_average: bool,
     pub change_badge: Option<ChangeBadge>,
     pub submitted: bool,
+    pub status_changed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Clone, Copy)]
@@ -104,7 +105,19 @@ pub(crate) fn ticket_summary_text(
         );
     }
     if !row.status.is_empty() {
-        append_metadata(&mut metadata, Span::styled(row.status.clone(), text_style));
+        let mut status_text = row.status.clone();
+        if !row.done {
+            if let Some(changed_at) = row.status_changed_at {
+                let now = chrono::Utc::now();
+                let duration = now.signed_duration_since(changed_at);
+                if duration.num_hours() < 24 {
+                    status_text.push_str(&format!(" ({}h)", duration.num_hours().max(0)));
+                } else {
+                    status_text.push_str(&format!(" ({}d)", duration.num_days().max(0)));
+                }
+            }
+        }
+        append_metadata(&mut metadata, Span::styled(status_text, text_style));
     }
     append_labels_chip(&mut metadata, &row.labels);
     if let Some(epic_name) = details.epic_name {

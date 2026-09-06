@@ -72,5 +72,6 @@ fn work_item(kind: &str) -> WorkItem {
         fix_versions: Vec::new(),
         epic_name: None,
         story_points: None,
+        status_changed_at: None,
     }
 }

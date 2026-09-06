@@ -392,6 +392,7 @@ fn recent_ticket_row(
             story_points_from_average: false,
             change_badge: None,
             submitted: false,
+            status_changed_at: ticket.status_changed_at,
         },
         epic_name: ticket.epic_name,
         subtask_progress: ticket.subtask_progress,

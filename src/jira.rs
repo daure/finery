@@ -25,7 +25,7 @@ mod mapping;
 
 use mapping::*;
 
-const ISSUE_FIELDS: [&str; 13] = [
+const ISSUE_FIELDS: [&str; 14] = [
     "summary",
     "description",
     "issuetype",
@@ -39,9 +39,10 @@ const ISSUE_FIELDS: [&str; 13] = [
     "fixVersions",
     "attachment",
     "issuelinks",
+    "statuscategorychangedate",
 ];
 
-const BACKLOG_FIELDS: [&str; 9] = [
+const BACKLOG_FIELDS: [&str; 10] = [
     "summary",
     "issuetype",
     "status",
@@ -51,8 +52,9 @@ const BACKLOG_FIELDS: [&str; 9] = [
     "subtasks",
     "labels",
     "fixVersions",
+    "statuscategorychangedate",
 ];
-const COMPOSER_FIELDS: [&str; 13] = [
+const COMPOSER_FIELDS: [&str; 14] = [
     "summary",
     "description",
     "issuetype",
@@ -66,6 +68,7 @@ const COMPOSER_FIELDS: [&str; 13] = [
     "fixVersions",
     "attachment",
     "issuelinks",
+    "statuscategorychangedate",
 ];
 const BACKLOG_JQL: &str = "";
 const MAX_VELOCITY_GOAL_LOOKUPS: usize = 10;

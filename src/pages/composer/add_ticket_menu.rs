@@ -403,6 +403,7 @@ fn add_item_text(item: &AddItem, query: &str, _mode: DropdownSearchMode) -> Text
         story_points_from_average: false,
         change_badge: None,
         submitted: false,
+        status_changed_at: ticket.work_item.status_changed_at,
     };
     ticket_summary_text(
         &row,
