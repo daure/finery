@@ -404,6 +404,7 @@ fn add_item_text(item: &AddItem, query: &str, _mode: DropdownSearchMode) -> Text
         change_badge: None,
         submitted: false,
         status_changed_at: ticket.work_item.status_changed_at,
+        show_time_in_status: false,
     };
     ticket_summary_text(
         &row,

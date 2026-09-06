@@ -1126,10 +1126,12 @@ fn backlog_rows(snapshot: &BacklogSnapshot, filters: &BacklogFilterSettings) -> 
             .iter()
             .map(|item| item.key.as_str())
             .collect::<std::collections::HashSet<_>>();
+        let is_active_sprint = sprint.state == "active";
         rows.extend(visible_items.into_iter().enumerate().map(|(index, item)| {
             work_item_row(
                 item,
                 &section,
+                is_active_sprint,
                 &item_keys,
                 snapshot.story_points_configured,
                 None,
@@ -1153,6 +1155,7 @@ fn backlog_rows(snapshot: &BacklogSnapshot, filters: &BacklogFilterSettings) -> 
         work_item_row(
             item,
             "backlog",
+            false,
             &item_keys,
             snapshot.story_points_configured,
             snapshot
@@ -1336,6 +1339,7 @@ fn section_row_id(section: &str) -> String {
 fn work_item_row(
     item: &WorkItem,
     section: &str,
+    is_active_sprint: bool,
     item_keys: &std::collections::HashSet<&str>,
     show_story_points: bool,
     runway: Option<RunwayTicket>,
@@ -1384,6 +1388,7 @@ fn work_item_row(
                 change_badge: None,
                 submitted: false,
                 status_changed_at: item.status_changed_at,
+                show_time_in_status: is_active_sprint,
             },
             runway,
             alternate_background,

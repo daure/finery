@@ -382,6 +382,7 @@ fn jira_search_row(
             change_badge: None,
             submitted: false,
             status_changed_at: ticket.status_changed_at,
+            show_time_in_status: false,
         },
         epic_name: ticket.epic_name,
         subtask_progress: ticket.subtask_progress,

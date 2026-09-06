@@ -56,6 +56,7 @@ fn search_matches_are_underlined_in_the_shared_ticket_title_template() {
         change_badge: None,
         submitted: false,
         status_changed_at: None,
+        show_time_in_status: false,
     };
 
     let line = work_item_title_with_key_line_with_match(&row, None, Some("legacy"));
@@ -88,6 +89,7 @@ fn done_ticket_keys_are_struck_through_in_shared_ticket_rows() {
         change_badge: None,
         submitted: false,
         status_changed_at: None,
+        show_time_in_status: false,
     };
 
     let line = work_item_title_with_key_line_with_match(&row, None, None);
@@ -120,6 +122,7 @@ fn case_insensitive_done_statuses_strike_through_ticket_keys() {
         change_badge: None,
         submitted: false,
         status_changed_at: None,
+        show_time_in_status: false,
     };
 
     let line = work_item_title_with_key_line_with_match(&row, None, None);
@@ -151,6 +154,7 @@ fn average_derived_story_points_show_one_decimal_place() {
         change_badge: None,
         submitted: false,
         status_changed_at: None,
+        show_time_in_status: false,
     };
 
     assert_eq!(story_points_label(&row), "~3.9");
@@ -176,6 +180,7 @@ fn ticket_annotations_extend_composer_metadata_without_hiding_change_state() {
         change_badge: Some(ChangeBadge::Modified),
         submitted: true,
         status_changed_at: None,
+        show_time_in_status: false,
     };
 
     let text = ticket_summary_text(
@@ -228,6 +233,7 @@ fn long_labels_use_a_tight_chip_with_an_overflow_count_after_status() {
         change_badge: None,
         submitted: false,
         status_changed_at: None,
+        show_time_in_status: false,
     };
 
     let text = ticket_summary_text(

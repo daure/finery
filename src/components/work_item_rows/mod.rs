@@ -31,6 +31,7 @@ pub(crate) struct WorkItemRow {
     pub change_badge: Option<ChangeBadge>,
     pub submitted: bool,
     pub status_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub show_time_in_status: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -106,7 +107,7 @@ pub(crate) fn ticket_summary_text(
     }
     if !row.status.is_empty() {
         let mut status_text = row.status.clone();
-        if !row.done {
+        if !row.done && row.show_time_in_status {
             if let Some(changed_at) = row.status_changed_at {
                 let now = chrono::Utc::now();
                 let duration = now.signed_duration_since(changed_at);

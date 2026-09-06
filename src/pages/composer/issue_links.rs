@@ -447,6 +447,7 @@ fn ticket_summary_for_search_result(ticket: &ComposerSearchTicket) -> Text<'stat
             change_badge: None,
             submitted: false,
             status_changed_at: ticket.work_item.status_changed_at,
+            show_time_in_status: false,
         },
         None,
         None,
@@ -508,6 +509,7 @@ fn issue_link_work_item(key: &str, title: &str) -> WorkItemRow {
         change_badge: None,
         submitted: false,
         status_changed_at: None,
+        show_time_in_status: false,
     }
 }
 
