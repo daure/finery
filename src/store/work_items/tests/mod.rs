@@ -1,6 +1,6 @@
 use super::{
     BacklogSnapshot, RunwayCapacitySource, Sprint, SprintCapacityState, WorkItem, apply_capacity,
-    loaded_story_point_average,
+    format_time_in_status, loaded_story_point_average,
 };
 
 fn work_item(key: &str, story_points: Option<f64>) -> WorkItem {
@@ -280,4 +280,38 @@ fn capacity_never_assumes_missing_subtask_story_points() {
     let runway_ticket = snapshot.runway.as_ref().unwrap().tickets.first().unwrap();
     assert_eq!(runway_ticket.effective_points, 0.0);
     assert!(!runway_ticket.assumed);
+}
+
+#[test]
+fn time_in_status_formats_hours_under_one_day_and_days_thereafter() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-06T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    assert_eq!(format_time_in_status(now, now), "0h");
+    assert_eq!(
+        format_time_in_status(now, now - chrono::Duration::hours(10)),
+        "10h"
+    );
+    assert_eq!(
+        format_time_in_status(now, now - chrono::Duration::hours(23)),
+        "23h"
+    );
+    assert_eq!(
+        format_time_in_status(now, now - chrono::Duration::hours(24)),
+        "1d"
+    );
+    assert_eq!(
+        format_time_in_status(now, now - chrono::Duration::days(3)),
+        "3d"
+    );
+    assert_eq!(
+        format_time_in_status(now, now + chrono::Duration::hours(2)),
+        "0h"
+    );
+
+    let mut item = work_item("FIN-1", None);
+    assert_eq!(item.time_in_status(now), None);
+    item.status_changed_at = Some(now - chrono::Duration::days(5));
+    assert_eq!(item.time_in_status(now), Some("5d".into()));
 }

@@ -18,6 +18,25 @@ pub(crate) struct WorkItem {
     pub status_changed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+impl WorkItem {
+    pub(crate) fn time_in_status(&self, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+        self.status_changed_at
+            .map(|changed_at| format_time_in_status(now, changed_at))
+    }
+}
+
+pub(crate) fn format_time_in_status(
+    now: chrono::DateTime<chrono::Utc>,
+    changed_at: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let duration = now.signed_duration_since(changed_at);
+    if duration.num_hours() < 24 {
+        format!("{}h", duration.num_hours().max(0))
+    } else {
+        format!("{}d", duration.num_days().max(0))
+    }
+}
+
 pub(crate) fn is_done_status(status: &str) -> bool {
     status.eq_ignore_ascii_case("done")
 }

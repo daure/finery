@@ -341,6 +341,7 @@ fn workspace_compacts_backlog_and_change_set_payloads() {
     let mut sprint_tickets = (0..51).map(work_item).collect::<Vec<_>>();
     sprint_tickets[0].done = true;
     sprint_tickets[0].story_points = None;
+    sprint_tickets[1].status_changed_at = Some(chrono::Utc::now() - chrono::Duration::hours(10));
     let view = workspace_view(
         BacklogSnapshot {
             board_name: "Finery".into(),
@@ -420,6 +421,11 @@ fn workspace_compacts_backlog_and_change_set_payloads() {
     .unwrap();
 
     assert_eq!(view.backlog.sprints[0].tickets.len(), 51);
+    assert_eq!(view.backlog.sprints[0].tickets[0].time_in_status, None);
+    assert_eq!(
+        view.backlog.sprints[0].tickets[1].time_in_status.as_deref(),
+        Some("10h")
+    );
     assert_eq!(view.backlog.unplanned.tickets.len(), 50);
     assert_eq!(view.backlog.unplanned.total_count, 51);
     assert_eq!(view.backlog.warnings, ["Story points are unavailable"]);

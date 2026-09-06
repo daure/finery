@@ -109,13 +109,11 @@ pub(crate) fn ticket_summary_text(
         let mut status_text = row.status.clone();
         if !row.done && row.show_time_in_status {
             if let Some(changed_at) = row.status_changed_at {
-                let now = chrono::Utc::now();
-                let duration = now.signed_duration_since(changed_at);
-                if duration.num_hours() < 24 {
-                    status_text.push_str(&format!(" ({}h)", duration.num_hours().max(0)));
-                } else {
-                    status_text.push_str(&format!(" ({}d)", duration.num_days().max(0)));
-                }
+                let time = crate::store::work_items::format_time_in_status(
+                    chrono::Utc::now(),
+                    changed_at,
+                );
+                status_text.push_str(&format!(" ({time})"));
             }
         }
         append_metadata(&mut metadata, Span::styled(status_text, text_style));

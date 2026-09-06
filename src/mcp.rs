@@ -294,6 +294,8 @@ struct WorkspaceWorkItemView {
     story_points: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     status_changed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    time_in_status: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -908,6 +910,7 @@ fn workspace_change_set_view(
 
 impl From<WorkItem> for WorkspaceWorkItemView {
     fn from(ticket: WorkItem) -> Self {
+        let time_in_status = ticket.time_in_status(chrono::Utc::now());
         Self {
             key: ticket.key,
             title: ticket.title,
@@ -920,6 +923,7 @@ impl From<WorkItem> for WorkspaceWorkItemView {
             has_children: ticket.has_children,
             story_points: ticket.story_points,
             status_changed_at: ticket.status_changed_at.map(|dt| dt.to_rfc3339()),
+            time_in_status,
         }
     }
 }
