@@ -3136,6 +3136,7 @@ fn change_set_delete_uses_ctrl_x() {
 fn change_set_delete_warns_before_discarding_submission_recovery_data() {
     tuicore::init();
     let mut change_sets = ComposerState::demo().change_sets;
+    change_sets.truncate(1);
     change_sets[0].submission_attempt = Some(SubmissionAttempt {
         owner_id: "attempt-owner".into(),
         ticket_ids: Vec::new(),
@@ -3152,9 +3153,15 @@ fn change_set_delete_warns_before_discarding_submission_recovery_data() {
         &mut EventCtx::default(),
     );
 
-    let text = render_text(&mut page);
-    assert!(text.contains("WARNING: This deletes Jira submission recovery data."));
-    assert!(text.contains("Jira may contain tickets that Finery cannot reconcile."));
+    let text = render_text_at(&mut page, 140);
+    assert!(
+        text.contains("WARNING: This deletes Jira submission recovery data."),
+        "{text}"
+    );
+    assert!(
+        text.contains("Jira may contain tickets that Finery cannot reconcile."),
+        "{text}"
+    );
 }
 
 #[test]
