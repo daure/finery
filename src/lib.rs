@@ -4,6 +4,7 @@ mod app;
 mod app_settings;
 pub mod cli;
 mod components;
+pub mod diagnostics;
 mod jira;
 mod mcp;
 mod pages;
@@ -65,6 +66,7 @@ pub fn run_dev(bind: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
                     if let Err(error) =
                         runtime.block_on(mcp::run_http_with_startup(http_service, bind, startup_tx))
                     {
+                        diagnostics::record_error("development HTTP MCP stopped", error.as_ref());
                         eprintln!("HTTP MCP stopped: {error}");
                     }
                 }

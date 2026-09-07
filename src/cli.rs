@@ -206,14 +206,14 @@ fn write_owner_only(path: &std::path::Path, contents: &str) -> Result<(), Box<dy
 
 #[cfg(target_os = "linux")]
 fn systemd_definition(exe: &std::path::Path, database_url: Option<&str>) -> String {
-    let environment = database_url.map_or_else(String::new, |url| {
+    let database_environment = database_url.map_or_else(String::new, |url| {
         format!(
             "Environment={}\n",
             systemd_quote_arg(&format!("FINERY_DATABASE_URL={url}"))
         )
     });
     format!(
-        "[Unit]\nDescription=Finery MCP service\n\n[Service]\n{environment}ExecStart={} serve\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=Finery MCP service\n\n[Service]\nEnvironment=\"FINERY_PROCESS_MODE=mcp-service\"\n{database_environment}ExecStart={} serve\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
         systemd_quote_arg(&exe.to_string_lossy())
     )
 }
@@ -242,14 +242,14 @@ fn xml_escape(value: &str) -> String {
 
 #[cfg(target_os = "macos")]
 fn launchd_definition(exe: &std::path::Path, database_url: Option<&str>) -> String {
-    let environment = database_url.map_or_else(String::new, |url| {
+    let database_environment = database_url.map_or_else(String::new, |url| {
         format!(
-            "<key>EnvironmentVariables</key><dict><key>FINERY_DATABASE_URL</key><string>{}</string></dict>",
+            "<key>FINERY_DATABASE_URL</key><string>{}</string>",
             xml_escape(url)
         )
     });
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>dev.finery.mcp</string><key>ProgramArguments</key><array><string>{}</string><string>serve</string></array>{environment}<key>KeepAlive</key><true/></dict></plist>",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>dev.finery.mcp</string><key>ProgramArguments</key><array><string>{}</string><string>serve</string></array><key>EnvironmentVariables</key><dict><key>FINERY_PROCESS_MODE</key><string>mcp-service</string>{database_environment}</dict><key>KeepAlive</key><true/></dict></plist>",
         xml_escape(&exe.to_string_lossy())
     )
 }
