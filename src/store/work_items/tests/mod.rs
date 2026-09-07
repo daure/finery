@@ -183,7 +183,7 @@ fn capacity_uses_pointed_bugs_but_never_assumes_unestimated_bugs() {
         WorkItem {
             kind: "BUG".into(),
             story_points: None,
-        status_changed_at: None,
+            status_changed_at: None,
             ..work_item("FIN-11", None)
         },
         WorkItem {
@@ -210,11 +210,39 @@ fn capacity_uses_pointed_bugs_but_never_assumes_unestimated_bugs() {
     let capacity = snapshot.sprints[0].capacity.as_ref().unwrap();
     assert_eq!(capacity.source, RunwayCapacitySource::JiraVelocity);
     assert_eq!(capacity.effective_points, 7.0);
+    assert_eq!(capacity.completed_points, 0.0);
     assert_eq!(capacity.assumed_points, 0.0);
     let runway_ticket = snapshot.runway.as_ref().unwrap().tickets.first().unwrap();
     assert_eq!(runway_ticket.effective_points, 0.0);
     assert!(!runway_ticket.assumed);
     assert!(!runway_ticket.assumed_from_average);
+}
+
+#[test]
+fn capacity_tracks_completed_story_points() {
+    let mut snapshot = snapshot();
+    snapshot.sprints[0].work_items = vec![
+        WorkItem {
+            done: true,
+            status: "Done".into(),
+            ..work_item("FIN-10", Some(5.0))
+        },
+        WorkItem {
+            done: false,
+            status: "In Progress".into(),
+            ..work_item("FIN-11", Some(8.0))
+        },
+    ];
+    apply_capacity(
+        &mut snapshot,
+        20.0,
+        Some((3.0, false)),
+        RunwayCapacitySource::Fixed,
+        20,
+    );
+    let capacity = snapshot.sprints[0].capacity.as_ref().unwrap();
+    assert_eq!(capacity.effective_points, 13.0);
+    assert_eq!(capacity.completed_points, 5.0);
 }
 
 #[test]

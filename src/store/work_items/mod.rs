@@ -18,6 +18,18 @@ pub(crate) struct WorkItem {
     pub status_changed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct IssueStatusTransition {
+    pub issue_key: String,
+    pub transition_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct StatusTransition {
+    pub label: String,
+    pub issues: Vec<IssueStatusTransition>,
+}
+
 impl WorkItem {
     pub(crate) fn time_in_status(&self, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
         self.status_changed_at
@@ -117,6 +129,7 @@ pub(crate) struct SprintCapacity {
     pub capacity: f64,
     pub source: RunwayCapacitySource,
     pub effective_points: f64,
+    pub completed_points: f64,
     pub assumed_points: f64,
     pub assumed_ticket_size: f64,
     pub assumed_ticket_size_from_average: bool,
@@ -218,17 +231,18 @@ pub(crate) fn apply_capacity(
         tickets,
     });
     for sprint in &mut snapshot.sprints {
-        let (effective_points, assumed_points) =
-            sprint
-                .work_items
-                .iter()
-                .fold((0.0, 0.0), |(effective_total, assumed_total), item| {
-                    let (points, assumed) = effective_points(item, assumed_ticket_size);
-                    (
-                        effective_total + points,
-                        assumed_total + if assumed { points } else { 0.0 },
-                    )
-                });
+        let (effective_points, assumed_points, completed_points) = sprint.work_items.iter().fold(
+            (0.0, 0.0, 0.0),
+            |(effective_total, assumed_total, completed_total), item| {
+                let (points, assumed) = effective_points(item, assumed_ticket_size);
+                let is_done = item.done || is_done_status(&item.status);
+                (
+                    effective_total + points,
+                    assumed_total + if assumed { points } else { 0.0 },
+                    completed_total + if is_done { points } else { 0.0 },
+                )
+            },
+        );
         let tolerance = f64::from(tolerance_percent) / 100.0;
         let lower_limit = capacity * (1.0 - tolerance);
         let upper_limit = capacity * (1.0 + tolerance);
@@ -243,6 +257,7 @@ pub(crate) fn apply_capacity(
             capacity,
             source,
             effective_points,
+            completed_points,
             assumed_points,
             assumed_ticket_size,
             assumed_ticket_size_from_average: assumed_from_average,

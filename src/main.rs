@@ -1,3 +1,4 @@
+#[cfg(debug_assertions)]
 use std::{
     backtrace::Backtrace,
     fs::File,
@@ -6,13 +7,16 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(debug_assertions)]
 const DEVELOPMENT_CRASH_LOG: &str = ".finery-dev.log";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(debug_assertions)]
     install_development_crash_log();
     finery::cli::run()
 }
 
+#[cfg(debug_assertions)]
 fn install_development_crash_log() {
     let Ok(log) = File::create(DEVELOPMENT_CRASH_LOG) else {
         return;

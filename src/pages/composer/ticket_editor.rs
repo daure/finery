@@ -714,6 +714,9 @@ impl TicketEditor {
         if let Some(selected) = &selected {
             table.highlight_id(selected);
         }
+        if changed_change_set && change_set_id.is_none() {
+            self.detail_mut().select_description();
+        }
         self.tree_change_set_id = change_set_id;
         self.can_change
             .set(is_open && !self.submission.is_submitting());

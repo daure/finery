@@ -12,9 +12,10 @@ use ratatui::{
     style::Style,
 };
 use tuicore::{
-    AnimationSettings, Column, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget,
-    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, ListControl,
-    ListControlEvent, ListControlField, RenderCtx, TickResult, TuiEvent, TuiNode, theme,
+    AnimationSettings, ChildKey, Column, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId,
+    FocusTarget, Key, KeyEvent, KeyModifiers, LayoutCtx, LayoutProposal, LayoutResult,
+    LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlField, RenderCtx,
+    TickResult, TuiEvent, TuiNode, theme,
 };
 
 use crate::{
@@ -86,6 +87,7 @@ impl BoundWebLinks {
                 row.url.clone()
             }),
         ])
+        .copy_with(|row| row.url.clone())
         .headers(false)
         .focus_id("web-links-data-view")
         .row_height(1)
@@ -212,6 +214,37 @@ impl BoundWebLinks {
         }
         values
     }
+
+    fn open_highlighted_link(
+        &self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> Option<EventOutcome> {
+        if route
+            .path
+            .without_first_if(&ChildKey::new("data"))
+            .is_none()
+            || !matches!(
+                event,
+                TuiEvent::Key(KeyEvent {
+                    code: Key::Enter,
+                    modifiers: KeyModifiers::CONTROL,
+                })
+            )
+        {
+            return None;
+        }
+        let url = self
+            .control
+            .data_view()
+            .highlighted_id()
+            .and_then(|row_id| self.control.items().iter().find(|row| row.row_id == row_id))
+            .map(|row| row.url.clone())?;
+        self.service.open_web_link(&url);
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
+    }
 }
 
 fn validated_web_link(title: &str, url: &str) -> Option<(String, String)> {
@@ -329,6 +362,9 @@ impl TuiNode for BoundWebLinks {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
+        if let Some(outcome) = self.open_highlighted_link(route, event, ctx) {
+            return outcome;
+        }
         let outcome = self.control.dispatch_event(route, event, ctx);
         self.drain_events();
         outcome

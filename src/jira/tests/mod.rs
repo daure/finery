@@ -12,13 +12,13 @@ use super::{
     AgileBoard, AgileIssuePage, BACKLOG_FIELDS, BACKLOG_JQL, COMPOSER_FIELDS, ISSUE_FIELDS,
     JiraIssue, JiraSprint, MAX_VELOCITY_GOAL_LOOKUPS, SubmitBatchOutcome, ambiguous_create_failure,
     apply_attachment_changes, apply_web_link_changes, backlog_page_complete, board_backlog,
-    board_backlog_query, board_sprints, commit_order, composer_fields,
+    board_backlog_query, board_sprints, commit_order, common_status_transitions, composer_fields,
     create_available_statuses_from_value, create_issue_fields, create_issue_type,
     create_issue_types_from_value, create_response_failure, created_issue_failure,
     discover_story_points, fetch_composer_issues, fix_versions, hydrate_sprint_subtasks,
     is_ticket_number_query, issue_fields, issue_key_jql, labels, move_payload, options_from_values,
     rank_payload, same_jira_content, search_composer_issues, search_jql, select_backlog_board,
-    should_discover_story_points, sprint_issues, story_points_field_for_load,
+    set_status, should_discover_story_points, sprint_issues, story_points_field_for_load,
     story_points_field_id, story_points_warning, submit_failure, submit_ordered_changes, to_ticket,
     to_ticket_and_work_item, to_work_item, to_work_item_with_subtasks, update_payload,
     velocity_average, velocity_report, velocity_sprint_goals, web_link_payload, web_links,
@@ -32,7 +32,7 @@ use crate::{
             AttachmentChangeKind, ChangeKind, MermaidDiagram, Ticket, TicketAttachment,
             TicketChange, TicketKind, TicketWebLink,
         },
-        work_items::RankPlan,
+        work_items::{IssueStatusTransition, RankPlan, StatusTransition},
     },
 };
 
@@ -548,6 +548,73 @@ fn jira_project_statuses_match_ticket_kind_and_keep_status_ids() {
             },
         ]
     );
+}
+
+#[test]
+fn selected_tickets_offer_only_statuses_available_to_every_ticket() {
+    let statuses = common_status_transitions(vec![
+        (
+            "FIN-1".into(),
+            vec![
+                super::JiraOption {
+                    id: "11".into(),
+                    label: "In Progress".into(),
+                },
+                super::JiraOption {
+                    id: "31".into(),
+                    label: "Done".into(),
+                },
+            ],
+        ),
+        (
+            "FIN-2".into(),
+            vec![
+                super::JiraOption {
+                    id: "42".into(),
+                    label: "done".into(),
+                },
+                super::JiraOption {
+                    id: "52".into(),
+                    label: "Blocked".into(),
+                },
+            ],
+        ),
+    ]);
+
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].label, "Done");
+    assert_eq!(statuses[0].issues[0].issue_key, "FIN-1");
+    assert_eq!(statuses[0].issues[0].transition_id, "31");
+    assert_eq!(statuses[0].issues[1].issue_key, "FIN-2");
+    assert_eq!(statuses[0].issues[1].transition_id, "42");
+}
+
+#[test]
+fn setting_status_posts_each_ticket_transition_id() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = request_server(listener, vec![String::new(), String::new()]);
+    let status = StatusTransition {
+        label: "Done".into(),
+        issues: vec![
+            IssueStatusTransition {
+                issue_key: "FIN-1".into(),
+                transition_id: "31".into(),
+            },
+            IssueStatusTransition {
+                issue_key: "FIN-2".into(),
+                transition_id: "42".into(),
+            },
+        ],
+    };
+
+    set_status(&jira_settings(base_url), &status).unwrap();
+    let requests = server.join().unwrap();
+
+    assert!(requests[0].starts_with("POST /rest/api/3/issue/FIN-1/transitions "));
+    assert!(requests[0].contains(r#"{"transition":{"id":"31"}}"#));
+    assert!(requests[1].starts_with("POST /rest/api/3/issue/FIN-2/transitions "));
+    assert!(requests[1].contains(r#"{"transition":{"id":"42"}}"#));
 }
 
 #[test]

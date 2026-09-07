@@ -8,20 +8,23 @@ use tuicore::{
 };
 
 use super::{
-    components::{backlog_tree, backlog_tree_with_filters},
+    components::{
+        BacklogQuickMenu, BacklogQuickMenuEvent, backlog_tree, backlog_tree_with_filters,
+    },
     page::{
         BacklogPage, MAX_UNCONFIRMED_TRANSFER_REFRESHES, PendingRank, PendingRankReconciliation,
-        PendingTransfer, PendingTransferReconciliation, move_work_items_to_edge,
-        recalculate_capacity, reconcile_pending_rank, reconcile_pending_transfer, should_poll,
-        source_transfer_highlight, source_transfer_highlight_key, sprint_report,
-        transfer_destinations, transfer_reconciliation_highlight, velocity_dialog,
-        velocity_share_report,
+        PendingTransfer, PendingTransferReconciliation, StatusTransitionCache,
+        apply_status_to_snapshot, move_work_items_to_edge, recalculate_capacity,
+        reconcile_pending_rank, reconcile_pending_transfer, should_poll, source_transfer_highlight,
+        source_transfer_highlight_key, sprint_report, transfer_destinations,
+        transfer_reconciliation_highlight, velocity_dialog, velocity_share_report,
     },
 };
 use crate::app_settings::{BacklogFilter, BacklogFilterSettings, BacklogRunwaySettings};
+use crate::jira::JiraOption;
 use crate::store::work_items::{
-    BacklogSnapshot, RunwayCapacitySource, Sprint, SubtaskProgress, VelocityReport, VelocitySprint,
-    WorkItem, apply_capacity, rank_plan,
+    BacklogSnapshot, IssueStatusTransition, RunwayCapacitySource, Sprint, StatusTransition,
+    SubtaskProgress, VelocityReport, VelocitySprint, WorkItem, apply_capacity, rank_plan,
 };
 
 fn work_item(key: &str, title: &str) -> WorkItem {
@@ -214,30 +217,6 @@ fn backlog_hides_the_existing_data_view_while_reloading() {
 
     assert!(text.contains("Loading Jira backlog…"));
     assert!(!text.contains("FIN-8"));
-}
-
-#[test]
-fn backlog_refresh_shows_a_loader_while_reloading() {
-    tuicore::init();
-    let (sender, _) = mpsc::channel();
-    let mut view = backlog_tree(&snapshot(), sender, Default::default());
-    view.set_loading(true);
-    let area = Rect::new(0, 0, 80, 16);
-    view.layout(area, &mut LayoutCtx::new());
-    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
-    terminal
-        .draw(|frame| {
-            let mut render = RenderCtx::new();
-            view.render(frame, area, &mut render);
-            render.flush(frame);
-        })
-        .unwrap();
-    let mut lines = rendered_lines(&terminal, area);
-    let header = lines.remove(0);
-
-    assert!(header.contains("⠋"));
-    assert!(header.contains("Refresh"));
-    assert!(cell_position(&header, "Refresh") > cell_position(&header, "⠋"));
 }
 
 #[test]
@@ -667,7 +646,7 @@ fn unified_backlog_tree_shows_collapsed_sprints_and_expanded_backlog() {
     }
     assert!(text.contains(" Sprint 7 • 18 Jun – 2 Jul"));
     assert!(text.contains(" Sprint 8 • 3 Jul – 17 Jul"));
-    assert!(text.contains(" Backlog • 1(1) items"));
+    assert!(text.contains(" Backlog • 1 items"));
     assert!(!text.contains("Finery"));
     assert!(!text.contains("Ship sprint work"));
     assert!(text.contains("Plan next sprint"));
@@ -713,7 +692,7 @@ fn expanded_sprint_shows_subtasks_under_their_parent() {
     let text = rendered_lines(&terminal, area).concat();
     assert!(text.contains("FIN-7 Ship sprint work"));
     assert!(text.contains("FIN-9 Finish sprint work"));
-    assert!(text.contains("1(2) items"));
+    assert!(text.contains("0/1 items"));
 }
 
 #[test]
@@ -990,7 +969,7 @@ fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
     assert!(text.contains("3 • @AD • To Do"));
     let lines = rendered_lines(&terminal, area);
     let capacity_line = lines.iter().find(|line| line.contains("✓ 1/1")).unwrap();
-    assert!(capacity_line.contains(" 18/20 pts • ✓ 1/1 • 1(1) items"));
+    assert!(capacity_line.contains(" 0/18 (20c) pts • ✓ 1/1 • 0/1 items"));
     assert_eq!(cell_position(capacity_line, ""), Some(2));
     assert!(!text.contains("assumed"));
     let ticket_position = |key| {
@@ -1056,7 +1035,7 @@ fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
     }
     assert!(text.contains("Velocity"));
     assert!(text.contains(" Sprint 7 • 18 Jun – 2 Jul"));
-    assert!(text.contains(" ~5.4/20 pts • ✓ 1/1 • 1(1) items"));
+    assert!(text.contains(" ~0/5.4 (20v) pts • ✓ 1/1 • 0/1 items"));
     assert!(text.contains("5.4 • @AD • To Do"));
 
     snapshot.sprints[0].work_items[0].story_points = None;
@@ -1076,7 +1055,7 @@ fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
         })
         .unwrap();
     let text = rendered_lines(&terminal, area).concat();
-    assert!(text.contains(" ~5.4/20 pts • 󰄰 0/1 • 1(1) items"));
+    assert!(text.contains(" ~0/5.4 (20v) pts • 󰄰 0/1 • 0/1 items"));
 
     apply_capacity(
         &mut snapshot,
@@ -1094,8 +1073,8 @@ fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
         })
         .unwrap();
     let text = rendered_lines(&terminal, area).concat();
-    assert!(text.contains(" 5.4/20 pts • 󰄰 0/1 • 1(1) items"));
-    assert!(!text.contains("~5.4/20 pts"));
+    assert!(text.contains(" 0/5.4 (20c) pts • 󰄰 0/1 • 0/1 items"));
+    assert!(!text.contains("~0/5.4"));
 }
 
 #[test]
@@ -1146,7 +1125,7 @@ fn sprint_estimation_coverage_excludes_bugs_and_counts_all_sprint_items() {
         })
         .unwrap();
     let text = rendered_lines(&terminal, area).concat();
-    assert!(text.contains(" ~7/20 pts • ✓ 1/1 • 4(4) items"));
+    assert!(text.contains(" ~0/7 (20v) pts • ✓ 1/1 • 0/4 items"));
 
     let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
     tree.dispatch_focus(
@@ -1199,8 +1178,117 @@ fn sprint_load_marks_zero_valued_average_assumptions() {
     assert!(
         rendered_lines(&terminal, area)
             .concat()
-            .contains(" ~0/20 pts • 󰄰 0/1 • 1(1) items")
+            .contains(" ~0/0 (20v) pts • 󰄰 0/1 • 0/1 items")
     );
+}
+
+#[test]
+fn active_sprint_shows_completed_points_alongside_total_and_capacity() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    snapshot.sprints = vec![
+        Sprint {
+            id: 202,
+            name: "DICE Sprint 202".into(),
+            state: "active".into(),
+            goal: None,
+            start_date: Some("2026-08-26T09:00:00.000Z".into()),
+            end_date: Some("2026-09-09T09:00:00.000Z".into()),
+            work_items: vec![
+                WorkItem {
+                    story_points: Some(30.0),
+                    status: "Done".into(),
+                    done: true,
+                    ..work_item("FIN-1", "Completed story")
+                },
+                WorkItem {
+                    story_points: Some(80.2),
+                    status: "In Progress".into(),
+                    done: false,
+                    ..work_item("FIN-2", "In flight story")
+                },
+                WorkItem {
+                    kind: "Subtask".into(),
+                    parent_key: Some("FIN-1".into()),
+                    status: "Done".into(),
+                    done: true,
+                    ..work_item("FIN-10", "Subtask 1")
+                },
+                WorkItem {
+                    kind: "Sub-task".into(),
+                    parent_key: Some("FIN-2".into()),
+                    status: "In Progress".into(),
+                    done: false,
+                    ..work_item("FIN-11", "Subtask 2")
+                },
+            ],
+            capacity: None,
+        },
+        Sprint {
+            id: 203,
+            name: "DICE Sprint 203".into(),
+            state: "future".into(),
+            goal: None,
+            start_date: Some("2026-09-10T09:00:00.000Z".into()),
+            end_date: Some("2026-09-24T09:00:00.000Z".into()),
+            work_items: vec![
+                WorkItem {
+                    story_points: Some(15.0),
+                    status: "To Do".into(),
+                    done: false,
+                    ..work_item("FIN-3", "Future story")
+                },
+                WorkItem {
+                    kind: "Subtask".into(),
+                    parent_key: Some("FIN-3".into()),
+                    status: "To Do".into(),
+                    done: false,
+                    ..work_item("FIN-12", "Future subtask")
+                },
+            ],
+            capacity: None,
+        },
+    ];
+    snapshot.work_items = vec![
+        work_item("FIN-20", "Backlog story"),
+        WorkItem {
+            kind: "Task".into(),
+            ..work_item("FIN-21", "Backlog task")
+        },
+        WorkItem {
+            kind: "Bug".into(),
+            ..work_item("FIN-22", "Backlog bug")
+        },
+        WorkItem {
+            kind: "Subtask".into(),
+            parent_key: Some("FIN-20".into()),
+            ..work_item("FIN-23", "Backlog subtask")
+        },
+    ];
+    apply_capacity(
+        &mut snapshot,
+        35.0,
+        Some((5.0, true)),
+        RunwayCapacitySource::JiraVelocity,
+        20,
+    );
+    let (sender, _) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot, sender, Default::default());
+    let area = Rect::new(0, 0, 120, 20);
+    view.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            view.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(text.contains("~30/110.2 (35v) pts • ✓ 2/2 • 1/2 items"));
+    assert!(text.contains("~15/35 pts • ✓ 1/1 • 1 items"));
+    assert!(text.contains(" Backlog • 3 items"));
 }
 
 #[test]
@@ -1986,6 +2074,136 @@ fn quick_menu_omits_its_current_section_from_transfer_destinations() {
 }
 
 #[test]
+fn quick_menu_opens_statuses_before_move_actions() {
+    tuicore::init();
+    let mut menu = BacklogQuickMenu::new(Default::default());
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    assert!(menu.open(
+        "backlog".into(),
+        vec!["FIN-1".into()],
+        vec!["FIN-1".into(), "FIN-2".into()],
+        Vec::new(),
+        &mut ctx,
+    ));
+    assert_eq!(
+        BacklogQuickMenu::main_action_labels(),
+        ["Set status", "Move to top", "Move to bottom"]
+    );
+    let area = Rect::new(0, 0, 60, 14);
+    menu.layout(area, &mut LayoutCtx::new());
+
+    menu.event(
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::new(AnimationSettings::default()),
+    );
+    assert!(matches!(
+        menu.take_events().as_slice(),
+        [BacklogQuickMenuEvent::LoadStatuses { keys }] if keys.as_slice() == ["FIN-1"]
+    ));
+
+    menu.set_statuses(vec![StatusTransition {
+        label: "Done".into(),
+        issues: vec![IssueStatusTransition {
+            issue_key: "FIN-1".into(),
+            transition_id: "31".into(),
+        }],
+    }]);
+    menu.event(
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::new(AnimationSettings::default()),
+    );
+    assert!(matches!(
+        menu.take_events().as_slice(),
+        [BacklogQuickMenuEvent::SetStatus { status }]
+            if status.label == "Done" && status.issues[0].transition_id == "31"
+    ));
+}
+
+#[test]
+fn status_transitions_are_cached_per_ticket_until_the_ticket_changes_status() {
+    let keys = vec!["FIN-1".into(), "FIN-2".into()];
+    let mut cache = StatusTransitionCache::default();
+    assert_eq!(cache.missing_keys(&keys), keys);
+
+    cache.insert(vec![
+        (
+            "FIN-1".into(),
+            vec![JiraOption {
+                id: "31".into(),
+                label: "Done".into(),
+            }],
+        ),
+        (
+            "FIN-2".into(),
+            vec![JiraOption {
+                id: "42".into(),
+                label: "done".into(),
+            }],
+        ),
+    ]);
+
+    assert!(cache.missing_keys(&keys).is_empty());
+    let statuses = cache.common(&keys).unwrap();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].issues[0].transition_id, "31");
+    assert_eq!(statuses[0].issues[1].transition_id, "42");
+
+    cache.invalidate(&statuses[0]);
+    assert_eq!(cache.missing_keys(&keys), keys);
+}
+
+#[test]
+fn status_change_updates_active_sprint_done_totals() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    snapshot.sprints[0].work_items[0].story_points = Some(5.0);
+    apply_capacity(
+        &mut snapshot,
+        20.0,
+        Some((3.0, false)),
+        RunwayCapacitySource::Fixed,
+        20,
+    );
+
+    assert!(apply_status_to_snapshot(
+        &mut snapshot,
+        &["FIN-7".into()],
+        "Done",
+    ));
+    recalculate_capacity(&mut snapshot, &BacklogRunwaySettings::default());
+
+    let item = &snapshot.sprints[0].work_items[0];
+    assert_eq!(item.status, "Done");
+    assert!(item.done);
+    assert!(item.status_changed_at.is_some());
+    assert_eq!(
+        snapshot.sprints[0]
+            .capacity
+            .as_ref()
+            .unwrap()
+            .completed_points,
+        5.0
+    );
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let area = Rect::new(0, 0, 100, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    assert!(
+        rendered_lines(&terminal, area)
+            .concat()
+            .contains("5/5 (20c) pts • ✓ 1/1 • 1/1 items")
+    );
+}
+
+#[test]
 fn stale_rank_refresh_keeps_the_optimistic_order() {
     let rollback = BacklogSnapshot {
         board_name: "Finery".into(),
@@ -2194,9 +2412,10 @@ fn unconfirmed_transfer_refreshes_exhaust() {
 
 #[test]
 fn polling_runs_only_while_work_is_pending() {
-    assert!(should_poll(true, false, false));
-    assert!(should_poll(false, true, false));
-    assert!(!should_poll(false, false, false));
+    assert!(should_poll(true, false, false, false));
+    assert!(should_poll(false, true, false, false));
+    assert!(should_poll(false, false, true, false));
+    assert!(!should_poll(false, false, false, false));
 }
 
 #[test]

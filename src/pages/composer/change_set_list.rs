@@ -414,6 +414,7 @@ impl ChangeSetListView {
     ) -> Self {
         let filter = ChangeSetFilter::Open;
         let rows = rows(&state.borrow(), filter);
+        let delete_state = Rc::clone(&state);
         let control = ListControl::new(
             rows,
             |row: &ChangeSetRow| row.id.clone(),
@@ -442,11 +443,21 @@ impl ChangeSetListView {
             ..ListControlKeyBindings::default()
         })
         .activation_mode(ActivationMode::OnActivateKey)
-        .confirm_remove("Delete change set?", |row| {
-            format!(
+        .confirm_remove("Delete change set?", move |row| {
+            let description = format!(
                 "Delete {} · {}? This removes its local ticket snapshots.",
                 row.id, row.name
-            )
+            );
+            if delete_state
+                .borrow()
+                .change_set_has_submission_attempt(&row.id)
+            {
+                format!(
+                    "{description}\n\nWARNING: This deletes Jira submission recovery data. Jira may contain tickets that Finery cannot reconcile."
+                )
+            } else {
+                description
+            }
         });
         let new_change_set_requested = Rc::new(RefCell::new(None));
         let request_new_change_set = Rc::clone(&new_change_set_requested);
@@ -587,21 +598,17 @@ impl ChangeSetListView {
         for event in self.view.base_mut().control.take_events() {
             match event {
                 ListControlEvent::Removed { row_id } => {
-                    if self.state.borrow().change_set_is_submitting(&row_id) {
-                        self.service
-                            .report_notification(tuicore::Notification::error(
-                                "Delete blocked",
-                                "Cannot delete a change set with an unresolved Jira submission attempt",
-                            ));
+                    let deleted = {
+                        let mut state = self.state.borrow_mut();
+                        let _ = state.dispatch(ComposerAction::DeleteChangeSet(row_id.clone()));
+                        !state.change_sets.iter().any(|set| set.id == row_id)
+                    };
+                    if !deleted {
                         self.sync();
                         ctx.request_layout();
                         ctx.request_redraw();
                         continue;
                     }
-                    let _ = self
-                        .state
-                        .borrow_mut()
-                        .dispatch(ComposerAction::DeleteChangeSet(row_id.clone()));
                     self.service.delete_change_set(row_id);
                 }
                 _ => {}

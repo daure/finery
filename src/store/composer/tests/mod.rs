@@ -255,7 +255,7 @@ fn unresolved_create_attempt_blocks_retry_after_restart() {
 }
 
 #[test]
-fn restart_retains_unverified_submission_attempts() {
+fn delete_discards_unverified_submission_attempts() {
     let mut state = ComposerState::demo();
     state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
     state.dispatch(ComposerAction::CreateTicket {
@@ -278,7 +278,7 @@ fn restart_retains_unverified_submission_attempts() {
     );
     restored.dispatch(ComposerAction::CloseChangeSet);
     restored.dispatch(ComposerAction::DeleteChangeSet("CS-2".into()));
-    assert!(restored.change_sets.iter().any(|set| set.id == "CS-2"));
+    assert!(restored.change_sets.iter().all(|set| set.id != "CS-2"));
 }
 
 #[test]

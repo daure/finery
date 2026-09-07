@@ -603,11 +603,14 @@ impl ComposerState {
 
     pub(crate) fn change_set_is_submitting(&self, change_set_id: &str) -> bool {
         self.submitting_change_sets.contains(change_set_id)
-            || self
-                .change_sets
-                .iter()
-                .find(|set| set.id == change_set_id)
-                .is_some_and(|set| set.submission_attempt.is_some())
+            || self.change_set_has_submission_attempt(change_set_id)
+    }
+
+    pub(crate) fn change_set_has_submission_attempt(&self, change_set_id: &str) -> bool {
+        self.change_sets
+            .iter()
+            .find(|set| set.id == change_set_id)
+            .is_some_and(|set| set.submission_attempt.is_some())
     }
 
     fn active_change_set_is_submitting(&self) -> bool {
@@ -1063,7 +1066,7 @@ impl ComposerState {
                 });
             }
             ComposerAction::DeleteChangeSet(id) => {
-                if self.change_set_is_submitting(&id) {
+                if self.submitting_change_sets.contains(&id) {
                     return Ok(());
                 }
                 self.change_sets.retain(|set| set.id != id);

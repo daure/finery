@@ -16,8 +16,9 @@ use crate::{
         TicketIssueLink, TicketKind, TicketWebLink, change_parent, jira_adf::markdown_to_adf,
     },
     store::work_items::{
-        BacklogSnapshot, RankPlan, RunwayCapacitySource, Sprint, VelocityReport, VelocitySprint,
-        WorkItem, apply_capacity, loaded_story_point_average,
+        BacklogSnapshot, IssueStatusTransition, RankPlan, RunwayCapacitySource, Sprint,
+        StatusTransition, VelocityReport, VelocitySprint, WorkItem, apply_capacity,
+        loaded_story_point_average,
     },
 };
 
@@ -73,6 +74,9 @@ const COMPOSER_FIELDS: [&str; 14] = [
 const BACKLOG_JQL: &str = "";
 const MAX_VELOCITY_GOAL_LOOKUPS: usize = 10;
 const MAX_PARALLEL_SPRINT_LOADS: usize = 6;
+const MAX_PARALLEL_STATUS_LOADS: usize = 6;
+
+type StatusTransitionLoad = (String, Result<Vec<JiraOption>, String>);
 
 pub(crate) struct BacklogLoad {
     pub snapshot: BacklogSnapshot,
@@ -1330,6 +1334,33 @@ pub(crate) fn field_options(
     })
 }
 
+pub(crate) fn status_transitions_by_issue(
+    settings: &AppSettings,
+    issue_keys: &[String],
+) -> Result<Vec<(String, Vec<JiraOption>)>, String> {
+    status_transition_results_by_issue(settings, issue_keys)?
+        .into_iter()
+        .map(|(key, result)| result.map(|transitions| (key, transitions)))
+        .collect()
+}
+
+pub(crate) fn set_status(settings: &AppSettings, status: &StatusTransition) -> Result<(), String> {
+    let (client, base_url, email, token) = configured_client(settings)?;
+    for issue in &status.issues {
+        let response = client
+            .post(format!(
+                "{base_url}/rest/api/3/issue/{}/transitions",
+                issue.issue_key
+            ))
+            .basic_auth(&email, Some(&token))
+            .json(&json!({ "transition": { "id": issue.transition_id } }))
+            .send()
+            .map_err(|error| error.to_string())?;
+        ensure_success(response)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn assignees(
     settings: &AppSettings,
     project_key: &str,
@@ -1560,31 +1591,117 @@ fn available_statuses(
     token: &str,
     ticket: &Ticket,
 ) -> Result<Vec<JiraOption>, String> {
-    let response = client
-        .get(format!(
-            "{base_url}/rest/api/3/issue/{}/transitions",
-            ticket.key
-        ))
-        .basic_auth(email, Some(token))
-        .send()
-        .map_err(|error| error.to_string())?;
-    let transitions = response_json::<TransitionPage>(response)?;
     let mut options = vec![JiraOption {
         id: ticket.status.clone(),
         label: ticket.status.clone(),
     }];
-    options.extend(
-        transitions
-            .transitions
-            .into_iter()
-            .map(|transition| JiraOption {
-                id: transition.id,
-                label: transition.to.name,
-            }),
-    );
+    options.extend(transitions_for_issue(
+        client,
+        base_url,
+        email,
+        token,
+        &ticket.key,
+    )?);
     options.sort_by(|left, right| left.label.cmp(&right.label));
     options.dedup_by(|left, right| left.label == right.label);
     Ok(options)
+}
+
+fn transitions_for_issue(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    key: &str,
+) -> Result<Vec<JiraOption>, String> {
+    let response = client
+        .get(format!("{base_url}/rest/api/3/issue/{key}/transitions"))
+        .basic_auth(email, Some(token))
+        .send()
+        .map_err(|error| error.to_string())?;
+    Ok(response_json::<TransitionPage>(response)?
+        .transitions
+        .into_iter()
+        .map(|transition| JiraOption {
+            id: transition.id,
+            label: transition.to.name,
+        })
+        .collect())
+}
+
+fn status_transition_results_by_issue(
+    settings: &AppSettings,
+    issue_keys: &[String],
+) -> Result<Vec<StatusTransitionLoad>, String> {
+    if issue_keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let worker_count = issue_keys.len().min(MAX_PARALLEL_STATUS_LOADS);
+    let chunk_size = issue_keys.len().div_ceil(worker_count);
+    std::thread::scope(|scope| -> Result<Vec<StatusTransitionLoad>, String> {
+        let handles = issue_keys
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(|| {
+                    chunk
+                        .iter()
+                        .map(|key| {
+                            (
+                                key.clone(),
+                                transitions_for_issue(&client, &base_url, &email, &token, key),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut transitions = Vec::with_capacity(issue_keys.len());
+        for handle in handles {
+            transitions.extend(
+                handle
+                    .join()
+                    .map_err(|_| "Jira status transition worker panicked".to_string())?,
+            );
+        }
+        Ok(transitions)
+    })
+}
+
+pub(crate) fn common_status_transitions(
+    mut transitions_by_issue: Vec<(String, Vec<JiraOption>)>,
+) -> Vec<StatusTransition> {
+    let Some((first_key, first_transitions)) = transitions_by_issue.first().cloned() else {
+        return Vec::new();
+    };
+    let mut common = first_transitions
+        .into_iter()
+        .map(|transition| StatusTransition {
+            label: transition.label,
+            issues: vec![IssueStatusTransition {
+                issue_key: first_key.clone(),
+                transition_id: transition.id,
+            }],
+        })
+        .collect::<Vec<_>>();
+    for (issue_key, transitions) in transitions_by_issue.drain(1..) {
+        common.retain_mut(|status| {
+            let Some(transition) = transitions
+                .iter()
+                .find(|transition| transition.label.eq_ignore_ascii_case(&status.label))
+            else {
+                return false;
+            };
+            status.issues.push(IssueStatusTransition {
+                issue_key: issue_key.clone(),
+                transition_id: transition.id.clone(),
+            });
+            true
+        });
+    }
+    common.sort_by_cached_key(|status| status.label.to_ascii_lowercase());
+    common.dedup_by(|left, right| left.label.eq_ignore_ascii_case(&right.label));
+    common
 }
 
 fn options_from_values(values: Option<&Vec<Value>>) -> Vec<JiraOption> {

@@ -189,7 +189,7 @@ fn search_ticket(ticket: Ticket) -> ComposerSearchTicket {
             fix_versions: Vec::new(),
             epic_name: None,
             story_points: None,
-        status_changed_at: None,
+            status_changed_at: None,
         },
         ticket,
         story_points_configured: false,

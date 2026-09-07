@@ -225,7 +225,7 @@ impl PropertyFields {
                     service.clone(),
                     keys.web_links.clone(),
                 ),
-                FlexItem::fixed(6),
+                FlexItem::fit_content(),
             )
             .child(
                 "issue-links",
@@ -235,7 +235,7 @@ impl PropertyFields {
                     service.clone(),
                     keys.issue_links.clone(),
                 ),
-                FlexItem::fixed(11),
+                FlexItem::fit_content(),
             );
         let root = ScrollContainer::vertical(fields)
             .scrollbars(ScrollbarConfig::default())

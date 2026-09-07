@@ -25,7 +25,7 @@ use crate::{
         VersionedChangeSetCatalog,
     },
     store::composer::{ChangeSet, Ticket, TicketChange, TicketPresentation},
-    store::work_items::{BacklogSnapshot, RankPlan, WorkItem},
+    store::work_items::{BacklogSnapshot, RankPlan, StatusTransition, WorkItem},
 };
 
 pub(crate) mod composer_attachments;
@@ -632,6 +632,27 @@ impl AppService {
         self.with_jira_reorder(|service| service.jira_backlog_while_reorder_locked())
     }
 
+    pub(crate) fn jira_status_transitions_by_issue(
+        &self,
+        issue_keys: &[String],
+    ) -> Result<Vec<(String, Vec<jira::JiraOption>)>, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::status_transitions_by_issue(&settings, issue_keys)
+    }
+
+    pub(crate) fn jira_set_status(&self, status: &StatusTransition) -> Result<(), String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::set_status(&settings, status)
+    }
+
     pub(crate) fn jira_backlog_while_reorder_locked(&self) -> Result<BacklogSnapshot, String> {
         let settings = self
             .settings
@@ -785,6 +806,23 @@ impl AppService {
             return;
         }
         self.record_recent_ticket(key);
+    }
+
+    pub(crate) fn open_web_link(&self, url: &str) {
+        let url = url.trim();
+        if url.is_empty() {
+            self.report_error("Could not open web link: URL is unavailable".into());
+            return;
+        }
+        if let Err(error) = spawn_browser(browser_command(url)) {
+            #[cfg(target_os = "linux")]
+            if error.kind() == std::io::ErrorKind::NotFound
+                && spawn_browser(xdg_open_command(url)).is_ok()
+            {
+                return;
+            }
+            self.report_error(format!("Could not open web link in browser: {error}"));
+        }
     }
 
     pub(crate) fn load_recent_jira_tickets(&self) -> Result<RecentTickets, String> {

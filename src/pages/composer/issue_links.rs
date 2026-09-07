@@ -13,10 +13,10 @@ use ratatui::{
     text::Text,
 };
 use tuicore::{
-    AnimationSettings, Column, DropdownPopupDirection, DropdownSearchMode, EventCtx, EventOutcome,
-    EventRoute, FocusCtx, FocusId, FocusTarget, LayoutCtx, LayoutProposal, LayoutResult,
-    LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlField, RenderCtx,
-    TickResult, TuiEvent, TuiNode, theme,
+    AnimationSettings, ChildKey, Column, DropdownPopupDirection, DropdownSearchMode, EventCtx,
+    EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget, Key, KeyEvent, KeyModifiers,
+    LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, ListControl,
+    ListControlEvent, ListControlField, RenderCtx, TickResult, TuiEvent, TuiNode, theme,
 };
 
 use crate::{
@@ -90,6 +90,18 @@ impl BoundIssueLinks {
         let targets = Rc::new(RefCell::new(HashMap::new()));
         let creator_targets = Rc::clone(&targets);
         let editor_targets = Rc::clone(&targets);
+        let jira_base_url = service
+            .settings()
+            .read()
+            .ok()
+            .map(|settings| {
+                settings
+                    .jira_base_url
+                    .trim()
+                    .trim_end_matches('/')
+                    .to_owned()
+            })
+            .filter(|url| !url.is_empty());
         let mut control = ListControl::new_fields(
             [],
             |row: &IssueLinkRow| row.row_id.clone(),
@@ -127,12 +139,23 @@ impl BoundIssueLinks {
                 row.target = editor_targets.borrow().get(&values[1]).cloned();
             },
         )
-        .column(Column::multiline(
-            "issue-link",
-            "",
-            Constraint::Fill(1),
-            |row, _| issue_link_summary_text(row),
-        ))
+        .column(
+            Column::multiline("issue-link", "", Constraint::Fill(1), |row, _| {
+                issue_link_summary_text(row)
+            })
+            .search_key(|row| {
+                format!(
+                    "{} {} {}",
+                    row.link.relationship, row.link.target_key, row.link.target_title
+                )
+            }),
+        )
+        .copy_with(move |row| {
+            jira_base_url
+                .as_ref()
+                .map(|base_url| format!("{base_url}/browse/{}", row.link.target_key))
+                .unwrap_or_default()
+        })
         .headers(false)
         .focus_id("issue-links-data-view")
         .row_height(3)
@@ -178,6 +201,11 @@ impl BoundIssueLinks {
         };
         bound.sync();
         bound
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_search_query_for_test(&mut self, query: &str) {
+        self.control.data_view_mut().set_search_query(query);
     }
 
     fn sync(&mut self) -> bool {
@@ -307,6 +335,37 @@ impl BoundIssueLinks {
             self.service
                 .report_error(format!("could not search Jira tickets: {error}"));
         }
+    }
+
+    fn open_highlighted_link(
+        &self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> Option<EventOutcome> {
+        if route
+            .path
+            .without_first_if(&ChildKey::new("data"))
+            .is_none()
+            || !matches!(
+                event,
+                TuiEvent::Key(KeyEvent {
+                    code: Key::Enter,
+                    modifiers: KeyModifiers::CONTROL,
+                })
+            )
+        {
+            return None;
+        }
+        let key = self
+            .control
+            .data_view()
+            .highlighted_id()
+            .and_then(|row_id| self.control.items().iter().find(|row| row.row_id == row_id))
+            .map(|row| row.link.target_key.clone())?;
+        self.service.open_jira_issue(&key);
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
     }
 }
 
@@ -535,6 +594,9 @@ impl TuiNode for BoundIssueLinks {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
+        if let Some(outcome) = self.open_highlighted_link(route, event, ctx) {
+            return outcome;
+        }
         let outcome = self.control.dispatch_event(route, event, ctx);
         self.drain_events();
         outcome

@@ -715,6 +715,10 @@ impl DetailPane {
         ctx.request_redraw();
     }
 
+    pub(super) fn select_description(&mut self) {
+        self.detail.second_mut().second_mut().select_description();
+    }
+
     fn sync(&mut self) {
         if self.state.borrow().selected_attachment().is_some()
             || self.state.borrow().selected_mermaid_diagram().is_some()
@@ -818,6 +822,16 @@ impl ResponsiveDetails {
         if !self.is_wide {
             self.narrow.select_index(0);
         }
+    }
+
+    fn select_description(&mut self) {
+        self.narrow.select_index_with_settings(
+            0,
+            AnimationSettings {
+                enabled: false,
+                ..AnimationSettings::default()
+            },
+        );
     }
 
     fn process_property_shortcuts(&mut self, ctx: &mut EventCtx<()>) {

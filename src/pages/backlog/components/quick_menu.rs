@@ -12,12 +12,17 @@ use tuicore::{
     TuiNode, keybindings,
 };
 
+use crate::store::work_items::StatusTransition;
+
 const MENU_HOST_WIDTH: u16 = 46;
 const MENU_HOST_HEIGHT: u16 = 10;
 const MENU_FIELD_WIDTH: u16 = 36;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(in crate::pages::backlog) enum BacklogQuickAction {
+    SetStatus,
+    StatusLoading,
+    SetStatusTo(StatusTransition),
     MoveToTop,
     MoveToBottom,
     MoveToSection(BacklogDestination),
@@ -26,12 +31,15 @@ pub(in crate::pages::backlog) enum BacklogQuickAction {
 }
 
 impl BacklogQuickAction {
-    pub(in crate::pages::backlog) fn top_bottom() -> [Self; 2] {
-        [Self::MoveToTop, Self::MoveToBottom]
+    pub(in crate::pages::backlog) fn main_actions() -> [Self; 3] {
+        [Self::SetStatus, Self::MoveToTop, Self::MoveToBottom]
     }
 
     pub(in crate::pages::backlog) fn label(&self) -> String {
         match self {
+            Self::SetStatus => "Set status".into(),
+            Self::StatusLoading => "Loading statuses…".into(),
+            Self::SetStatusTo(status) => status.label.clone(),
             Self::MoveToTop => "Move to top".into(),
             Self::MoveToBottom => "Move to bottom".into(),
             Self::MoveToSection(destination) => format!("Move to {}", destination.label),
@@ -51,6 +59,12 @@ pub(in crate::pages::backlog) struct BacklogDestination {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::pages::backlog) enum BacklogQuickMenuEvent {
+    LoadStatuses {
+        keys: Vec<String>,
+    },
+    SetStatus {
+        status: StatusTransition,
+    },
     MoveToTop {
         section_id: String,
         keys: Vec<String>,
@@ -83,11 +97,19 @@ pub(in crate::pages::backlog) struct BacklogQuickMenu {
 }
 
 impl BacklogQuickMenu {
+    #[cfg(test)]
+    pub(in crate::pages::backlog) fn main_action_labels() -> Vec<String> {
+        BacklogQuickAction::main_actions()
+            .iter()
+            .map(BacklogQuickAction::label)
+            .collect()
+    }
+
     pub(in crate::pages::backlog) fn new(move_locked: Rc<Cell<bool>>) -> Self {
         let selected = Rc::new(RefCell::new(Vec::new()));
         let selected_actions = Rc::clone(&selected);
         let dropdown = Dropdown::single(
-            BacklogQuickAction::top_bottom(),
+            BacklogQuickAction::main_actions(),
             |action| action.clone(),
             |action| action.label(),
         )
@@ -136,7 +158,7 @@ impl BacklogQuickMenu {
         self.selected.borrow_mut().clear();
         self.dropdown.clear_selection();
         self.dropdown.set_rows(
-            BacklogQuickAction::top_bottom().into_iter().chain(
+            BacklogQuickAction::main_actions().into_iter().chain(
                 destinations
                     .into_iter()
                     .map(BacklogQuickAction::MoveToSection),
@@ -145,6 +167,14 @@ impl BacklogQuickMenu {
         self.dropdown.set_search_query("");
         self.dropdown.open_with_context(ctx);
         true
+    }
+
+    pub(in crate::pages::backlog) fn set_statuses(&mut self, statuses: Vec<StatusTransition>) {
+        self.selected.borrow_mut().clear();
+        self.dropdown.clear_selection();
+        self.dropdown
+            .set_rows(statuses.into_iter().map(BacklogQuickAction::SetStatusTo));
+        self.dropdown.set_search_query("");
     }
 
     pub(in crate::pages::backlog) fn take_events(&mut self) -> Vec<BacklogQuickMenuEvent> {
@@ -183,6 +213,24 @@ impl BacklogQuickMenu {
                 continue;
             };
             let event = match action {
+                BacklogQuickAction::SetStatus => {
+                    self.dropdown.clear_selection();
+                    self.dropdown.set_rows([BacklogQuickAction::StatusLoading]);
+                    self.events.push(BacklogQuickMenuEvent::LoadStatuses {
+                        keys: self.keys.clone(),
+                    });
+                    self.dropdown.set_search_query("");
+                    self.dropdown.open_with_context(ctx);
+                    continue;
+                }
+                BacklogQuickAction::StatusLoading => {
+                    self.dropdown.clear_selection();
+                    self.dropdown.open_with_context(ctx);
+                    continue;
+                }
+                BacklogQuickAction::SetStatusTo(status) => {
+                    BacklogQuickMenuEvent::SetStatus { status }
+                }
                 BacklogQuickAction::MoveToTop => BacklogQuickMenuEvent::MoveToTop {
                     section_id,
                     keys: self.keys.clone(),

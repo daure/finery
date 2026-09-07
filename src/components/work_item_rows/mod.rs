@@ -109,10 +109,8 @@ pub(crate) fn ticket_summary_text(
         let mut status_text = row.status.clone();
         if !row.done && row.show_time_in_status {
             if let Some(changed_at) = row.status_changed_at {
-                let time = crate::store::work_items::format_time_in_status(
-                    chrono::Utc::now(),
-                    changed_at,
-                );
+                let time =
+                    crate::store::work_items::format_time_in_status(chrono::Utc::now(), changed_at);
                 status_text.push_str(&format!(" ({time})"));
             }
         }

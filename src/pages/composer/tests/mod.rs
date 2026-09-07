@@ -10,14 +10,15 @@ use std::{
 
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use tuicore::{
-    AnimationSettings, CheckState, EventCtx, EventOutcome, EventRoute, ExternalEditorResponse,
-    FocusCtx, FocusId, FocusManager, FocusRequest, FocusTransition, HotkeyEvent, Key, KeyEvent,
-    KeyModifiers, LayoutCtx, LifecycleCtx, RenderCtx, TabsBodyBorderStyle, TuiEvent, TuiNode,
-    theme,
+    AnimationSettings, CheckState, ChildKey, EventCtx, EventOutcome, EventRoute,
+    ExternalEditorResponse, FocusCtx, FocusId, FocusManager, FocusRequest, FocusTransition,
+    HotkeyEvent, Key, KeyEvent, KeyModifiers, LayoutCtx, LifecycleCtx, RenderCtx,
+    TabsBodyBorderStyle, TreePath, TuiEvent, TuiNode, theme,
 };
 
 use super::change_set_list::change_set_share_text;
 use super::fields::{BoundLabelsInput, BoundTicketPropertyInput, TicketPropertyText};
+use super::issue_links::BoundIssueLinks;
 use super::page::ComposerPage;
 use super::property_fields::{BoundFixVersionsDropdown, BoundPropertyDropdown};
 use super::source::SourceController;
@@ -31,18 +32,20 @@ use super::{
     ticket_rows::{ticket_data_view, ticket_rows},
 };
 use crate::{
-    app_settings::AppSettings,
+    app_settings::{AppSettings, ComposerKeyBindings},
     jira::JiraOption,
     service::{AppService, composer_service::ChangeSetPatchOperation},
     store::composer::{
         AttachmentChangeKind, ChangeKind, ChangeSet, ComposerAction, ComposerState,
-        ComposerViewMode, MermaidDiagram, PlacementTarget, SubmissionSnapshot, Ticket,
-        TicketAttachment, TicketChange, TicketKind, TicketPresentation,
+        ComposerViewMode, MermaidDiagram, PlacementTarget, SubmissionAttempt,
+        SubmissionAttemptPhase, SubmissionSnapshot, Ticket, TicketAttachment, TicketChange,
+        TicketKind, TicketPresentation,
     },
     store::work_items::{SubtaskProgress, WorkItem},
 };
 
 use super::title_guidance::{TitleLevel, evaluate_title, format_title};
+use super::web_links::BoundWebLinks;
 
 const TEST_WIDTH: u16 = 96;
 
@@ -284,9 +287,13 @@ fn speed_reader_removes_jira_adf_syntax_and_preserves_its_meaning() {
 }
 
 fn composer_page() -> ComposerPage {
+    composer_page_with_change_sets(ComposerState::demo().change_sets)
+}
+
+fn composer_page_with_change_sets(change_sets: Vec<ChangeSet>) -> ComposerPage {
     let service = AppService::for_tests();
     let settings = service.settings();
-    let mut page = ComposerPage::new(ComposerState::demo().change_sets, service, settings);
+    let mut page = ComposerPage::new(change_sets, service, settings);
     page.init(&mut LifecycleCtx::default());
     page
 }
@@ -330,6 +337,25 @@ fn render_property_dropdown(dropdown: &mut BoundPropertyDropdown) -> String {
         .draw(|frame| {
             let mut render = RenderCtx::new();
             dropdown.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..area.height)
+        .flat_map(|y| {
+            (0..area.width).map(move |x| buffer.cell((x, y)).unwrap().symbol().to_owned())
+        })
+        .collect()
+}
+
+fn render_issue_links(links: &mut BoundIssueLinks) -> String {
+    let area = Rect::new(0, 0, 60, 12);
+    links.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            links.render(frame, area, &mut render);
             render.flush(frame);
         })
         .unwrap();
@@ -1382,6 +1408,156 @@ fn ctrl_enter_opens_the_selected_existing_ticket() {
 }
 
 #[test]
+fn yy_copies_the_focused_composer_ticket_url() {
+    tuicore::init();
+    let mut state = ComposerState::demo();
+    state
+        .dispatch(ComposerAction::OpenChangeSet("CS-1".into()))
+        .unwrap();
+    state
+        .dispatch(ComposerAction::SelectTicket(Some("FIN-157".into())))
+        .unwrap();
+    let mut view = super::ticket_rows::ticket_data_view_with_number_jump(
+        &state,
+        Rc::new(RefCell::new(Default::default())),
+        Some("https://jira.example".into()),
+    );
+    let mut ctx: EventCtx<()> = EventCtx::default();
+
+    view.event(&TuiEvent::Yank, &mut ctx);
+
+    assert_eq!(
+        ctx.clipboard_request(),
+        Some("https://jira.example/browse/FIN-157")
+    );
+}
+
+#[test]
+fn yy_copies_the_focused_web_link_url() {
+    tuicore::init();
+    let service = AppService::for_tests();
+    let state = Rc::new(RefCell::new(ComposerState::demo()));
+    state
+        .borrow_mut()
+        .dispatch(ComposerAction::OpenChangeSet("CS-1".into()))
+        .unwrap();
+    state
+        .borrow_mut()
+        .dispatch(ComposerAction::SelectTicket(Some("FIN-157".into())))
+        .unwrap();
+    state
+        .borrow_mut()
+        .dispatch(ComposerAction::AddWebLink {
+            id: "local-docs".into(),
+            title: "Docs".into(),
+            url: "https://docs.example/guide".into(),
+        })
+        .unwrap();
+    let mut links = BoundWebLinks::new(
+        Rc::clone(&state),
+        Rc::new(RefCell::new(Vec::new())),
+        service,
+        ComposerKeyBindings::default().web_links,
+    );
+    let mut ctx = EventCtx::default();
+
+    links.dispatch_event(
+        &EventRoute::new(TreePath::new().child(ChildKey::new("data"))),
+        &TuiEvent::Yank,
+        &mut ctx,
+    );
+
+    assert_eq!(ctx.clipboard_request(), Some("https://docs.example/guide"));
+}
+
+#[test]
+fn yy_copies_the_focused_issue_link_url() {
+    tuicore::init();
+    let service = AppService::for_tests();
+    service.settings().write().unwrap().jira_base_url = "https://jira.example".into();
+    let state = Rc::new(RefCell::new(ComposerState::demo()));
+    state
+        .borrow_mut()
+        .dispatch(ComposerAction::OpenChangeSet("CS-1".into()))
+        .unwrap();
+    state
+        .borrow_mut()
+        .dispatch(ComposerAction::SelectTicket(Some("FIN-157".into())))
+        .unwrap();
+    state
+        .borrow_mut()
+        .dispatch(ComposerAction::AddIssueLink {
+            relationship: "relates to".into(),
+            target_key: "FIN-200".into(),
+            target_title: "Linked ticket".into(),
+            outward: true,
+        })
+        .unwrap();
+    let mut links = BoundIssueLinks::new(
+        Rc::clone(&state),
+        Rc::new(RefCell::new(Vec::new())),
+        service,
+        ComposerKeyBindings::default().issue_links,
+    );
+    let mut ctx = EventCtx::default();
+
+    links.dispatch_event(
+        &EventRoute::new(TreePath::new().child(ChildKey::new("data"))),
+        &TuiEvent::Yank,
+        &mut ctx,
+    );
+
+    assert_eq!(
+        ctx.clipboard_request(),
+        Some("https://jira.example/browse/FIN-200")
+    );
+}
+
+#[test]
+fn issue_link_search_filters_by_relationship_key_and_title() {
+    tuicore::init();
+    let state = Rc::new(RefCell::new(ComposerState::demo()));
+    state
+        .borrow_mut()
+        .dispatch(ComposerAction::OpenChangeSet("CS-1".into()))
+        .unwrap();
+    state
+        .borrow_mut()
+        .dispatch(ComposerAction::SelectTicket(Some("FIN-157".into())))
+        .unwrap();
+    for (relationship, key, title) in [
+        ("relates to", "FIN-200", "Needle ticket"),
+        ("blocks", "FIN-201", "Other ticket"),
+    ] {
+        state
+            .borrow_mut()
+            .dispatch(ComposerAction::AddIssueLink {
+                relationship: relationship.into(),
+                target_key: key.into(),
+                target_title: title.into(),
+                outward: true,
+            })
+            .unwrap();
+    }
+    let mut links = BoundIssueLinks::new(
+        state,
+        Rc::new(RefCell::new(Vec::new())),
+        AppService::for_tests(),
+        ComposerKeyBindings::default().issue_links,
+    );
+    for (query, expected, excluded) in [
+        ("needle", "Needle ticket", "Other ticket"),
+        ("FIN-201", "Other ticket", "Needle ticket"),
+        ("blocks", "Other ticket", "Needle ticket"),
+    ] {
+        links.set_search_query_for_test(query);
+        let text = render_issue_links(&mut links);
+        assert!(text.contains(expected), "query: {query}");
+        assert!(!text.contains(excluded), "query: {query}");
+    }
+}
+
+#[test]
 fn ctrl_enter_creates_a_label_instead_of_opening_the_ticket() {
     tuicore::init();
     let mut page = composer_page();
@@ -1808,7 +1984,7 @@ fn composer_rows_show_current_ticket_properties_with_presentation_only_details()
                     fix_versions: Vec::new(),
                     epic_name: Some("Checkout reliability".into()),
                     story_points: None,
-        status_changed_at: None,
+                    status_changed_at: None,
                 },
                 story_points_configured: true,
                 assumed_story_points: 3.0,
@@ -2698,6 +2874,43 @@ fn wide_panel_focus_selects_the_matching_narrow_tab() {
 }
 
 #[test]
+fn opening_another_change_set_focuses_its_ticket_list_and_description_tab() {
+    tuicore::init();
+    let mut change_sets = ComposerState::demo().change_sets;
+    change_sets[0].tickets.truncate(1);
+    change_sets[0].tickets[0].id = "NEW-1".into();
+    change_sets[0].tickets[0].original.as_mut().unwrap().key = "NEW-1".into();
+    change_sets[1].tickets = vec![change_sets[0].tickets[0].clone()];
+    change_sets[1].tickets[0].id = "NEW-2".into();
+    change_sets[1].tickets[0].original.as_mut().unwrap().key = "NEW-2".into();
+    let mut page = composer_page_with_change_sets(change_sets);
+
+    open_change_set(&mut page, 0);
+    let tabs = target(&mut page, "tabs");
+    page.dispatch_event(
+        &EventRoute::new(tabs.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("shift+p".into())),
+        &mut EventCtx::default(),
+    );
+    assert_eq!(page.narrow_selected_index(), 1);
+
+    let tickets = focus(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Esc)),
+        &mut EventCtx::default(),
+    );
+    assert_eq!(page.narrow_selected_index(), 0);
+    let opened = open_change_set(&mut page, 1);
+
+    assert_eq!(
+        opened.focus_request(),
+        Some(&FocusRequest::Target(FocusId::new("data-view")))
+    );
+    assert_eq!(page.narrow_selected_index(), 0);
+}
+
+#[test]
 fn narrow_property_shortcuts_open_the_properties_tab_and_focus_the_field() {
     tuicore::init();
     let area = Rect::new(0, 0, 96, 40);
@@ -2917,6 +3130,31 @@ fn change_set_delete_uses_ctrl_x() {
     );
 
     assert!(render_text(&mut page).contains("Delete change set?"));
+}
+
+#[test]
+fn change_set_delete_warns_before_discarding_submission_recovery_data() {
+    tuicore::init();
+    let mut change_sets = ComposerState::demo().change_sets;
+    change_sets[0].submission_attempt = Some(SubmissionAttempt {
+        owner_id: "attempt-owner".into(),
+        ticket_ids: Vec::new(),
+        phase: SubmissionAttemptPhase::JiraSubmissionStarted,
+    });
+    let mut page = composer_page_with_change_sets(change_sets);
+    let change_sets = target(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(change_sets.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+
+    let text = render_text(&mut page);
+    assert!(text.contains("WARNING: This deletes Jira submission recovery data."));
+    assert!(text.contains("Jira may contain tickets that Finery cannot reconcile."));
 }
 
 #[test]

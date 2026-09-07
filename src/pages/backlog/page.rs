@@ -1,5 +1,6 @@
 use std::{
     cell::Cell,
+    collections::HashMap,
     rc::Rc,
     sync::mpsc::{self, Receiver, Sender},
     time::Duration,
@@ -22,10 +23,11 @@ use tuicore::{
 
 use crate::{
     app_settings::{BacklogFilter, BacklogRunwaySettings},
+    jira::{self, JiraOption},
     service::AppService,
     store::work_items::{
-        BacklogSnapshot, RankPlan, Sprint, VelocityReport, VelocitySprint, WorkItem,
-        apply_capacity, loaded_story_point_average, rank_plan,
+        BacklogSnapshot, RankPlan, Sprint, StatusTransition, VelocityReport, VelocitySprint,
+        WorkItem, apply_capacity, is_done_status, loaded_story_point_average, rank_plan,
     },
 };
 
@@ -58,6 +60,16 @@ enum BacklogResult {
     Transferred {
         generation: u64,
         destination: String,
+        result: Result<(), String>,
+    },
+    StatusesLoaded {
+        generation: u64,
+        keys: Vec<String>,
+        result: Result<Vec<(String, Vec<JiraOption>)>, String>,
+    },
+    StatusSet {
+        generation: u64,
+        status: StatusTransition,
         result: Result<(), String>,
     },
 }
@@ -111,6 +123,8 @@ pub(super) struct RequestGenerations {
     next: u64,
     active_load: Option<u64>,
     active_rank: Option<u64>,
+    active_status_load: Option<u64>,
+    active_status_set: Option<u64>,
     rank_refresh_load: Option<u64>,
     preserve_optimistic_view_load: Option<u64>,
 }
@@ -140,6 +154,34 @@ impl RequestGenerations {
         self.preserve_optimistic_view_load = None;
         self.active_rank = Some(generation);
         generation
+    }
+
+    fn start_status_load(&mut self) -> u64 {
+        let generation = self.next();
+        self.active_status_load = Some(generation);
+        generation
+    }
+
+    fn complete_status_load(&mut self, generation: u64) -> bool {
+        if self.active_status_load != Some(generation) {
+            return false;
+        }
+        self.active_status_load = None;
+        true
+    }
+
+    fn start_status_set(&mut self) -> u64 {
+        let generation = self.next();
+        self.active_status_set = Some(generation);
+        generation
+    }
+
+    fn complete_status_set(&mut self, generation: u64) -> bool {
+        if self.active_status_set != Some(generation) {
+            return false;
+        }
+        self.active_status_set = None;
+        true
     }
 
     pub(super) fn complete_load(&mut self, generation: u64) -> Option<LoadCompletion> {
@@ -189,6 +231,48 @@ pub(super) struct PendingRank {
     pub(super) unconfirmed_refreshes: usize,
 }
 
+#[derive(Clone)]
+struct PendingStatusChange {
+    rollback_snapshot: BacklogSnapshot,
+}
+
+#[derive(Default)]
+pub(super) struct StatusTransitionCache {
+    by_issue: HashMap<String, Vec<JiraOption>>,
+}
+
+impl StatusTransitionCache {
+    pub(super) fn missing_keys(&self, keys: &[String]) -> Vec<String> {
+        keys.iter()
+            .filter(|key| !self.by_issue.contains_key(*key))
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn insert(&mut self, transitions: Vec<(String, Vec<JiraOption>)>) {
+        self.by_issue.extend(transitions);
+    }
+
+    pub(super) fn common(&self, keys: &[String]) -> Option<Vec<StatusTransition>> {
+        let transitions = keys
+            .iter()
+            .map(|key| {
+                self.by_issue
+                    .get(key)
+                    .cloned()
+                    .map(|transitions| (key.clone(), transitions))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(jira::common_status_transitions(transitions))
+    }
+
+    pub(super) fn invalidate(&mut self, status: &StatusTransition) {
+        for issue in &status.issues {
+            self.by_issue.remove(&issue.issue_key);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PendingTransferReconciliation {
     ConfirmedDestination,
@@ -204,8 +288,13 @@ pub(super) enum PendingRankReconciliation {
     Exhausted,
 }
 
-pub(super) fn should_poll(loading: bool, ranking: bool, retry_pending: bool) -> bool {
-    loading || ranking || retry_pending
+pub(super) fn should_poll(
+    loading: bool,
+    ranking: bool,
+    status_working: bool,
+    retry_pending: bool,
+) -> bool {
+    loading || ranking || status_working || retry_pending
 }
 
 pub(crate) fn page(service: AppService) -> BacklogPage {
@@ -221,6 +310,8 @@ pub(crate) struct BacklogPage {
     loading_view: ScrollContainer<Flex<()>>,
     loading: bool,
     ranking: bool,
+    status_loading: bool,
+    status_transitioning: bool,
     move_locked: Rc<Cell<bool>>,
     generations: RequestGenerations,
     rank_refresh_retry: RankRefreshRetry,
@@ -228,6 +319,8 @@ pub(crate) struct BacklogPage {
     snapshot: Option<BacklogSnapshot>,
     pending_transfer: Option<PendingTransfer>,
     pending_rank: Option<PendingRank>,
+    pending_status_change: Option<PendingStatusChange>,
+    status_transition_cache: StatusTransitionCache,
     focus_backlog_after_load: bool,
     pending_focus: Option<FocusRequest>,
     data_focus_path: TreePath,
@@ -264,6 +357,8 @@ impl BacklogPage {
             loading_view: loading_view(),
             loading: false,
             ranking: false,
+            status_loading: false,
+            status_transitioning: false,
             move_locked,
             generations: RequestGenerations::default(),
             rank_refresh_retry: RankRefreshRetry::default(),
@@ -271,6 +366,8 @@ impl BacklogPage {
             snapshot: None,
             pending_transfer: None,
             pending_rank: None,
+            pending_status_change: None,
+            status_transition_cache: StatusTransitionCache::default(),
             focus_backlog_after_load: false,
             pending_focus: None,
             data_focus_path: TreePath::from_keys([
@@ -421,6 +518,16 @@ impl BacklogPage {
                     destination,
                     result,
                 } => self.apply_transfer_result(generation, destination, result),
+                BacklogResult::StatusesLoaded {
+                    generation,
+                    keys,
+                    result,
+                } => self.apply_statuses_result(generation, keys, result),
+                BacklogResult::StatusSet {
+                    generation,
+                    status,
+                    result,
+                } => self.apply_status_result(generation, status, result),
             };
         }
         changed
@@ -736,6 +843,11 @@ impl BacklogPage {
         let changed = !events.is_empty();
         for event in events {
             match event {
+                BacklogQuickMenuEvent::LoadStatuses { keys } => self.load_statuses(keys),
+                BacklogQuickMenuEvent::SetStatus { status } => {
+                    self.set_status(status);
+                    self.view.base_mut().set_active_with_context(false, ctx);
+                }
                 BacklogQuickMenuEvent::MoveToTop {
                     section_id,
                     keys,
@@ -783,6 +895,190 @@ impl BacklogPage {
             }
         }
         changed
+    }
+
+    fn load_statuses(&mut self, keys: Vec<String>) {
+        if self.status_loading || self.status_transitioning {
+            return;
+        }
+        let missing_keys = self.status_transition_cache.missing_keys(&keys);
+        if missing_keys.is_empty() {
+            self.show_statuses(
+                self.status_transition_cache
+                    .common(&keys)
+                    .unwrap_or_default(),
+            );
+            return;
+        }
+        let generation = self.generations.start_status_load();
+        self.status_loading = true;
+        let service = self.service.clone();
+        let sender = self.sender.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("finery-jira-statuses".into())
+            .spawn(move || {
+                let _ = sender.send(BacklogResult::StatusesLoaded {
+                    generation,
+                    keys,
+                    result: service.jira_status_transitions_by_issue(&missing_keys),
+                });
+            })
+            && self.generations.complete_status_load(generation)
+        {
+            self.status_loading = false;
+            self.view.base_mut().set_active(false);
+            self.queue_backlog_data_focus();
+            self.service
+                .report_error(format!("Could not load Jira status transitions: {error}"));
+        }
+    }
+
+    fn apply_statuses_result(
+        &mut self,
+        generation: u64,
+        keys: Vec<String>,
+        result: Result<Vec<(String, Vec<JiraOption>)>, String>,
+    ) -> bool {
+        if !self.generations.complete_status_load(generation) {
+            return false;
+        }
+        self.status_loading = false;
+        match result {
+            Ok(transitions) => {
+                self.status_transition_cache.insert(transitions);
+                self.show_statuses(
+                    self.status_transition_cache
+                        .common(&keys)
+                        .unwrap_or_default(),
+                );
+            }
+            Err(error) => {
+                self.view.base_mut().set_active(false);
+                self.queue_backlog_data_focus();
+                self.service
+                    .report_error(format!("Could not load Jira status transitions: {error}"));
+            }
+        }
+        true
+    }
+
+    fn show_statuses(&mut self, statuses: Vec<StatusTransition>) {
+        if statuses.is_empty() {
+            self.view.base_mut().set_active(false);
+            self.queue_backlog_data_focus();
+            self.service.report_error(
+                "Could not set status: the selected tickets have no common Jira transition".into(),
+            );
+        } else {
+            self.view.base_mut().layer_mut().set_statuses(statuses);
+        }
+    }
+
+    fn set_status(&mut self, status: StatusTransition) {
+        if self.move_locked.get() || self.status_transitioning {
+            self.report_move_locked();
+            return;
+        }
+        if !self.show_optimistic_status(&status) {
+            self.service
+                .report_error("Could not set status: selected tickets are unavailable".into());
+            return;
+        }
+        self.move_locked.set(true);
+        self.status_transitioning = true;
+        self.view.base_mut().base_mut().set_loading(true);
+        let generation = self.generations.start_status_set();
+        let service = self.service.clone();
+        let sender = self.sender.clone();
+        let result_status = status.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("finery-jira-set-status".into())
+            .spawn(move || {
+                let result = service.jira_set_status(&status);
+                let _ = sender.send(BacklogResult::StatusSet {
+                    generation,
+                    status,
+                    result,
+                });
+            })
+            && self.generations.complete_status_set(generation)
+        {
+            self.status_transitioning = false;
+            self.move_locked.set(false);
+            self.view.base_mut().base_mut().set_loading(false);
+            self.restore_status_snapshot();
+            self.service.report_error(format!(
+                "Could not start Jira transition to {}: {error}",
+                result_status.label
+            ));
+        }
+    }
+
+    fn apply_status_result(
+        &mut self,
+        generation: u64,
+        status: StatusTransition,
+        result: Result<(), String>,
+    ) -> bool {
+        if !self.generations.complete_status_set(generation) {
+            return false;
+        }
+        self.status_transitioning = false;
+        self.move_locked.set(false);
+        self.view.base_mut().base_mut().set_loading(false);
+        self.status_transition_cache.invalidate(&status);
+        match result {
+            Ok(()) => {
+                self.pending_status_change = None;
+                let message = match status.issues.as_slice() {
+                    [issue] => format!("{} changed to {}", issue.issue_key, status.label),
+                    issues => format!("{} tickets changed to {}", issues.len(), status.label),
+                };
+                self.service
+                    .report_notification(tuicore::Notification::success(
+                        "Jira status updated",
+                        message,
+                    ));
+            }
+            Err(error) => {
+                self.restore_status_snapshot();
+                self.service
+                    .report_error(format!("Could not set Jira status: {error}"));
+                self.load(false, false);
+            }
+        }
+        true
+    }
+
+    fn show_optimistic_status(&mut self, status: &StatusTransition) -> bool {
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return false;
+        };
+        let rollback_snapshot = snapshot.clone();
+        let mut optimistic = rollback_snapshot.clone();
+        let keys = status
+            .issues
+            .iter()
+            .map(|issue| issue.issue_key.clone())
+            .collect::<Vec<_>>();
+        if !apply_status_to_snapshot(&mut optimistic, &keys, &status.label) {
+            return false;
+        }
+        if let Ok(settings) = self.service.settings().read() {
+            recalculate_capacity(&mut optimistic, &settings.backlog_runway);
+        }
+        self.pending_status_change = Some(PendingStatusChange { rollback_snapshot });
+        self.snapshot = Some(optimistic.clone());
+        self.view.base_mut().base_mut().set_snapshot(&optimistic);
+        true
+    }
+
+    fn restore_status_snapshot(&mut self) {
+        let Some(pending) = self.pending_status_change.take() else {
+            return;
+        };
+        self.snapshot = Some(pending.rollback_snapshot);
+        self.restore_snapshot();
     }
 
     fn open_velocity_dialog(&mut self, ctx: &mut EventCtx<()>) {
@@ -1144,7 +1440,7 @@ impl BacklogPage {
 
     fn report_move_locked(&self) {
         self.service.report_error(
-            "Could not move tickets: a ticket move is still syncing with Jira".into(),
+            "Could not update tickets: another ticket update is still syncing with Jira".into(),
         );
     }
 
@@ -1158,7 +1454,11 @@ impl BacklogPage {
 
     fn refresh_for_settings_change(&mut self) -> bool {
         let settings_revision = self.service.settings_revision();
-        if settings_revision == self.settings_revision || self.loading || self.ranking {
+        if settings_revision == self.settings_revision
+            || self.loading
+            || self.ranking
+            || self.status_transitioning
+        {
             return false;
         }
         self.settings_revision = settings_revision;
@@ -1200,6 +1500,43 @@ pub(super) fn recalculate_capacity(
         source,
         settings.sprint_tolerance_percent,
     );
+}
+
+pub(super) fn apply_status_to_snapshot(
+    snapshot: &mut BacklogSnapshot,
+    keys: &[String],
+    status: &str,
+) -> bool {
+    let keys = keys.iter().collect::<std::collections::HashSet<_>>();
+    if keys.is_empty()
+        || !keys.iter().all(|key| {
+            snapshot.work_items.iter().any(|item| &item.key == *key)
+                || snapshot
+                    .sprints
+                    .iter()
+                    .flat_map(|sprint| &sprint.work_items)
+                    .any(|item| &item.key == *key)
+        })
+    {
+        return false;
+    }
+    let now = chrono::Utc::now();
+    for item in snapshot
+        .work_items
+        .iter_mut()
+        .chain(
+            snapshot
+                .sprints
+                .iter_mut()
+                .flat_map(|sprint| &mut sprint.work_items),
+        )
+        .filter(|item| keys.contains(&item.key))
+    {
+        item.status = status.to_owned();
+        item.done = is_done_status(status);
+        item.status_changed_at = Some(now);
+    }
+    true
 }
 
 fn source_order(snapshot: Option<&BacklogSnapshot>, section_id: &str) -> Vec<String> {
@@ -1949,6 +2286,7 @@ impl TuiNode for BacklogPage {
         if should_poll(
             self.loading,
             self.ranking,
+            self.status_loading || self.status_transitioning,
             self.rank_refresh_retry.pending(),
         ) {
             result.merge(TickResult::scheduled_after(Duration::from_millis(50)))

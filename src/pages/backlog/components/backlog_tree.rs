@@ -13,12 +13,11 @@ use ratatui::{
     text::{Line, Span, Text},
 };
 use tuicore::{
-    Animated, Button, CellContext, ChildKey, Column, DataViewTransformMode, Dropdown,
-    DropdownLabelPosition, DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId,
-    FocusRequest, FocusTarget, HotkeyEvent, Key, KeyModifiers, KeySpec, LayoutCtx, LayoutProposal,
-    LayoutResult, LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent,
-    ListControlKeyBindings, MenuButton, MenuItem, RenderCtx, SearchMode, Spinner, TickResult,
-    TreeAdapter, TuiEvent, TuiNode,
+    Button, CellContext, ChildKey, Column, DataViewTransformMode, Dropdown, DropdownLabelPosition,
+    DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusRequest,
+    FocusTarget, HotkeyEvent, Key, KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult,
+    LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlKeyBindings,
+    MenuButton, MenuItem, RenderCtx, SearchMode, TickResult, TreeAdapter, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -225,13 +224,11 @@ pub(in crate::pages::backlog) fn backlog_tree_with_filters(
             ],
         )
         .hotkey("shift+w"),
-        spinner: Spinner::new(),
         loading: false,
         refresh_area: ratatui::layout::Rect::default(),
         velocity_area: ratatui::layout::Rect::default(),
         filters_area: ratatui::layout::Rect::default(),
         web_area: ratatui::layout::Rect::default(),
-        spinner_area: ratatui::layout::Rect::default(),
         control_area: ratatui::layout::Rect::default(),
         events,
         move_locked,
@@ -248,13 +245,11 @@ pub(in crate::pages::backlog) struct BacklogTree {
     velocity: Button<()>,
     filters: Dropdown<BacklogFilter, BacklogFilter>,
     web: MenuButton<WebMenuItem>,
-    spinner: Spinner,
     loading: bool,
     refresh_area: ratatui::layout::Rect,
     velocity_area: ratatui::layout::Rect,
     filters_area: ratatui::layout::Rect,
     web_area: ratatui::layout::Rect,
-    spinner_area: ratatui::layout::Rect,
     control_area: ratatui::layout::Rect,
     events: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
@@ -902,16 +897,6 @@ impl TuiNode for BacklogTree {
             velocity_width,
             header_height,
         );
-        self.spinner_area = if self.loading {
-            ratatui::layout::Rect::new(
-                self.refresh_area.x.saturating_sub(2),
-                area.y,
-                1,
-                header_height,
-            )
-        } else {
-            ratatui::layout::Rect::default()
-        };
         self.control_area = ratatui::layout::Rect::new(
             area.x,
             area.y.saturating_add(header_height),
@@ -940,9 +925,6 @@ impl TuiNode for BacklogTree {
         ctx.push_slot(ChildKey::new("web"), self.web_area, |ctx| {
             self.web.layout(self.web_area, ctx)
         });
-        if self.loading {
-            <Spinner as TuiNode<()>>::layout(&mut self.spinner, self.spinner_area, ctx);
-        }
         result
     }
     fn render<'a>(
@@ -955,9 +937,6 @@ impl TuiNode for BacklogTree {
         self.velocity.render(frame, self.velocity_area);
         self.filters.render(frame, self.filters_area, ctx);
         self.web.render(frame, self.web_area, ctx);
-        if self.loading {
-            self.spinner.render(frame, self.spinner_area);
-        }
         self.control.render(frame, self.control_area, ctx);
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
@@ -1069,11 +1048,6 @@ impl TuiNode for BacklogTree {
                 ),
             )
             .merge(self.web.tick(dt, settings))
-            .merge(if self.loading {
-                Animated::tick(&mut self.spinner, dt, settings)
-            } else {
-                TickResult::IDLE
-            })
             .merge(number_jump)
     }
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
@@ -1273,11 +1247,15 @@ fn sprint_section_row(section: &str, sprint: &Sprint) -> BacklogRow {
         ]);
     }
     let search_text = sprint_title(sprint);
+    let is_active = sprint.state == "active";
     let Some(capacity) = sprint.capacity.as_ref() else {
         title.extend([
             Span::styled(" • ", Style::default().fg(theme.muted_fg())),
             Span::styled(
-                format!("{} items", item_count_label(&sprint.work_items)),
+                format!(
+                    "{} items",
+                    sprint_item_count_label(&sprint.work_items, is_active)
+                ),
                 Style::default().fg(theme.muted_fg()),
             ),
         ]);
@@ -1295,14 +1273,17 @@ fn sprint_section_row(section: &str, sprint: &Sprint) -> BacklogRow {
                 ),
                 Span::raw(" "),
                 Span::styled(
-                    format!("{} pts", capacity_load_label(capacity)),
+                    format!("{} pts", capacity_load_label(capacity, is_active)),
                     Style::default().fg(theme.text_fg()),
                 ),
                 Span::styled(" • ", Style::default().fg(theme.muted_fg())),
                 Span::styled(coverage, coverage_style),
                 Span::styled(" • ", Style::default().fg(theme.muted_fg())),
                 Span::styled(
-                    format!("{} items", item_count_label(&sprint.work_items)),
+                    format!(
+                        "{} items",
+                        sprint_item_count_label(&sprint.work_items, is_active)
+                    ),
                     Style::default().fg(theme.muted_fg()),
                 ),
             ]),
@@ -1326,7 +1307,7 @@ fn backlog_section_row(snapshot: &BacklogSnapshot) -> BacklogRow {
             ),
             Span::styled(" • ", Style::default().fg(theme.muted_fg())),
             Span::styled(
-                format!("{} items", item_count_label(&snapshot.work_items)),
+                format!("{} items", root_item_count_label(&snapshot.work_items)),
                 Style::default().fg(theme.muted_fg()),
             ),
         ])),
@@ -1472,6 +1453,7 @@ fn sprint_title(sprint: &Sprint) -> String {
     let date_range = sprint_date_range(sprint)
         .map(|range| format!(" • {range}"))
         .unwrap_or_default();
+    let is_active = sprint.state == "active";
     let Some(capacity) = sprint.capacity.as_ref() else {
         return format!("{icon} {}{date_range}", sprint.name);
     };
@@ -1479,9 +1461,9 @@ fn sprint_title(sprint: &Sprint) -> String {
         "{icon} {}{date_range}\n{} {} pts • {} • {} items",
         sprint.name,
         sprint_capacity_icon(capacity.state),
-        capacity_load_label(capacity),
+        capacity_load_label(capacity, is_active),
         sprint_estimation_coverage(sprint).0,
-        item_count_label(&sprint.work_items),
+        sprint_item_count_label(&sprint.work_items, is_active),
     )
 }
 
@@ -1514,38 +1496,82 @@ fn estimation_eligible(item: &WorkItem) -> bool {
     matches!(item.kind.to_ascii_lowercase().as_str(), "task" | "story")
 }
 
-fn capacity_load_label(capacity: &crate::store::work_items::SprintCapacity) -> String {
+fn capacity_load_label(
+    capacity: &crate::store::work_items::SprintCapacity,
+    is_active: bool,
+) -> String {
     let prefix = matches!(capacity.source, RunwayCapacitySource::JiraVelocity)
         .then_some("~")
         .unwrap_or("");
-    format!(
-        "{prefix}{}/{}",
-        points_label(capacity.effective_points),
-        points_label(capacity.capacity)
-    )
+    if is_active {
+        let source_suffix = match capacity.source {
+            RunwayCapacitySource::JiraVelocity => "v",
+            RunwayCapacitySource::Fixed | RunwayCapacitySource::FixedFallback => "c",
+        };
+        format!(
+            "{prefix}{}/{} ({}{source_suffix})",
+            points_label(capacity.completed_points),
+            points_label(capacity.effective_points),
+            points_label(capacity.capacity)
+        )
+    } else {
+        format!(
+            "{prefix}{}/{}",
+            points_label(capacity.effective_points),
+            points_label(capacity.capacity)
+        )
+    }
 }
 
 fn backlog_title(snapshot: &BacklogSnapshot) -> String {
     format!(
         " Backlog • {} items",
-        item_count_label(&snapshot.work_items)
+        root_item_count_label(&snapshot.work_items)
     )
 }
 
-fn item_count_label(items: &[WorkItem]) -> String {
+fn sprint_item_count_label(items: &[WorkItem], is_active: bool) -> String {
+    if is_active {
+        let (completed, total) = root_item_counts(items);
+        format!("{completed}/{total}")
+    } else {
+        root_item_count_label(items)
+    }
+}
+
+fn root_item_count_label(items: &[WorkItem]) -> String {
+    let (_, total) = root_item_counts(items);
+    format!("{total}")
+}
+
+fn root_item_counts(items: &[WorkItem]) -> (usize, usize) {
     let keys = items
         .iter()
         .map(|item| item.key.as_str())
         .collect::<std::collections::HashSet<_>>();
-    let root_count = items
-        .iter()
-        .filter(|item| {
-            item.parent_key
+    let mut completed = 0;
+    let mut total = 0;
+    for item in items {
+        if !is_subtask(item)
+            && item
+                .parent_key
                 .as_deref()
                 .is_none_or(|parent| !keys.contains(parent))
-        })
-        .count();
-    format!("{root_count}({})", items.len())
+        {
+            total += 1;
+            if item.done || crate::store::work_items::is_done_status(&item.status) {
+                completed += 1;
+            }
+        }
+    }
+    (completed, total)
+}
+
+fn is_subtask(item: &WorkItem) -> bool {
+    matches!(
+        item.kind.to_ascii_lowercase().as_str(),
+        "sub-task" | "subtask"
+    )
 }
 
 fn sprint_icon(state: &str) -> &'static str {
