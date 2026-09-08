@@ -693,9 +693,11 @@ impl DetailPane {
                 }
                 DescriptionAction::OpenExternalEditor(description) => {
                     self.external_editor_pending = true;
+                    ctx.focus(FocusRequest::Keep);
                     ctx.request_external_editor_with_extension(description, 1, 1, "md");
                 }
                 DescriptionAction::OpenExternalDiff { source, changes } => {
+                    ctx.focus(FocusRequest::Keep);
                     if source == changes {
                         ctx.notify(tuicore::Notification::info(
                             "No changes",
@@ -1374,14 +1376,28 @@ fn description_tab_action(
     move |selected| {
         let state = state.borrow();
         let view_mode = state.view_mode;
-        if action == DescriptionTabAction::Editor && view_mode == ComposerViewMode::Diff {
-            let (source, changes) = description_diff_texts(&state);
-            actions
-                .borrow_mut()
-                .push(DescriptionAction::OpenExternalDiff {
-                    source: source.into(),
-                    changes: changes.into(),
-                });
+        if action == DescriptionTabAction::Editor {
+            match view_mode {
+                ComposerViewMode::Diff => {
+                    let (source, changes) = description_diff_texts(&state);
+                    actions
+                        .borrow_mut()
+                        .push(DescriptionAction::OpenExternalDiff {
+                            source: source.into(),
+                            changes: changes.into(),
+                        });
+                }
+                ComposerViewMode::Changes if state.selected_is_editable() => {
+                    let description = state
+                        .selected_changes()
+                        .map(|ticket| ticket.description.clone())
+                        .unwrap_or_default();
+                    actions
+                        .borrow_mut()
+                        .push(DescriptionAction::OpenExternalEditor(description));
+                }
+                ComposerViewMode::Source | ComposerViewMode::Changes => {}
+            }
             return;
         }
         if view_mode == ComposerViewMode::Changes
@@ -1393,11 +1409,9 @@ fn description_tab_action(
             actions.borrow_mut().push(DescriptionAction::ShowChanges);
         }
         if selected != 0 {
-            if action != DescriptionTabAction::Editor || state.selected_is_editable() {
-                actions
-                    .borrow_mut()
-                    .push(description_focus_action(view_mode, false));
-            }
+            actions
+                .borrow_mut()
+                .push(description_focus_action(view_mode, false));
             return;
         }
         let description = match view_mode {
@@ -1413,20 +1427,12 @@ fn description_tab_action(
                     state.selected_is_editable(),
                 ));
             }
-            DescriptionTabAction::Editor
-                if view_mode == ComposerViewMode::Changes && state.selected_is_editable() =>
-            {
-                actions
-                    .borrow_mut()
-                    .push(DescriptionAction::OpenExternalEditor(description));
-            }
             DescriptionTabAction::SpeedReader if view_mode != ComposerViewMode::Diff => {
                 actions
                     .borrow_mut()
                     .push(DescriptionAction::OpenSpeedReader(description));
             }
-            DescriptionTabAction::SpeedReader => {}
-            DescriptionTabAction::Editor => {}
+            DescriptionTabAction::SpeedReader | DescriptionTabAction::Editor => {}
         }
     }
 }

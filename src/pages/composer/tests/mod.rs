@@ -487,7 +487,7 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     let view_mode = target(&mut page, "button-group");
     assert_eq!(
         view_mode.hotkey_sequences,
-        ["shift+s", "shift+c", "shift+f"]
+        ["shift+s", "shift+e", "shift+f"]
     );
 
     let source = page.selected_changes();
@@ -586,7 +586,7 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     );
     assert!(render_text_after_syntax(&mut page, TEST_WIDTH).contains("Editor result"));
 
-    for sequence in ["dd", "do", "ds"] {
+    for sequence in ["dd", "ds"] {
         let tabs = focus(&mut page, "tabs");
         page.dispatch_event(
             &EventRoute::new(tabs.path.clone()),
@@ -606,6 +606,28 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
         );
         assert!(!render_text(&mut page).contains("Issue type"));
     }
+
+    let tabs = focus(&mut page, "tabs");
+    page.dispatch_event(
+        &EventRoute::new(tabs.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Char(']'))),
+        &mut EventCtx::default(),
+    );
+    assert!(render_text(&mut page).contains("Issue type"));
+    let mut editor = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(tabs.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("do".into())),
+        &mut editor,
+    );
+    assert!(editor.external_editor_request().is_some());
+    assert_eq!(editor.focus_request(), Some(&FocusRequest::Keep));
+    let tabs = target(&mut page, "tabs");
+    page.dispatch_event(
+        &EventRoute::new(tabs.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('['))),
+        &mut EventCtx::default(),
+    );
 
     let description = focus(&mut page, "textarea");
     page.dispatch_event(
@@ -822,6 +844,7 @@ fn description_hotkeys_follow_the_active_view() {
     let request = external_diff
         .external_diff_request()
         .expect("do should open the description diff");
+    assert_eq!(external_diff.focus_request(), Some(&FocusRequest::Keep));
     assert_eq!(request.old_label, "Source.md");
     assert_eq!(request.new_label, "Changes.md");
     assert_eq!(request.old, original_description);
@@ -861,15 +884,44 @@ fn view_mode_buttons_select_source_changes_and_diff_by_hotkey() {
     for (hotkey, expected) in [
         ("shift+s", ComposerViewMode::Source),
         ("shift+f", ComposerViewMode::Diff),
-        ("shift+c", ComposerViewMode::Changes),
+        ("shift+e", ComposerViewMode::Changes),
     ] {
         let buttons = target(&mut page, "button-group");
+        let mut ctx = EventCtx::default();
         page.dispatch_event(
             &EventRoute::new(buttons.path),
             &TuiEvent::Hotkey(HotkeyEvent::Commit(hotkey.into())),
-            &mut EventCtx::default(),
+            &mut ctx,
         );
         assert_eq!(page.view_mode(), expected);
+        assert_eq!(
+            ctx.focus_request(),
+            Some(&FocusRequest::Target(FocusId::new("data-view")))
+        );
+    }
+}
+
+#[test]
+fn view_mode_button_navigation_keeps_focus_on_the_button_group() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 1);
+    let buttons = focus(&mut page, "button-group");
+
+    for (key, expected) in [
+        (Key::Char('h'), ComposerViewMode::Source),
+        (Key::Right, ComposerViewMode::Changes),
+        (Key::Char('l'), ComposerViewMode::Diff),
+        (Key::Left, ComposerViewMode::Changes),
+    ] {
+        let mut ctx = EventCtx::default();
+        page.dispatch_event(
+            &EventRoute::new(buttons.path.clone()),
+            &TuiEvent::Key(KeyEvent::from(key)),
+            &mut ctx,
+        );
+        assert_eq!(page.view_mode(), expected);
+        assert!(ctx.focus_request().is_none());
     }
 }
 
@@ -2174,13 +2226,24 @@ fn toolbar_hotkeys_run_without_focusing_their_buttons() {
 }
 
 #[test]
-fn refresh_queues_every_remote_ticket_in_the_open_change_set() {
+fn refresh_queues_every_refreshable_ticket_in_the_open_change_set() {
     let mut state = ComposerState::demo();
     state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
     let state = std::rc::Rc::new(std::cell::RefCell::new(state));
     let mut source = SourceController::new(state, AppService::for_tests());
 
-    assert_eq!(source.refresh_all(), 3);
+    assert_eq!(source.refresh_all(), 2);
+}
+
+#[test]
+fn refresh_skips_tickets_staged_for_deletion() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    state.dispatch(ComposerAction::MarkTicketDeleted("FIN-142".into()));
+    let state = std::rc::Rc::new(std::cell::RefCell::new(state));
+    let mut source = SourceController::new(state, AppService::for_tests());
+
+    assert_eq!(source.refresh_all(), 1);
 }
 
 #[test]
@@ -3050,7 +3113,7 @@ fn mode_controls_disable_inline_outside_diffs_and_source_uses_dashed_narrow_bord
     let mode = layout
         .focus_targets()
         .iter()
-        .find(|target| target.hotkey_sequences == ["shift+s", "shift+c", "shift+f"])
+        .find(|target| target.hotkey_sequences == ["shift+s", "shift+e", "shift+f"])
         .unwrap();
     assert!(mode.area.width < TEST_WIDTH / 2);
     assert!(render_text(&mut page).contains("Inline"));

@@ -1093,7 +1093,7 @@ impl BoundViewMode {
         let sink = Rc::clone(&pending);
         let buttons = ButtonGroup::new([
             ButtonGroupItem::new(ComposerViewMode::Source, "Source").hotkey("shift+s"),
-            ButtonGroupItem::new(ComposerViewMode::Changes, "Changes").hotkey("shift+c"),
+            ButtonGroupItem::new(ComposerViewMode::Changes, "Changes").hotkey("shift+e"),
             ButtonGroupItem::new(ComposerViewMode::Diff, "Diff").hotkey("shift+f"),
         ])
         .selected(1)

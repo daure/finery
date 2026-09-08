@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     service::{AppService, ComposerSourceTicket},
-    store::composer::{ComposerAction, ComposerState, ComposerViewMode, TicketChange},
+    store::composer::{ChangeKind, ComposerAction, ComposerState, ComposerViewMode, TicketChange},
 };
 
 #[derive(Clone, PartialEq, Eq)]
@@ -279,6 +279,9 @@ impl SourceController {
 }
 
 fn source_target(change: &TicketChange) -> Option<(String, String)> {
+    if change.kind == ChangeKind::Deleted {
+        return None;
+    }
     let key = change
         .submitted
         .as_ref()

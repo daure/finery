@@ -895,7 +895,7 @@ impl TicketEditor {
         true
     }
 
-    fn drain_outputs(&mut self, ctx: &mut EventCtx<()>) {
+    fn drain_outputs(&mut self, focus_after_view_mode_change: bool, ctx: &mut EventCtx<()>) {
         self.drain_description_actions(ctx);
         if self.create_dialog_close_requested.replace(false) {
             self.view
@@ -1088,7 +1088,7 @@ impl TicketEditor {
                 .set_active_with_context(false, ctx);
             Self::focus_tickets(ctx);
         }
-        if view_mode_changed {
+        if view_mode_changed && focus_after_view_mode_change {
             Self::focus_tickets(ctx);
         }
         if ticket_action {
@@ -1813,7 +1813,7 @@ impl TicketEditor {
         self.pending
             .borrow_mut()
             .push(ComposerAction::SelectTicket(Some(row_id)));
-        self.drain_outputs(ctx);
+        self.drain_outputs(false, ctx);
     }
 
     fn open_ticket_action_dialog(&mut self, ctx: &mut EventCtx<()>) -> bool {
@@ -2351,7 +2351,7 @@ impl TuiNode for TicketEditor {
             return outcome;
         }
         let outcome = self.view.event(event, ctx);
-        self.drain_outputs(ctx);
+        self.drain_outputs(matches!(event, TuiEvent::Hotkey(_)), ctx);
         self.handle_exit(
             event,
             create_dialog_open,
@@ -2416,7 +2416,7 @@ impl TuiNode for TicketEditor {
             return outcome;
         }
         let outcome = self.view.dispatch_event(route, event, ctx);
-        self.drain_outputs(ctx);
+        self.drain_outputs(matches!(event, TuiEvent::Hotkey(_)), ctx);
         self.handle_exit(
             event,
             create_dialog_open,
