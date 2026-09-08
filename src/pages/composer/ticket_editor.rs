@@ -857,6 +857,7 @@ impl TicketEditor {
                     self.view.set_active_with_context(true, ctx);
                 }
                 DescriptionAction::OpenExternalEditor(_) => {}
+                DescriptionAction::OpenExternalDiff { .. } => {}
                 DescriptionAction::CloseSpeedReader => {
                     self.view.set_active_with_context(false, ctx);
                 }

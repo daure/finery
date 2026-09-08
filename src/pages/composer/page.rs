@@ -255,6 +255,11 @@ impl ComposerPage {
     }
 
     #[cfg(test)]
+    pub(super) fn view_mode(&self) -> crate::store::composer::ComposerViewMode {
+        self.state.borrow().view_mode
+    }
+
+    #[cfg(test)]
     pub(super) fn submit_selected_locally(&mut self) {
         let change = self.state.borrow().selected_change().cloned().unwrap();
         let change_set_id = self.state.borrow().active_change_set.clone().unwrap();

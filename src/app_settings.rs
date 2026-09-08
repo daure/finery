@@ -35,7 +35,6 @@ pub(crate) const COMPOSER_NEW_CHANGE_SET_KEY_SETTING: &str = "composer.new_chang
 pub(crate) const COMPOSER_CHANGE_SET_FILTER_KEY_SETTING: &str = "composer.change_set_filter_key";
 pub(crate) const COMPOSER_COMMIT_KEY_SETTING: &str = "composer.commit_key";
 pub(crate) const COMPOSER_REFRESH_KEY_SETTING: &str = "composer.refresh_key";
-pub(crate) const COMPOSER_VIEW_KEY_SETTING: &str = "composer.view_key";
 pub(crate) const COMPOSER_TITLE_KEY_SETTING: &str = "composer.title_key";
 pub(crate) const COMPOSER_DESCRIPTION_TAB_KEY_SETTING: &str = "composer.description_tab_key";
 pub(crate) const COMPOSER_PROPERTIES_TAB_KEY_SETTING: &str = "composer.properties_tab_key";
@@ -140,7 +139,6 @@ pub(crate) struct ComposerKeyBindings {
     pub(crate) change_set_filter: ComposerKeyBinding,
     pub(crate) commit: ComposerKeyBinding,
     pub(crate) refresh: ComposerKeyBinding,
-    pub(crate) view: ComposerKeyBinding,
     pub(crate) title: ComposerKeyBinding,
     pub(crate) description_tab: ComposerKeyBinding,
     pub(crate) properties_tab: ComposerKeyBinding,
@@ -204,7 +202,6 @@ impl ComposerKeyBindings {
             change_set_filter: binding(COMPOSER_CHANGE_SET_FILTER_KEY_SETTING, "shift+f")?,
             commit: binding(COMPOSER_COMMIT_KEY_SETTING, "shift+m")?,
             refresh: binding(COMPOSER_REFRESH_KEY_SETTING, "shift+r")?,
-            view: binding(COMPOSER_VIEW_KEY_SETTING, "shift+v")?,
             title: binding(COMPOSER_TITLE_KEY_SETTING, "shift+t")?,
             description_tab: binding(COMPOSER_DESCRIPTION_TAB_KEY_SETTING, "shift+d")?,
             properties_tab: binding(COMPOSER_PROPERTIES_TAB_KEY_SETTING, "shift+p")?,
@@ -241,7 +238,6 @@ impl ComposerKeyBindings {
             bindings.change_set_filter.sequence(),
             bindings.commit.sequence(),
             bindings.refresh.sequence(),
-            bindings.view.sequence(),
             bindings.title.sequence(),
             bindings.description_tab.sequence(),
             bindings.properties_tab.sequence(),
@@ -633,10 +629,6 @@ impl AppSettings {
             (
                 COMPOSER_REFRESH_KEY_SETTING,
                 self.composer_keys.refresh.sequence.clone(),
-            ),
-            (
-                COMPOSER_VIEW_KEY_SETTING,
-                self.composer_keys.view.sequence.clone(),
             ),
             (
                 COMPOSER_TITLE_KEY_SETTING,

@@ -31,7 +31,7 @@ use crate::{
 
 use super::fields::{
     BoundDescription, BoundDescriptionDiffStyle, BoundTextField, BoundViewMode, DescriptionAction,
-    DescriptionEditRequest, PendingDescriptionActions,
+    DescriptionEditRequest, PendingDescriptionActions, description_diff_texts,
 };
 use super::mermaid::{DiagramContent, DiagramMarkup, DiagramTitle};
 use super::property_fields::PropertyFields;
@@ -549,7 +549,7 @@ impl DetailPane {
             .gap(2)
             .child(
                 "mode",
-                BoundViewMode::new(Rc::clone(&state), Rc::clone(&pending), keys.view.clone()),
+                BoundViewMode::new(Rc::clone(&state), Rc::clone(&pending)),
                 FlexItem::fit_content(),
             )
             .child(
@@ -571,7 +571,7 @@ impl DetailPane {
             .gap(2)
             .child(
                 "mode",
-                BoundViewMode::new(Rc::clone(&state), Rc::clone(&pending), keys.view.clone()),
+                BoundViewMode::new(Rc::clone(&state), Rc::clone(&pending)),
                 FlexItem::fit_content(),
             )
             .child(
@@ -603,7 +603,7 @@ impl DetailPane {
             .gap(2)
             .child(
                 "mode",
-                BoundViewMode::new(Rc::clone(&state), Rc::clone(&pending), keys.view.clone()),
+                BoundViewMode::new(Rc::clone(&state), Rc::clone(&pending)),
                 FlexItem::fit_content(),
             )
             .child(
@@ -695,6 +695,16 @@ impl DetailPane {
                     self.external_editor_pending = true;
                     ctx.request_external_editor_with_extension(description, 1, 1, "md");
                 }
+                DescriptionAction::OpenExternalDiff { source, changes } => {
+                    if source == changes {
+                        ctx.notify(tuicore::Notification::info(
+                            "No changes",
+                            "The source and changes are identical.",
+                        ));
+                    } else {
+                        ctx.request_external_diff(source, changes, "Source.md", "Changes.md");
+                    }
+                }
                 action => deferred.push(action),
             }
         }
@@ -737,7 +747,7 @@ impl DetailPane {
         let (focus, editor, reader) = match state.view_mode {
             ComposerViewMode::Changes => (!deleted, editable, true),
             ComposerViewMode::Source => (true, false, true),
-            ComposerViewMode::Diff => (true, false, false),
+            ComposerViewMode::Diff => (true, true, false),
         };
         details.set_action_hotkeys(focus, editor, reader);
         let submitted = state
@@ -1364,6 +1374,16 @@ fn description_tab_action(
     move |selected| {
         let state = state.borrow();
         let view_mode = state.view_mode;
+        if action == DescriptionTabAction::Editor && view_mode == ComposerViewMode::Diff {
+            let (source, changes) = description_diff_texts(&state);
+            actions
+                .borrow_mut()
+                .push(DescriptionAction::OpenExternalDiff {
+                    source: source.into(),
+                    changes: changes.into(),
+                });
+            return;
+        }
         if view_mode == ComposerViewMode::Changes
             && matches!(
                 action,

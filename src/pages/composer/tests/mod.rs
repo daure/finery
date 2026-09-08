@@ -459,7 +459,9 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     assert!(text.contains("Add child"));
     assert!(text.contains("Commit"));
     assert!(text.contains("Refresh"));
+    assert!(text.contains("Source"));
     assert!(text.contains("Changes"));
+    assert!(text.contains("Diff"));
     assert!(text.contains("󰄱"));
     assert!(text.contains("Keep checkout state across retries"));
     assert!(text.contains("Description"));
@@ -482,6 +484,11 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     );
     let description_hotkeys = target(&mut page, "textarea");
     assert!(description_hotkeys.hotkey_sequences.is_empty());
+    let view_mode = target(&mut page, "button-group");
+    assert_eq!(
+        view_mode.hotkey_sequences,
+        ["shift+s", "shift+c", "shift+f"]
+    );
 
     let source = page.selected_changes();
     page.set_selected_source(source);
@@ -750,7 +757,14 @@ fn desktop_description_shortcuts_open_the_editor_and_speed_reader() {
 #[test]
 fn description_hotkeys_follow_the_active_view() {
     tuicore::init();
-    let mut page = composer_page();
+    let mut change_sets = ComposerState::demo().change_sets;
+    let change = &mut change_sets[0].tickets[0];
+    let original_description = change.original.as_ref().unwrap().description.clone();
+    let mut updated = change.original.clone().unwrap();
+    updated.description = "Changed description".into();
+    change.updated = Some(updated);
+    change.kind = ChangeKind::Modified;
+    let mut page = composer_page_with_change_sets(change_sets);
     open_change_set(&mut page, 1);
 
     page.set_view_mode(ComposerViewMode::Source);
@@ -786,19 +800,77 @@ fn description_hotkeys_follow_the_active_view() {
 
     page.set_view_mode(ComposerViewMode::Diff);
     let diff = render_text_at(&mut page, 120);
-    assert!(diff.contains("dd"));
-    assert!(!diff.contains("dd·do"));
+    assert!(diff.contains("dd·do"));
     assert!(!diff.contains("dd·ds"));
     let diff_panel = target_at(&mut page, "diff-viewer", 120);
-    assert_eq!(diff_panel.hotkey_sequences, ["dd"]);
+    assert_eq!(diff_panel.hotkey_sequences, ["dd", "do"]);
 
     let mut diff_focus = EventCtx::default();
     page.dispatch_event(
-        &EventRoute::new(diff_panel.path),
+        &EventRoute::new(diff_panel.path.clone()),
         &TuiEvent::Hotkey(HotkeyEvent::Commit("dd".into())),
         &mut diff_focus,
     );
     assert!(diff_focus.focus_request().is_none());
+
+    let mut external_diff = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(diff_panel.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("do".into())),
+        &mut external_diff,
+    );
+    let request = external_diff
+        .external_diff_request()
+        .expect("do should open the description diff");
+    assert_eq!(request.old_label, "Source.md");
+    assert_eq!(request.new_label, "Changes.md");
+    assert_eq!(request.old, original_description);
+    assert_eq!(request.new, "Changed description");
+}
+
+#[test]
+fn external_description_diff_reports_when_source_and_changes_are_identical() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 1);
+    page.set_view_mode(ComposerViewMode::Diff);
+    let diff = target_at(&mut page, "diff-viewer", 120);
+    let mut event = EventCtx::default();
+
+    page.dispatch_event(
+        &EventRoute::new(diff.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("do".into())),
+        &mut event,
+    );
+
+    assert!(event.external_diff_request().is_none());
+    assert_eq!(event.notifications().len(), 1);
+    assert_eq!(event.notifications()[0].title(), "No changes");
+    assert_eq!(
+        event.notifications()[0].body(),
+        "The source and changes are identical."
+    );
+}
+
+#[test]
+fn view_mode_buttons_select_source_changes_and_diff_by_hotkey() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 1);
+
+    for (hotkey, expected) in [
+        ("shift+s", ComposerViewMode::Source),
+        ("shift+f", ComposerViewMode::Diff),
+        ("shift+c", ComposerViewMode::Changes),
+    ] {
+        let buttons = target(&mut page, "button-group");
+        page.dispatch_event(
+            &EventRoute::new(buttons.path),
+            &TuiEvent::Hotkey(HotkeyEvent::Commit(hotkey.into())),
+            &mut EventCtx::default(),
+        );
+        assert_eq!(page.view_mode(), expected);
+    }
 }
 
 #[test]
@@ -1934,8 +2006,6 @@ fn diff_mode_uses_submission_snapshots_and_submitted_rows_use_disabled_glyph() {
 
     assert!(text.contains("󱋭"));
     assert!(text.contains("Diff"));
-    assert!(!text.contains("Source"));
-    assert!(!text.contains("Changes"));
 }
 
 #[test]
@@ -2980,7 +3050,7 @@ fn mode_controls_disable_inline_outside_diffs_and_source_uses_dashed_narrow_bord
     let mode = layout
         .focus_targets()
         .iter()
-        .find(|target| target.hotkey_sequences == ["shift+v"])
+        .find(|target| target.hotkey_sequences == ["shift+s", "shift+c", "shift+f"])
         .unwrap();
     assert!(mode.area.width < TEST_WIDTH / 2);
     assert!(render_text(&mut page).contains("Inline"));
