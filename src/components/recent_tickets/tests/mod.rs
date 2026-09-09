@@ -55,6 +55,30 @@ fn opening_requests_focus_for_the_search_input() {
     ));
 }
 
+#[test]
+fn yp_copies_the_highlighted_ticket_prepare_reference_with_quoted_title() {
+    use tuicore::{HotkeyEvent, TuiEvent, TuiNode};
+
+    let mut menu = super::RecentTicketsMenu::new(AppService::for_tests());
+    let mut ticket = work_item("Story");
+    ticket.key = "KAN-1234".into();
+    ticket.title = "Fix \"quoted\" C:\\path".into();
+    menu.list
+        .set_rows(vec![recent_ticket_row(ticket, true, 3.0, false)]);
+    menu.list.set_highlighted_id(&"KAN-1234".into());
+    let mut ctx = EventCtx::default();
+
+    menu.event(
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("yp".into())),
+        &mut ctx,
+    );
+
+    assert_eq!(
+        ctx.clipboard_request(),
+        Some(r#"finery prepare KAN-1234 "Fix \"quoted\" C:\\path""#)
+    );
+}
+
 fn work_item(kind: &str) -> WorkItem {
     WorkItem {
         key: "FIN-1".into(),

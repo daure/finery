@@ -34,6 +34,26 @@ pub(crate) struct WorkItemRow {
     pub show_time_in_status: bool,
 }
 
+impl WorkItemRow {
+    pub(crate) fn prepare_reference(&self) -> Option<String> {
+        prepare_references(std::iter::once(self))
+    }
+}
+
+pub(crate) fn prepare_references<'a>(
+    rows: impl IntoIterator<Item = &'a WorkItemRow>,
+) -> Option<String> {
+    let references = rows
+        .into_iter()
+        .filter(|row| !row.key.starts_with("NEW-"))
+        .map(|row| {
+            let title = row.title.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("{} \"{title}\"", row.key)
+        })
+        .collect::<Vec<_>>();
+    (!references.is_empty()).then(|| format!("finery prepare {}", references.join(" ")))
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum WorkItemKind {
     Epic,

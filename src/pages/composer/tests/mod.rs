@@ -1557,6 +1557,63 @@ fn yy_copies_the_focused_composer_ticket_url() {
 }
 
 #[test]
+fn yp_copies_existing_composer_tickets_and_skips_local_drafts() {
+    tuicore::init();
+    let mut state = ComposerState::demo();
+    state
+        .dispatch(ComposerAction::OpenChangeSet("CS-1".into()))
+        .unwrap();
+    let mut view = super::ticket_rows::ticket_data_view(&state);
+    let rows = super::ticket_rows::ticket_rows(&state);
+    for row in rows {
+        view.highlight_id(&row.item.id);
+        let mut ctx: EventCtx<()> = EventCtx::default();
+        view.event(
+            &TuiEvent::Hotkey(tuicore::HotkeyEvent::Commit("yp".into())),
+            &mut ctx,
+        );
+        if row.item.key.starts_with("NEW-") {
+            assert_eq!(ctx.clipboard_request(), None);
+        } else {
+            let expected = format!("finery prepare {} \"{}\"", row.item.key, row.item.title);
+            assert_eq!(ctx.clipboard_request(), Some(expected.as_str()));
+        }
+    }
+}
+
+#[test]
+fn composer_prepare_reference_uses_selected_tickets_in_list_order() {
+    tuicore::init();
+    let mut state = ComposerState::demo();
+    state
+        .dispatch(ComposerAction::OpenChangeSet("CS-1".into()))
+        .unwrap();
+    let mut view = super::ticket_rows::ticket_data_view(&state);
+    let rows = super::ticket_rows::ticket_rows(&state);
+    let existing = rows
+        .iter()
+        .filter(|row| !row.item.key.starts_with("NEW-"))
+        .take(2)
+        .collect::<Vec<_>>();
+    assert_eq!(existing.len(), 2);
+    view = view.selected(existing.iter().rev().map(|row| row.item.id.clone()));
+    let expected = format!(
+        "finery prepare {} \"{}\" {} \"{}\"",
+        existing[0].item.key, existing[0].item.title, existing[1].item.key, existing[1].item.title
+    );
+    assert_eq!(
+        super::ticket_rows::selected_prepare_reference(&view, &state),
+        Some(expected)
+    );
+    view = view.selected(Vec::<String>::new());
+    view.highlight_id(&existing[0].item.id);
+    assert_eq!(
+        super::ticket_rows::selected_prepare_reference(&view, &state),
+        existing[0].item.prepare_reference()
+    );
+}
+
+#[test]
 fn yy_copies_the_focused_web_link_url() {
     tuicore::init();
     let service = AppService::for_tests();

@@ -1113,6 +1113,29 @@ impl TicketEditor {
             .is_focused()
     }
 
+    fn handle_prepare_yank(
+        &self,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> Option<EventOutcome> {
+        if !matches!(event, TuiEvent::Hotkey(tuicore::HotkeyEvent::Commit(sequence)) if sequence == "yp")
+            || !self.ticket_list_is_focused()
+            || self.view.is_active()
+            || self.view.base().is_active()
+            || self.view.base().base().is_active()
+            || self.view.base().base().base().is_active()
+        {
+            return None;
+        }
+        if let Some(value) =
+            super::ticket_rows::selected_prepare_reference(self.table(), &self.state.borrow())
+        {
+            ctx.copy_to_clipboard(value);
+        }
+        ctx.stop_propagation();
+        Some(EventOutcome::Handled)
+    }
+
     fn description_reader_is_open(&self) -> bool {
         self.view.is_active()
     }
@@ -2350,6 +2373,9 @@ impl TuiNode for TicketEditor {
         if let Some(outcome) = self.handle_open_mermaid_diagram(event, ctx) {
             return outcome;
         }
+        if let Some(outcome) = self.handle_prepare_yank(event, ctx) {
+            return outcome;
+        }
         let outcome = self.view.event(event, ctx);
         self.drain_outputs(matches!(event, TuiEvent::Hotkey(_)), ctx);
         self.handle_exit(
@@ -2413,6 +2439,9 @@ impl TuiNode for TicketEditor {
             return outcome;
         }
         if let Some(outcome) = self.handle_open_mermaid_diagram(event, ctx) {
+            return outcome;
+        }
+        if let Some(outcome) = self.handle_prepare_yank(event, ctx) {
             return outcome;
         }
         let outcome = self.view.dispatch_event(route, event, ctx);

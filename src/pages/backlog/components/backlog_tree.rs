@@ -517,6 +517,24 @@ impl BacklogTree {
             return false;
         };
         let event = match sequence.as_str() {
+            "yp" => {
+                let mut ids = self.control.transient_selected_ids();
+                if ids.is_empty() {
+                    ids.push(id);
+                }
+                if let Some(value) = crate::components::work_item_rows::prepare_references(
+                    ids.iter()
+                        .filter_map(|id| self.control.items().iter().find(|row| &row.id == id))
+                        .filter_map(|row| match &row.content {
+                            BacklogRowContent::WorkItem(item) => Some(&item.item),
+                            BacklogRowContent::Section { .. } => None,
+                        }),
+                ) {
+                    ctx.copy_to_clipboard(value);
+                }
+                ctx.stop_propagation();
+                return true;
+            }
             "yu" => self
                 .control
                 .items()
@@ -948,7 +966,12 @@ impl TuiNode for BacklogTree {
         let (result, _) = ctx.with_focus_fallback_hotkey_sequences_status(
             FocusId::new("data-view"),
             self.control_area,
-            ["yu".to_owned(), "yg".to_owned(), "yv".to_owned()],
+            [
+                "yu".to_owned(),
+                "yp".to_owned(),
+                "yg".to_owned(),
+                "yv".to_owned(),
+            ],
             |ctx| self.control.layout(self.control_area, ctx),
         );
         ctx.push_slot(ChildKey::new("refresh"), self.refresh_area, |ctx| {

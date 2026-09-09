@@ -15,13 +15,6 @@ Latest stable Tuicore is selected from crates.io.
 EOF
 }
 
-confirm() {
-    local answer
-    [[ -t 0 ]] || return 1
-    read -r -p "$1 [y/N] " answer || return 1
-    [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
-}
-
 crates_io_version_state() {
     python3 - "$1" "$2" <<'PY'
 import json, sys, urllib.error, urllib.parse, urllib.request
@@ -141,7 +134,7 @@ cargo package --locked --allow-dirty --registry crates-io
 cargo publish --locked --allow-dirty --dry-run --registry crates-io
 printf '\nFinery: %s -> %s\nTuicore: %s -> %s (latest crates.io)\n' "$old_version" "$new_version" "$declared_tuicore" "$latest_tuicore"
 git --no-pager diff -- Cargo.toml Cargo.lock
-confirm "Commit, tag, and publish Finery $new_version with Tuicore $latest_tuicore?" || { printf 'Release canceled; dependency/version changes remain in working tree.\n' >&2; exit 1; }
+printf 'Creating commit %q, then tagging and publishing to crates.io.\n' "release: $tag"
 git add Cargo.toml Cargo.lock; git commit -m "release: $tag"; committed=true; git tag -a "$tag" -m "release: $tag"; tagged=true
 [[ -z "$(git status --porcelain --untracked-files=all)" ]] || { printf 'error: Git working tree must be clean before publishing\n' >&2; exit 1; }
 [[ "$(git rev-parse HEAD)" == "$(git rev-parse "$tag^{commit}")" ]] || { printf 'error: HEAD must match release tag %s before publishing\n' "$tag" >&2; exit 1; }

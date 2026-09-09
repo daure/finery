@@ -2005,6 +2005,16 @@ fn unified_tree_uses_same_section_transient_selection_for_the_quick_menu() {
         }),
         &mut ctx,
     );
+    let mut copied = EventCtx::default();
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Hotkey(tuicore::HotkeyEvent::Commit("yp".into())),
+        &mut copied,
+    );
+    assert_eq!(
+        copied.clipboard_request(),
+        Some("finery prepare FIN-1 \"First\" FIN-2 \"Second\"")
+    );
     tree.dispatch_event(
         &route,
         &TuiEvent::Key(KeyEvent::from(Key::Char('.'))),
@@ -2060,6 +2070,28 @@ fn backlog_rank_plan_uses_section_order_anchors() {
     .unwrap();
     assert_eq!(plan.issues, ["FIN-2", "FIN-3"]);
     assert_eq!(plan.rank_before_issue.as_deref(), Some("FIN-4"));
+}
+
+#[test]
+fn yp_copies_a_backlog_ticket_prepare_reference_but_not_a_section() {
+    tuicore::init();
+    let (sender, _receiver) = mpsc::channel();
+    let mut snapshot = snapshot();
+    snapshot.work_items[0].title = "Prepare this ticket".into();
+    let key = snapshot.work_items[0].key.clone();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    tree.highlight(&format!("ticket:{key}"));
+    let event = TuiEvent::Hotkey(tuicore::HotkeyEvent::Commit("yp".into()));
+    let mut ctx = EventCtx::default();
+    tree.dispatch_event(&route, &event, &mut ctx);
+    let expected = format!("finery prepare {key} \"Prepare this ticket\"");
+    assert_eq!(ctx.clipboard_request(), Some(expected.as_str()));
+
+    tree.highlight("section:backlog");
+    let mut ctx = EventCtx::default();
+    tree.dispatch_event(&route, &event, &mut ctx);
+    assert_eq!(ctx.clipboard_request(), None);
 }
 
 #[test]

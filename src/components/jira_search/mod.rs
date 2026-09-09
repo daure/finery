@@ -233,13 +233,33 @@ impl JiraSearchMenu {
         true
     }
 
-    fn yank_url(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
-        if !matches!(event, TuiEvent::Hotkey(HotkeyEvent::Commit(sequence)) if sequence == "yu") {
+    fn yank_ticket(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        if !matches!(event, TuiEvent::Hotkey(HotkeyEvent::Commit(sequence)) if sequence == "yu" || sequence == "yp")
+        {
             return false;
         }
         let Some(key) = self.list.data_view().highlighted_id() else {
             return false;
         };
+        if matches!(event, TuiEvent::Hotkey(HotkeyEvent::Commit(sequence)) if sequence == "yp") {
+            let mut ids = self.list.transient_selected_ids();
+            if ids.is_empty() {
+                ids.push(key);
+            }
+            if let Some(value) =
+                crate::components::work_item_rows::prepare_references(ids.iter().filter_map(|id| {
+                    self.list
+                        .items()
+                        .iter()
+                        .find(|row| &row.item.key == id)
+                        .map(|row| &row.item)
+                }))
+            {
+                ctx.copy_to_clipboard(value);
+            }
+            ctx.stop_propagation();
+            return true;
+        }
         if let Some(url) = self
             .service
             .settings()
@@ -436,7 +456,7 @@ impl TuiNode for JiraSearchMenu {
         ctx.with_focus_fallback_hotkey_sequences_status(
             FocusId::new("input"),
             area,
-            ["yu".to_owned()],
+            ["yu".to_owned(), "yp".to_owned()],
             |ctx| {
                 ctx.push_slot(ChildKey::new("search"), self.input_area, |ctx| {
                     self.input.layout(self.input_area, ctx)
@@ -477,7 +497,7 @@ impl TuiNode for JiraSearchMenu {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        if self.yank_url(event, ctx)
+        if self.yank_ticket(event, ctx)
             || self.close(event, ctx)
             || self.open_highlighted_ticket(event, ctx)
         {
@@ -501,7 +521,7 @@ impl TuiNode for JiraSearchMenu {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        if self.yank_url(event, ctx)
+        if self.yank_ticket(event, ctx)
             || self.close(event, ctx)
             || self.open_highlighted_ticket(event, ctx)
         {

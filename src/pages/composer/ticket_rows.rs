@@ -36,6 +36,23 @@ pub(super) struct TicketRow {
     selected_descendant_count: usize,
 }
 
+pub(super) fn selected_prepare_reference(
+    view: &DataView<TicketRow, String>,
+    state: &ComposerState,
+) -> Option<String> {
+    let mut ids = view.selected_ids();
+    if ids.is_empty() {
+        ids.extend(view.highlighted_id());
+    }
+    let rows = ticket_rows(state);
+    crate::components::work_item_rows::prepare_references(
+        ids.iter()
+            .filter_map(|id| rows.iter().find(|row| &row.item.id == id))
+            .filter(|row| row.attachment.is_none() && row.mermaid_diagram.is_none())
+            .map(|row| &row.item),
+    )
+}
+
 #[cfg(test)]
 pub(super) fn ticket_data_view(state: &ComposerState) -> DataView<TicketRow, String> {
     ticket_data_view_with_number_jump(
@@ -85,6 +102,12 @@ pub(super) fn ticket_data_view_with_number_jump(
                     .map(|base_url| format!("{base_url}/browse/{}", row.item.key))
                     .unwrap_or_default()
             }
+        })
+        .copy_hotkey("yp", |row| {
+            if row.attachment.is_some() || row.mermaid_diagram.is_some() {
+                return None;
+            }
+            row.item.prepare_reference()
         })
         .copy_hotkey("yu", move |row| {
             (!row.item.key.starts_with("NEW-")).then(|| {
