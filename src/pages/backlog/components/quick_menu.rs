@@ -12,7 +12,7 @@ use tuicore::{
     TuiNode, keybindings,
 };
 
-use crate::store::work_items::StatusTransition;
+use crate::{components::avatar::initials, store::work_items::StatusTransition};
 
 const MENU_HOST_WIDTH: u16 = 46;
 const MENU_HOST_HEIGHT: u16 = 10;
@@ -20,9 +20,12 @@ const MENU_FIELD_WIDTH: u16 = 36;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(in crate::pages::backlog) enum BacklogQuickAction {
-    SetStatus,
+    SetStatus(String),
     StatusLoading,
     SetStatusTo(StatusTransition),
+    AssignUser(String),
+    AssigneesLoading,
+    AssignUserTo(BacklogAssignee),
     MoveToTop,
     MoveToBottom,
     MoveToSection(BacklogDestination),
@@ -31,15 +34,24 @@ pub(in crate::pages::backlog) enum BacklogQuickAction {
 }
 
 impl BacklogQuickAction {
-    pub(in crate::pages::backlog) fn main_actions() -> [Self; 3] {
-        [Self::SetStatus, Self::MoveToTop, Self::MoveToBottom]
+    pub(in crate::pages::backlog) fn main_actions(status: &str, assignee: &str) -> [Self; 4] {
+        [
+            Self::AssignUser(assignee.to_owned()),
+            Self::SetStatus(status.to_owned()),
+            Self::MoveToTop,
+            Self::MoveToBottom,
+        ]
     }
 
     pub(in crate::pages::backlog) fn label(&self) -> String {
         match self {
-            Self::SetStatus => "Set status".into(),
+            Self::SetStatus(status) if status.is_empty() => "Set status".into(),
+            Self::SetStatus(status) => format!("Set status ({status})"),
             Self::StatusLoading => "Loading statuses…".into(),
             Self::SetStatusTo(status) => status.label.clone(),
+            Self::AssignUser(assignee) => format!("Assign user (@{})", initials(assignee)),
+            Self::AssigneesLoading => "Loading users…".into(),
+            Self::AssignUserTo(assignee) => assignee.display_name.clone(),
             Self::MoveToTop => "Move to top".into(),
             Self::MoveToBottom => "Move to bottom".into(),
             Self::MoveToSection(destination) => format!("Move to {}", destination.label),
@@ -49,6 +61,12 @@ impl BacklogQuickAction {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct BacklogAssignee {
+    pub account_id: String,
+    pub display_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -64,6 +82,11 @@ pub(in crate::pages::backlog) enum BacklogQuickMenuEvent {
     },
     SetStatus {
         status: StatusTransition,
+    },
+    LoadAssignees,
+    AssignUser {
+        keys: Vec<String>,
+        assignee: BacklogAssignee,
     },
     MoveToTop {
         section_id: String,
@@ -98,8 +121,11 @@ pub(in crate::pages::backlog) struct BacklogQuickMenu {
 
 impl BacklogQuickMenu {
     #[cfg(test)]
-    pub(in crate::pages::backlog) fn main_action_labels() -> Vec<String> {
-        BacklogQuickAction::main_actions()
+    pub(in crate::pages::backlog) fn main_action_labels(
+        status: &str,
+        assignee: &str,
+    ) -> Vec<String> {
+        BacklogQuickAction::main_actions(status, assignee)
             .iter()
             .map(BacklogQuickAction::label)
             .collect()
@@ -109,7 +135,7 @@ impl BacklogQuickMenu {
         let selected = Rc::new(RefCell::new(Vec::new()));
         let selected_actions = Rc::clone(&selected);
         let dropdown = Dropdown::single(
-            BacklogQuickAction::main_actions(),
+            BacklogQuickAction::main_actions("", "Unassigned"),
             |action| action.clone(),
             |action| action.label(),
         )
@@ -145,10 +171,64 @@ impl BacklogQuickMenu {
         section_id: String,
         keys: Vec<String>,
         source_order: Vec<String>,
+        status: String,
+        assignee: String,
         destinations: Vec<BacklogDestination>,
         ctx: &mut EventCtx<()>,
     ) -> bool {
-        if self.move_locked.get() {
+        if !self.prepare_open(section_id, keys, source_order, true) {
+            return false;
+        }
+        self.dropdown.set_rows(
+            BacklogQuickAction::main_actions(&status, &assignee)
+                .into_iter()
+                .chain(
+                    destinations
+                        .into_iter()
+                        .map(BacklogQuickAction::MoveToSection),
+                ),
+        );
+        self.dropdown.set_search_query("");
+        self.dropdown.open_with_context(ctx);
+        true
+    }
+
+    pub(in crate::pages::backlog) fn open_status_menu(
+        &mut self,
+        section_id: String,
+        keys: Vec<String>,
+        source_order: Vec<String>,
+        ctx: &mut EventCtx<()>,
+    ) -> bool {
+        if !self.prepare_open(section_id, keys, source_order, false) {
+            return false;
+        }
+        self.open_statuses(ctx);
+        true
+    }
+
+    pub(in crate::pages::backlog) fn open_assign_menu(
+        &mut self,
+        section_id: String,
+        keys: Vec<String>,
+        source_order: Vec<String>,
+        ctx: &mut EventCtx<()>,
+    ) -> bool {
+        if !self.prepare_open(section_id, keys, source_order, false) {
+            return false;
+        }
+        self.open_assignees(ctx);
+        true
+    }
+
+    fn prepare_open(
+        &mut self,
+        section_id: String,
+        keys: Vec<String>,
+        source_order: Vec<String>,
+        requires_move_unlocked: bool,
+    ) -> bool {
+        if requires_move_unlocked && self.move_locked.get() {
             self.events.push(BacklogQuickMenuEvent::MoveLocked);
             return false;
         }
@@ -157,15 +237,6 @@ impl BacklogQuickMenu {
         self.source_order = source_order;
         self.selected.borrow_mut().clear();
         self.dropdown.clear_selection();
-        self.dropdown.set_rows(
-            BacklogQuickAction::main_actions().into_iter().chain(
-                destinations
-                    .into_iter()
-                    .map(BacklogQuickAction::MoveToSection),
-            ),
-        );
-        self.dropdown.set_search_query("");
-        self.dropdown.open_with_context(ctx);
         true
     }
 
@@ -177,8 +248,21 @@ impl BacklogQuickMenu {
         self.dropdown.set_search_query("");
     }
 
+    pub(in crate::pages::backlog) fn set_assignees(&mut self, assignees: Vec<BacklogAssignee>) {
+        self.selected.borrow_mut().clear();
+        self.dropdown.clear_selection();
+        self.dropdown
+            .set_rows(assignees.into_iter().map(BacklogQuickAction::AssignUserTo));
+        self.dropdown.set_search_query("");
+    }
+
     pub(in crate::pages::backlog) fn take_events(&mut self) -> Vec<BacklogQuickMenuEvent> {
         std::mem::take(&mut self.events)
+    }
+
+    #[cfg(test)]
+    pub(in crate::pages::backlog) fn is_open_for_test(&self) -> bool {
+        self.dropdown.is_open()
     }
 
     fn centered_field_area(&self, area: Rect) -> Rect {
@@ -203,24 +287,14 @@ impl BacklogQuickMenu {
         outcome: EventOutcome,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        if self.move_locked.get() {
-            self.selected.borrow_mut().clear();
-            self.events.push(BacklogQuickMenuEvent::MoveLocked);
-            return outcome;
-        }
-        for action in self.selected.borrow_mut().drain(..) {
+        let selected = self.selected.borrow_mut().drain(..).collect::<Vec<_>>();
+        for action in selected {
             let Some(section_id) = self.section_id.clone() else {
                 continue;
             };
             let event = match action {
-                BacklogQuickAction::SetStatus => {
-                    self.dropdown.clear_selection();
-                    self.dropdown.set_rows([BacklogQuickAction::StatusLoading]);
-                    self.events.push(BacklogQuickMenuEvent::LoadStatuses {
-                        keys: self.keys.clone(),
-                    });
-                    self.dropdown.set_search_query("");
-                    self.dropdown.open_with_context(ctx);
+                BacklogQuickAction::SetStatus(_) => {
+                    self.open_statuses(ctx);
                     continue;
                 }
                 BacklogQuickAction::StatusLoading => {
@@ -231,6 +305,19 @@ impl BacklogQuickMenu {
                 BacklogQuickAction::SetStatusTo(status) => {
                     BacklogQuickMenuEvent::SetStatus { status }
                 }
+                BacklogQuickAction::AssignUser(_) => {
+                    self.open_assignees(ctx);
+                    continue;
+                }
+                BacklogQuickAction::AssigneesLoading => {
+                    self.dropdown.clear_selection();
+                    self.dropdown.open_with_context(ctx);
+                    continue;
+                }
+                BacklogQuickAction::AssignUserTo(assignee) => BacklogQuickMenuEvent::AssignUser {
+                    keys: self.keys.clone(),
+                    assignee,
+                },
                 BacklogQuickAction::MoveToTop => BacklogQuickMenuEvent::MoveToTop {
                     section_id,
                     keys: self.keys.clone(),
@@ -275,6 +362,35 @@ impl BacklogQuickMenu {
         }
         outcome
     }
+
+    fn open_statuses(&mut self, ctx: &mut EventCtx<()>) {
+        self.dropdown.clear_selection();
+        self.dropdown.set_rows([BacklogQuickAction::StatusLoading]);
+        self.events.push(BacklogQuickMenuEvent::LoadStatuses {
+            keys: self.keys.clone(),
+        });
+        self.dropdown.set_search_query("");
+        self.dropdown.open_with_context(ctx);
+    }
+
+    fn open_assignees(&mut self, ctx: &mut EventCtx<()>) {
+        self.dropdown.clear_selection();
+        self.dropdown
+            .set_rows([BacklogQuickAction::AssigneesLoading]);
+        self.events.push(BacklogQuickMenuEvent::LoadAssignees);
+        self.dropdown.set_search_query("");
+        self.dropdown.open_with_context(ctx);
+    }
+
+    fn close(&mut self, ctx: &mut EventCtx<()>) -> EventOutcome {
+        self.dropdown.close();
+        self.selected.borrow_mut().clear();
+        self.events.push(BacklogQuickMenuEvent::Closed);
+        ctx.request_layout();
+        ctx.request_redraw();
+        ctx.stop_propagation();
+        EventOutcome::Handled
+    }
 }
 
 impl TuiNode for BacklogQuickMenu {
@@ -300,9 +416,7 @@ impl TuiNode for BacklogQuickMenu {
         if let TuiEvent::Key(key) = event
             && keybindings().focus().unfocus_matches(*key)
         {
-            self.events.push(BacklogQuickMenuEvent::Closed);
-            ctx.stop_propagation();
-            return EventOutcome::Handled;
+            return self.close(ctx);
         }
         let was_open = self.dropdown.is_open();
         let outcome = self.dropdown.event(event, ctx);
@@ -315,6 +429,11 @@ impl TuiNode for BacklogQuickMenu {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
+        if let TuiEvent::Key(key) = event
+            && keybindings().focus().unfocus_matches(*key)
+        {
+            return self.close(ctx);
+        }
         let was_open = self.dropdown.is_open();
         let outcome = self.dropdown.dispatch_event(route, event, ctx);
         self.finish_event(was_open, outcome, ctx)

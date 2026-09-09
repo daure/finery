@@ -683,6 +683,28 @@ impl AppService {
         jira::set_status(&settings, status)
     }
 
+    pub(crate) fn jira_assign_users(
+        &self,
+        issue_keys: &[String],
+        account_id: Option<&str>,
+    ) -> Result<(), String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::assign_users(&settings, issue_keys, account_id)
+    }
+
+    pub(crate) fn jira_current_user(&self) -> Result<jira::JiraAssignee, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::current_user(&settings)
+    }
+
     pub(crate) fn jira_backlog_while_reorder_locked(&self) -> Result<BacklogSnapshot, String> {
         let settings = self
             .settings
@@ -1128,6 +1150,19 @@ impl AppService {
             .map_err(|_| "settings lock is unavailable".to_string())?
             .clone();
         jira::assignees(&settings, project_key, query)
+    }
+
+    pub(crate) fn jira_default_project_assignees(&self) -> Result<Vec<jira::JiraAssignee>, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        let project_key = settings.jira_default_project.trim();
+        if project_key.is_empty() {
+            return Err("Jira default project is not configured".into());
+        }
+        jira::assignees(&settings, project_key, "")
     }
 
     pub(crate) fn search_jira_users(&self, query: &str) -> Result<Vec<jira::JiraAssignee>, String> {

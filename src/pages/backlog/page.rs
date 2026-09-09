@@ -1,6 +1,6 @@
 use std::{
-    cell::Cell,
-    collections::HashMap,
+    cell::{Cell, RefCell},
+    collections::{HashMap, HashSet},
     rc::Rc,
     sync::mpsc::{self, Receiver, Sender},
     time::Duration,
@@ -23,7 +23,7 @@ use tuicore::{
 
 use crate::{
     app_settings::BacklogRunwaySettings,
-    jira::{self, JiraOption},
+    jira::{self, JiraAssignee, JiraOption},
     service::AppService,
     store::work_items::{
         BacklogSnapshot, RankPlan, Sprint, StatusTransition, VelocityReport, VelocitySprint,
@@ -32,8 +32,8 @@ use crate::{
 };
 
 use super::components::{
-    BacklogDestination, BacklogQuickMenu, BacklogQuickMenuEvent, BacklogSectionEvent, BacklogTree,
-    backlog_tree_with_issue_types,
+    BacklogAssignee, BacklogDestination, BacklogQuickMenu, BacklogQuickMenuEvent,
+    BacklogSectionEvent, BacklogTree, backlog_tree_with_issue_types,
 };
 use super::velocity_reports::copy_report;
 
@@ -75,6 +75,21 @@ enum BacklogResult {
         generation: u64,
         status: StatusTransition,
         result: Result<(), String>,
+    },
+    AssigneesLoaded {
+        generation: u64,
+        result: Result<Vec<JiraAssignee>, String>,
+    },
+    UsersAssigned {
+        generation: u64,
+        keys: Vec<String>,
+        assignee: BacklogAssignee,
+        result: Result<(), String>,
+    },
+    CurrentUserLoaded {
+        generation: u64,
+        keys: Vec<String>,
+        result: Result<JiraAssignee, String>,
     },
 }
 
@@ -128,7 +143,10 @@ pub(super) struct RequestGenerations {
     active_load: Option<u64>,
     active_rank: Option<u64>,
     active_status_load: Option<u64>,
-    active_status_set: Option<u64>,
+    active_status_sets: HashSet<u64>,
+    active_assignees_load: Option<u64>,
+    active_users_assignments: HashSet<u64>,
+    active_current_user_load: Option<u64>,
     active_issue_types_load: Option<u64>,
     rank_refresh_load: Option<u64>,
     preserve_optimistic_view_load: Option<u64>,
@@ -189,18 +207,60 @@ impl RequestGenerations {
         true
     }
 
-    fn start_status_set(&mut self) -> u64 {
+    pub(super) fn start_status_set(&mut self) -> u64 {
         let generation = self.next();
-        self.active_status_set = Some(generation);
+        self.active_status_sets.insert(generation);
         generation
     }
 
-    fn complete_status_set(&mut self, generation: u64) -> bool {
-        if self.active_status_set != Some(generation) {
+    pub(super) fn complete_status_set(&mut self, generation: u64) -> bool {
+        self.active_status_sets.remove(&generation)
+    }
+
+    fn start_assignees_load(&mut self) -> u64 {
+        let generation = self.next();
+        self.active_assignees_load = Some(generation);
+        generation
+    }
+
+    fn complete_assignees_load(&mut self, generation: u64) -> bool {
+        if self.active_assignees_load != Some(generation) {
             return false;
         }
-        self.active_status_set = None;
+        self.active_assignees_load = None;
         true
+    }
+
+    fn cancel_assignees_load(&mut self) {
+        self.active_assignees_load = None;
+    }
+
+    pub(super) fn start_users_assign(&mut self) -> u64 {
+        let generation = self.next();
+        self.active_users_assignments.insert(generation);
+        generation
+    }
+
+    pub(super) fn complete_users_assign(&mut self, generation: u64) -> bool {
+        self.active_users_assignments.remove(&generation)
+    }
+
+    fn start_current_user_load(&mut self) -> u64 {
+        let generation = self.next();
+        self.active_current_user_load = Some(generation);
+        generation
+    }
+
+    fn complete_current_user_load(&mut self, generation: u64) -> bool {
+        if self.active_current_user_load != Some(generation) {
+            return false;
+        }
+        self.active_current_user_load = None;
+        true
+    }
+
+    fn cancel_status_load(&mut self) {
+        self.active_status_load = None;
     }
 
     pub(super) fn complete_load(&mut self, generation: u64) -> Option<LoadCompletion> {
@@ -252,7 +312,12 @@ pub(super) struct PendingRank {
 
 #[derive(Clone)]
 struct PendingStatusChange {
-    rollback_snapshot: BacklogSnapshot,
+    original_items: HashMap<String, WorkItem>,
+}
+
+#[derive(Clone)]
+struct PendingAssigneeChange {
+    original_items: HashMap<String, WorkItem>,
 }
 
 #[derive(Default)]
@@ -331,8 +396,12 @@ pub(crate) struct BacklogPage {
     loading: bool,
     ranking: bool,
     status_loading: bool,
+    assignees_loading: bool,
+    current_user_loading: bool,
     issue_types_loading: bool,
-    status_transitioning: bool,
+    syncing_ticket_keys: Rc<RefCell<HashSet<String>>>,
+    current_user: Option<JiraAssignee>,
+    assignees: Option<Vec<BacklogAssignee>>,
     move_locked: Rc<Cell<bool>>,
     generations: RequestGenerations,
     rank_refresh_retry: RankRefreshRetry,
@@ -340,7 +409,8 @@ pub(crate) struct BacklogPage {
     snapshot: Option<BacklogSnapshot>,
     pending_transfer: Option<PendingTransfer>,
     pending_rank: Option<PendingRank>,
-    pending_status_change: Option<PendingStatusChange>,
+    pending_status_changes: HashMap<u64, PendingStatusChange>,
+    pending_assignee_changes: HashMap<u64, PendingAssigneeChange>,
     status_transition_cache: StatusTransitionCache,
     focus_backlog_after_load: bool,
     pending_focus: Option<FocusRequest>,
@@ -356,6 +426,7 @@ impl BacklogPage {
         let (sender, receiver) = mpsc::channel();
         let (section_sender, section_receiver) = mpsc::channel();
         let move_locked = Rc::new(Cell::new(false));
+        let syncing_ticket_keys = Rc::new(RefCell::new(HashSet::new()));
         let velocity_dialog_close_requested = Rc::new(Cell::new(false));
         let settings_revision = service.settings_revision();
         Self {
@@ -367,6 +438,7 @@ impl BacklogPage {
                 &empty_snapshot(),
                 section_sender.clone(),
                 move_locked.clone(),
+                Rc::clone(&syncing_ticket_keys),
                 Rc::clone(&velocity_dialog_close_requested),
                 Vec::new(),
             ),
@@ -374,8 +446,12 @@ impl BacklogPage {
             loading: false,
             ranking: false,
             status_loading: false,
+            assignees_loading: false,
+            current_user_loading: false,
             issue_types_loading: false,
-            status_transitioning: false,
+            syncing_ticket_keys,
+            current_user: None,
+            assignees: None,
             move_locked,
             generations: RequestGenerations::default(),
             rank_refresh_retry: RankRefreshRetry::default(),
@@ -383,7 +459,8 @@ impl BacklogPage {
             snapshot: None,
             pending_transfer: None,
             pending_rank: None,
-            pending_status_change: None,
+            pending_status_changes: HashMap::new(),
+            pending_assignee_changes: HashMap::new(),
             status_transition_cache: StatusTransitionCache::default(),
             focus_backlog_after_load: false,
             pending_focus: None,
@@ -447,6 +524,11 @@ impl BacklogPage {
     #[cfg(test)]
     pub(super) fn is_loading_for_test(&self) -> bool {
         self.loading
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_status_loading_for_test(&self) -> bool {
+        self.status_loading
     }
 
     #[cfg(test)]
@@ -582,6 +664,20 @@ impl BacklogPage {
                     status,
                     result,
                 } => self.apply_status_result(generation, status, result),
+                BacklogResult::AssigneesLoaded { generation, result } => {
+                    self.apply_assignees_result(generation, result)
+                }
+                BacklogResult::UsersAssigned {
+                    generation,
+                    keys,
+                    assignee,
+                    result,
+                } => self.apply_users_assigned_result(generation, keys, assignee, result),
+                BacklogResult::CurrentUserLoaded {
+                    generation,
+                    keys,
+                    result,
+                } => self.apply_current_user_result(generation, keys, result),
             };
         }
         changed
@@ -806,7 +902,10 @@ impl BacklogPage {
         while let Ok(event) = self.section_receiver.try_recv() {
             match event {
                 BacklogSectionEvent::Refresh => {
-                    if !self.loading && !self.ranking {
+                    if !self.loading
+                        && !self.ranking
+                        && self.syncing_ticket_keys.borrow().is_empty()
+                    {
                         self.reload();
                     }
                 }
@@ -819,6 +918,10 @@ impl BacklogPage {
                         .base_mut()
                         .base_mut()
                         .set_issue_types_filter(issue_types);
+                    self.focus_backlog_data(ctx);
+                }
+                BacklogSectionEvent::UsersChanged(users) => {
+                    self.view.base_mut().base_mut().set_users_filter(users);
                     self.focus_backlog_data(ctx);
                 }
                 BacklogSectionEvent::OpenVelocity => self.open_velocity_dialog(ctx),
@@ -840,6 +943,7 @@ impl BacklogPage {
                 }
                 BacklogSectionEvent::WebMenuClosed => self.focus_backlog_data(ctx),
                 BacklogSectionEvent::MoveLocked => self.report_move_locked(),
+                BacklogSectionEvent::TicketsSyncing { keys } => self.report_ticket_syncing(&keys),
                 BacklogSectionEvent::OpenTicket { key } => self.service.open_jira_issue(&key),
                 BacklogSectionEvent::YankTicketUrl { key } => {
                     self.copy_jira_url(&key, ctx);
@@ -876,10 +980,13 @@ impl BacklogPage {
                         self.report_move_locked();
                         continue;
                     }
+                    let (status, assignee) = quick_menu_labels(self.snapshot.as_ref(), &keys);
                     if !self.view.base_mut().layer_mut().open(
                         section_id.clone(),
                         keys,
                         source_order,
+                        status,
+                        assignee,
                         transfer_destinations(self.snapshot.as_ref(), &section_id),
                         ctx,
                     ) {
@@ -888,6 +995,39 @@ impl BacklogPage {
                     }
                     self.view.base_mut().set_active_with_context(true, ctx);
                 }
+                BacklogSectionEvent::OpenStatusMenu {
+                    section_id,
+                    keys,
+                    source_order,
+                } => {
+                    if !self.view.base_mut().layer_mut().open_status_menu(
+                        section_id.clone(),
+                        keys,
+                        source_order,
+                        ctx,
+                    ) {
+                        self.report_move_locked();
+                        continue;
+                    }
+                    self.view.base_mut().set_active_with_context(true, ctx);
+                }
+                BacklogSectionEvent::OpenAssignMenu {
+                    section_id,
+                    keys,
+                    source_order,
+                } => {
+                    if !self.view.base_mut().layer_mut().open_assign_menu(
+                        section_id,
+                        keys,
+                        source_order,
+                        ctx,
+                    ) {
+                        self.report_move_locked();
+                        continue;
+                    }
+                    self.view.base_mut().set_active_with_context(true, ctx);
+                }
+                BacklogSectionEvent::ToggleCurrentUser { keys } => self.assign_current_user(keys),
                 BacklogSectionEvent::Moved {
                     section_id,
                     moved_keys,
@@ -920,6 +1060,11 @@ impl BacklogPage {
                 BacklogQuickMenuEvent::LoadStatuses { keys } => self.load_statuses(keys),
                 BacklogQuickMenuEvent::SetStatus { status } => {
                     self.set_status(status);
+                    self.view.base_mut().set_active_with_context(false, ctx);
+                }
+                BacklogQuickMenuEvent::LoadAssignees => self.load_assignees(),
+                BacklogQuickMenuEvent::AssignUser { keys, assignee } => {
+                    self.assign_users(keys, assignee);
                     self.view.base_mut().set_active_with_context(false, ctx);
                 }
                 BacklogQuickMenuEvent::MoveToTop {
@@ -963,16 +1108,21 @@ impl BacklogPage {
                     self.report_move_locked();
                     self.view.base_mut().set_active_with_context(false, ctx);
                 }
-                BacklogQuickMenuEvent::Closed => {
-                    self.view.base_mut().set_active_with_context(false, ctx)
-                }
+                BacklogQuickMenuEvent::Closed => self.dismiss_quick_menu(ctx),
             }
         }
         changed
     }
 
+    fn drain_events(&mut self, ctx: &mut EventCtx<()>) -> bool {
+        let mut changed = self.drain_quick_menu_events(ctx);
+        changed |= self.drain_section_events(ctx);
+        changed |= self.drain_quick_menu_events(ctx);
+        changed
+    }
+
     fn load_statuses(&mut self, keys: Vec<String>) {
-        if self.status_loading || self.status_transitioning {
+        if self.status_loading {
             return;
         }
         let missing_keys = self.status_transition_cache.missing_keys(&keys);
@@ -1048,20 +1198,239 @@ impl BacklogPage {
         }
     }
 
-    fn set_status(&mut self, status: StatusTransition) {
-        if self.move_locked.get() || self.status_transitioning {
-            self.report_move_locked();
+    fn load_assignees(&mut self) {
+        if let Some(assignees) = self.assignees.as_ref() {
+            self.view
+                .base_mut()
+                .layer_mut()
+                .set_assignees(assignees.clone());
             return;
         }
-        if !self.show_optimistic_status(&status) {
+        if self.assignees_loading {
+            return;
+        }
+        let generation = self.generations.start_assignees_load();
+        self.assignees_loading = true;
+        let service = self.service.clone();
+        let sender = self.sender.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("finery-jira-users".into())
+            .spawn(move || {
+                let _ = sender.send(BacklogResult::AssigneesLoaded {
+                    generation,
+                    result: service.jira_default_project_assignees(),
+                });
+            })
+            && self.generations.complete_assignees_load(generation)
+        {
+            self.assignees_loading = false;
+            self.view.base_mut().set_active(false);
+            self.queue_backlog_data_focus();
+            self.service
+                .report_error(format!("Could not load Jira users: {error}"));
+        }
+    }
+
+    fn assign_current_user(&mut self, keys: Vec<String>) {
+        if keys.is_empty() || self.current_user_loading || self.tickets_are_syncing(&keys) {
+            self.report_ticket_syncing(&keys);
+            return;
+        }
+        if let Some(user) = self.current_user.clone() {
+            self.assign_users(
+                keys.clone(),
+                current_user_assignment(self.snapshot.as_ref(), &keys, &user),
+            );
+            return;
+        }
+        let generation = self.generations.start_current_user_load();
+        self.current_user_loading = true;
+        let service = self.service.clone();
+        let sender = self.sender.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("finery-jira-current-user".into())
+            .spawn(move || {
+                let _ = sender.send(BacklogResult::CurrentUserLoaded {
+                    generation,
+                    keys,
+                    result: service.jira_current_user(),
+                });
+            })
+            && self.generations.complete_current_user_load(generation)
+        {
+            self.current_user_loading = false;
+            self.service
+                .report_error(format!("Could not load the current Jira user: {error}"));
+        }
+    }
+
+    fn apply_current_user_result(
+        &mut self,
+        generation: u64,
+        keys: Vec<String>,
+        result: Result<JiraAssignee, String>,
+    ) -> bool {
+        if !self.generations.complete_current_user_load(generation) {
+            return false;
+        }
+        self.current_user_loading = false;
+        match result {
+            Ok(user) => {
+                let assignee = current_user_assignment(self.snapshot.as_ref(), &keys, &user);
+                self.current_user = Some(user);
+                self.assign_users(keys, assignee);
+            }
+            Err(error) => self
+                .service
+                .report_error(format!("Could not load the current Jira user: {error}")),
+        }
+        true
+    }
+
+    fn dismiss_quick_menu(&mut self, ctx: &mut EventCtx<()>) {
+        self.generations.cancel_status_load();
+        self.generations.cancel_assignees_load();
+        self.status_loading = false;
+        self.assignees_loading = false;
+        self.view.base_mut().set_active_with_context(false, ctx);
+        self.queue_backlog_data_focus();
+    }
+
+    fn apply_assignees_result(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<JiraAssignee>, String>,
+    ) -> bool {
+        if !self.generations.complete_assignees_load(generation) {
+            return false;
+        }
+        self.assignees_loading = false;
+        match result {
+            Ok(users) => {
+                let mut assignees = Vec::with_capacity(users.len() + 1);
+                assignees.push(BacklogAssignee {
+                    account_id: String::new(),
+                    display_name: "Unassigned".into(),
+                });
+                assignees.extend(users.into_iter().map(|user| BacklogAssignee {
+                    account_id: user.account_id,
+                    display_name: user.display_name,
+                }));
+                self.assignees = Some(assignees.clone());
+                self.view.base_mut().layer_mut().set_assignees(assignees);
+            }
+            Err(error) => {
+                self.view.base_mut().set_active(false);
+                self.queue_backlog_data_focus();
+                self.service
+                    .report_error(format!("Could not load Jira users: {error}"));
+            }
+        }
+        true
+    }
+
+    fn assign_users(&mut self, keys: Vec<String>, assignee: BacklogAssignee) {
+        if keys.is_empty() {
+            return;
+        }
+        if self.tickets_are_syncing(&keys) {
+            self.report_ticket_syncing(&keys);
+            return;
+        }
+        let Some(pending_change) = self.show_optimistic_assignee(&keys, &assignee.display_name)
+        else {
+            self.service
+                .report_error("Could not assign users: selected tickets are unavailable".into());
+            return;
+        };
+        let generation = self.generations.start_users_assign();
+        self.pending_assignee_changes
+            .insert(generation, pending_change);
+        self.begin_ticket_sync(&keys);
+        let sync_keys = keys.clone();
+        let service = self.service.clone();
+        let sender = self.sender.clone();
+        let result_assignee = assignee.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("finery-jira-assign-users".into())
+            .spawn(move || {
+                let account_id =
+                    (!assignee.account_id.is_empty()).then_some(assignee.account_id.clone());
+                let result = service.jira_assign_users(&keys, account_id.as_deref());
+                let _ = sender.send(BacklogResult::UsersAssigned {
+                    generation,
+                    keys,
+                    assignee,
+                    result,
+                });
+            })
+            && self.generations.complete_users_assign(generation)
+        {
+            self.restore_assignee_change(generation);
+            self.finish_ticket_sync(&sync_keys);
+            self.service.report_error(format!(
+                "Could not start Jira assignment to {}: {error}",
+                result_assignee.display_name
+            ));
+        }
+    }
+
+    fn apply_users_assigned_result(
+        &mut self,
+        generation: u64,
+        keys: Vec<String>,
+        assignee: BacklogAssignee,
+        result: Result<(), String>,
+    ) -> bool {
+        if !self.generations.complete_users_assign(generation) {
+            return false;
+        }
+        self.finish_ticket_sync(&keys);
+        match result {
+            Ok(()) => {
+                self.pending_assignee_changes.remove(&generation);
+                let message = match keys.as_slice() {
+                    [key] => format!("{key} assigned to {}", assignee.display_name),
+                    _ => format!(
+                        "{} tickets assigned to {}",
+                        keys.len(),
+                        assignee.display_name
+                    ),
+                };
+                self.service
+                    .report_notification(tuicore::Notification::success(
+                        "Jira assignee updated",
+                        message,
+                    ));
+            }
+            Err(error) => {
+                self.restore_assignee_change(generation);
+                self.service
+                    .report_error(format!("Could not assign Jira users: {error}"));
+            }
+        }
+        true
+    }
+
+    fn set_status(&mut self, status: StatusTransition) {
+        let keys = status
+            .issues
+            .iter()
+            .map(|issue| issue.issue_key.clone())
+            .collect::<Vec<_>>();
+        if self.tickets_are_syncing(&keys) {
+            self.report_ticket_syncing(&keys);
+            return;
+        }
+        let Some(pending_change) = self.show_optimistic_status(&status) else {
             self.service
                 .report_error("Could not set status: selected tickets are unavailable".into());
             return;
-        }
-        self.move_locked.set(true);
-        self.status_transitioning = true;
-        self.view.base_mut().base_mut().set_loading(true);
+        };
         let generation = self.generations.start_status_set();
+        self.pending_status_changes
+            .insert(generation, pending_change);
+        self.begin_ticket_sync(&keys);
         let service = self.service.clone();
         let sender = self.sender.clone();
         let result_status = status.clone();
@@ -1077,10 +1446,8 @@ impl BacklogPage {
             })
             && self.generations.complete_status_set(generation)
         {
-            self.status_transitioning = false;
-            self.move_locked.set(false);
-            self.view.base_mut().base_mut().set_loading(false);
-            self.restore_status_snapshot();
+            self.restore_status_change(generation);
+            self.finish_ticket_sync(&keys);
             self.service.report_error(format!(
                 "Could not start Jira transition to {}: {error}",
                 result_status.label
@@ -1097,13 +1464,16 @@ impl BacklogPage {
         if !self.generations.complete_status_set(generation) {
             return false;
         }
-        self.status_transitioning = false;
-        self.move_locked.set(false);
-        self.view.base_mut().base_mut().set_loading(false);
+        let keys = status
+            .issues
+            .iter()
+            .map(|issue| issue.issue_key.clone())
+            .collect::<Vec<_>>();
+        self.finish_ticket_sync(&keys);
         self.status_transition_cache.invalidate(&status);
         match result {
             Ok(()) => {
-                self.pending_status_change = None;
+                self.pending_status_changes.remove(&generation);
                 let message = match status.issues.as_slice() {
                     [issue] => format!("{} changed to {}", issue.issue_key, status.label),
                     issues => format!("{} tickets changed to {}", issues.len(), status.label),
@@ -1115,44 +1485,121 @@ impl BacklogPage {
                     ));
             }
             Err(error) => {
-                self.restore_status_snapshot();
+                self.restore_status_change(generation);
                 self.service
                     .report_error(format!("Could not set Jira status: {error}"));
-                self.load(false, false);
+                if self.syncing_ticket_keys.borrow().is_empty() {
+                    self.load(false, false);
+                }
             }
         }
         true
     }
 
-    fn show_optimistic_status(&mut self, status: &StatusTransition) -> bool {
+    fn show_optimistic_status(&mut self, status: &StatusTransition) -> Option<PendingStatusChange> {
         let Some(snapshot) = self.snapshot.as_ref() else {
-            return false;
+            return None;
         };
-        let rollback_snapshot = snapshot.clone();
-        let mut optimistic = rollback_snapshot.clone();
         let keys = status
             .issues
             .iter()
             .map(|issue| issue.issue_key.clone())
             .collect::<Vec<_>>();
+        let original_items = ticket_items_by_key(snapshot, &keys)?;
+        let mut optimistic = snapshot.clone();
         if !apply_status_to_snapshot(&mut optimistic, &keys, &status.label) {
-            return false;
+            return None;
         }
         if let Ok(settings) = self.service.settings().read() {
             recalculate_capacity(&mut optimistic, &settings.backlog_runway);
         }
-        self.pending_status_change = Some(PendingStatusChange { rollback_snapshot });
         self.snapshot = Some(optimistic.clone());
         self.view.base_mut().base_mut().set_snapshot(&optimistic);
-        true
+        Some(PendingStatusChange { original_items })
     }
 
-    fn restore_status_snapshot(&mut self) {
-        let Some(pending) = self.pending_status_change.take() else {
+    fn restore_status_change(&mut self, generation: u64) {
+        let Some(pending) = self.pending_status_changes.remove(&generation) else {
             return;
         };
-        self.snapshot = Some(pending.rollback_snapshot);
+        self.restore_ticket_items(pending.original_items);
+    }
+
+    fn show_optimistic_assignee(
+        &mut self,
+        keys: &[String],
+        assignee: &str,
+    ) -> Option<PendingAssigneeChange> {
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return None;
+        };
+        let original_items = ticket_items_by_key(snapshot, keys)?;
+        let mut optimistic = snapshot.clone();
+        if !apply_assignee_to_snapshot(&mut optimistic, keys, assignee) {
+            return None;
+        }
+        self.snapshot = Some(optimistic.clone());
+        self.view.base_mut().base_mut().set_snapshot(&optimistic);
+        Some(PendingAssigneeChange { original_items })
+    }
+
+    fn restore_assignee_change(&mut self, generation: u64) {
+        let Some(pending) = self.pending_assignee_changes.remove(&generation) else {
+            return;
+        };
+        self.restore_ticket_items(pending.original_items);
+    }
+
+    fn restore_ticket_items(&mut self, originals: HashMap<String, WorkItem>) {
+        let Some(snapshot) = self.snapshot.as_mut() else {
+            return;
+        };
+        for item in snapshot
+            .sprints
+            .iter_mut()
+            .flat_map(|sprint| &mut sprint.work_items)
+            .chain(&mut snapshot.work_items)
+        {
+            if let Some(original) = originals.get(&item.key) {
+                *item = original.clone();
+            }
+        }
         self.restore_snapshot();
+    }
+
+    fn tickets_are_syncing(&self, keys: &[String]) -> bool {
+        let syncing = self.syncing_ticket_keys.borrow();
+        keys.iter().any(|key| syncing.contains(key))
+    }
+
+    fn begin_ticket_sync(&mut self, keys: &[String]) {
+        self.syncing_ticket_keys
+            .borrow_mut()
+            .extend(keys.iter().cloned());
+        self.refresh_ticket_sync_indicators();
+    }
+
+    fn finish_ticket_sync(&mut self, keys: &[String]) {
+        let mut syncing = self.syncing_ticket_keys.borrow_mut();
+        for key in keys {
+            syncing.remove(key);
+        }
+        drop(syncing);
+        self.refresh_ticket_sync_indicators();
+    }
+
+    fn refresh_ticket_sync_indicators(&mut self) {
+        self.view.base_mut().base_mut().refresh_syncing_tickets();
+    }
+
+    fn report_ticket_syncing(&self, keys: &[String]) {
+        let syncing = self.syncing_ticket_keys.borrow();
+        let ticket = keys.iter().find(|key| syncing.contains(*key));
+        let message = ticket.map_or_else(
+            || "Could not update tickets: a selected ticket is still syncing with Jira".into(),
+            |key| format!("Could not update {key}: it is still syncing with Jira"),
+        );
+        self.service.report_error(message);
     }
 
     fn open_velocity_dialog(&mut self, ctx: &mut EventCtx<()>) {
@@ -1207,6 +1654,10 @@ impl BacklogPage {
             self.report_move_locked();
             return;
         }
+        if self.tickets_are_syncing(&keys) {
+            self.report_ticket_syncing(&keys);
+            return;
+        }
         if keys.is_empty() || !keys.iter().all(|key| final_order.contains(key)) {
             return;
         }
@@ -1232,6 +1683,10 @@ impl BacklogPage {
     ) {
         if self.move_locked.get() {
             self.report_move_locked();
+            return;
+        }
+        if self.tickets_are_syncing(&keys) {
+            self.report_ticket_syncing(&keys);
             return;
         }
         if keys.is_empty() {
@@ -1393,7 +1848,15 @@ impl BacklogPage {
         let Some(pending_transfer) = self.pending_transfer.take() else {
             return;
         };
-        self.snapshot = Some(pending_transfer.rollback_snapshot);
+        let Some(snapshot) = self.snapshot.as_mut() else {
+            return;
+        };
+        if !restore_transfer_sections(snapshot, &pending_transfer) {
+            return;
+        }
+        if let Ok(settings) = self.service.settings().read() {
+            recalculate_capacity(snapshot, &settings.backlog_runway);
+        }
         self.restore_snapshot();
     }
 
@@ -1424,6 +1887,10 @@ impl BacklogPage {
     fn rank(&mut self, section_id: String, moved_keys: Vec<String>, final_order: Vec<String>) {
         if self.move_locked.get() {
             self.report_move_locked();
+            return;
+        }
+        if self.tickets_are_syncing(&moved_keys) {
+            self.report_ticket_syncing(&moved_keys);
             return;
         }
         let plan = match rank_plan(moved_keys, &final_order) {
@@ -1490,7 +1957,17 @@ impl BacklogPage {
         let Some(pending_rank) = self.pending_rank.take() else {
             return;
         };
-        self.snapshot = Some(pending_rank.rollback_snapshot);
+        let Some(snapshot) = self.snapshot.as_mut() else {
+            return;
+        };
+        let order = source_order(
+            Some(&pending_rank.rollback_snapshot),
+            &pending_rank.section_id,
+        );
+        let Some(work_items) = work_items_mut(snapshot, &pending_rank.section_id) else {
+            return;
+        };
+        sort_work_items(work_items, &order);
         self.restore_snapshot();
     }
 
@@ -1508,7 +1985,7 @@ impl BacklogPage {
 
     fn report_move_locked(&self) {
         self.service.report_error(
-            "Could not update tickets: another ticket update is still syncing with Jira".into(),
+            "Could not move tickets: another backlog move is still syncing with Jira".into(),
         );
     }
 
@@ -1525,11 +2002,14 @@ impl BacklogPage {
         if settings_revision == self.settings_revision
             || self.loading
             || self.ranking
-            || self.status_transitioning
+            || !self.syncing_ticket_keys.borrow().is_empty()
+            || self.current_user_loading
         {
             return false;
         }
         self.settings_revision = settings_revision;
+        self.assignees = None;
+        self.load_assignees();
         self.load(false, false);
         true
     }
@@ -1595,6 +2075,60 @@ pub(super) fn apply_status_to_snapshot(
         item.status_changed_at = Some(now);
     }
     true
+}
+
+pub(super) fn apply_assignee_to_snapshot(
+    snapshot: &mut BacklogSnapshot,
+    keys: &[String],
+    assignee: &str,
+) -> bool {
+    let keys = keys.iter().collect::<std::collections::HashSet<_>>();
+    if keys.is_empty()
+        || !keys.iter().all(|key| {
+            snapshot.work_items.iter().any(|item| &item.key == *key)
+                || snapshot
+                    .sprints
+                    .iter()
+                    .flat_map(|sprint| &sprint.work_items)
+                    .any(|item| &item.key == *key)
+        })
+    {
+        return false;
+    }
+    for item in snapshot
+        .work_items
+        .iter_mut()
+        .chain(
+            snapshot
+                .sprints
+                .iter_mut()
+                .flat_map(|sprint| &mut sprint.work_items),
+        )
+        .filter(|item| keys.contains(&item.key))
+    {
+        item.assignee = assignee.to_owned();
+    }
+    true
+}
+
+fn ticket_items_by_key(
+    snapshot: &BacklogSnapshot,
+    keys: &[String],
+) -> Option<HashMap<String, WorkItem>> {
+    let items = snapshot
+        .work_items
+        .iter()
+        .chain(
+            snapshot
+                .sprints
+                .iter()
+                .flat_map(|sprint| &sprint.work_items),
+        )
+        .map(|item| (item.key.clone(), item.clone()))
+        .collect::<HashMap<_, _>>();
+    keys.iter()
+        .map(|key| items.get(key).cloned().map(|item| (key.clone(), item)))
+        .collect()
 }
 
 fn source_order(snapshot: Option<&BacklogSnapshot>, section_id: &str) -> Vec<String> {
@@ -1743,6 +2277,50 @@ fn section_contains(snapshot: &BacklogSnapshot, section_id: &str, key: &str) -> 
     }
 }
 
+pub(super) fn quick_menu_labels(
+    snapshot: Option<&BacklogSnapshot>,
+    keys: &[String],
+) -> (String, String) {
+    let Some(key) = keys.first() else {
+        return (String::new(), "Unassigned".into());
+    };
+    let item = snapshot.and_then(|snapshot| {
+        snapshot
+            .work_items
+            .iter()
+            .chain(
+                snapshot
+                    .sprints
+                    .iter()
+                    .flat_map(|sprint| &sprint.work_items),
+            )
+            .find(|item| item.key == *key)
+    });
+    item.map_or_else(
+        || (String::new(), "Unassigned".into()),
+        |item| (item.status.clone(), item.assignee.clone()),
+    )
+}
+
+pub(super) fn current_user_assignment(
+    snapshot: Option<&BacklogSnapshot>,
+    keys: &[String],
+    current_user: &JiraAssignee,
+) -> BacklogAssignee {
+    let (_, assignee) = quick_menu_labels(snapshot, keys);
+    if assignee.eq_ignore_ascii_case(&current_user.display_name) {
+        BacklogAssignee {
+            account_id: String::new(),
+            display_name: "Unassigned".into(),
+        }
+    } else {
+        BacklogAssignee {
+            account_id: current_user.account_id.clone(),
+            display_name: current_user.display_name.clone(),
+        }
+    }
+}
+
 pub(super) fn transfer_destinations(
     snapshot: Option<&BacklogSnapshot>,
     current_section_id: &str,
@@ -1828,15 +2406,85 @@ fn work_items_mut<'a>(
     }
 }
 
+fn work_items<'a>(snapshot: &'a BacklogSnapshot, section_id: &str) -> Option<&'a [WorkItem]> {
+    if section_id == "backlog" {
+        Some(&snapshot.work_items)
+    } else {
+        let sprint_id = section_id.strip_prefix("sprint-")?.parse::<u64>().ok()?;
+        snapshot
+            .sprints
+            .iter()
+            .find(|sprint| sprint.id == sprint_id)
+            .map(|sprint| sprint.work_items.as_slice())
+    }
+}
+
+fn restore_transfer_sections(snapshot: &mut BacklogSnapshot, transfer: &PendingTransfer) -> bool {
+    let Some(original_source) =
+        work_items(&transfer.rollback_snapshot, &transfer.source_section_id)
+    else {
+        return false;
+    };
+    let Some(original_destination) = work_items(
+        &transfer.rollback_snapshot,
+        &transfer.destination_section_id,
+    ) else {
+        return false;
+    };
+    let Some(current_source) = work_items(snapshot, &transfer.source_section_id) else {
+        return false;
+    };
+    let Some(current_destination) = work_items(snapshot, &transfer.destination_section_id) else {
+        return false;
+    };
+    let mut items_by_key = current_source
+        .iter()
+        .chain(current_destination)
+        .map(|item| (item.key.clone(), item.clone()))
+        .collect::<HashMap<_, _>>();
+    let source = original_source
+        .iter()
+        .map(|item| {
+            items_by_key
+                .remove(&item.key)
+                .unwrap_or_else(|| item.clone())
+        })
+        .collect();
+    let destination = original_destination
+        .iter()
+        .map(|item| {
+            items_by_key
+                .remove(&item.key)
+                .unwrap_or_else(|| item.clone())
+        })
+        .collect();
+    let Some(source_items) = work_items_mut(snapshot, &transfer.source_section_id) else {
+        return false;
+    };
+    *source_items = source;
+    let Some(destination_items) = work_items_mut(snapshot, &transfer.destination_section_id) else {
+        return false;
+    };
+    *destination_items = destination;
+    true
+}
+
 fn backlog_view(
     snapshot: &BacklogSnapshot,
     section_sender: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
+    syncing_ticket_keys: Rc<RefCell<HashSet<String>>>,
     velocity_dialog_close_requested: Rc<Cell<bool>>,
     issue_types: Vec<JiraOption>,
 ) -> BacklogView {
     let quick_menu = DialogLayer::new(
-        backlog_tree_with_issue_types(snapshot, section_sender, move_locked.clone(), issue_types),
+        backlog_tree_with_issue_types(
+            snapshot,
+            section_sender,
+            move_locked.clone(),
+            syncing_ticket_keys,
+            issue_types,
+        ),
         BacklogQuickMenu::new(move_locked),
     )
     .active(false)
@@ -2294,7 +2942,7 @@ impl TuiNode for BacklogPage {
         }
         let outcome = self.view.event(event, ctx);
         self.close_velocity_dialog(ctx);
-        if self.drain_quick_menu_events(ctx) || self.drain_section_events(ctx) {
+        if self.drain_events(ctx) {
             ctx.request_redraw();
             ctx.request_tick();
         }
@@ -2312,7 +2960,7 @@ impl TuiNode for BacklogPage {
         }
         let outcome = self.view.dispatch_event(route, event, ctx);
         self.close_velocity_dialog(ctx);
-        if self.drain_quick_menu_events(ctx) || self.drain_section_events(ctx) {
+        if self.drain_events(ctx) {
             ctx.request_redraw();
             ctx.request_tick();
         }
@@ -2346,7 +2994,10 @@ impl TuiNode for BacklogPage {
         if should_poll(
             self.loading,
             self.ranking,
-            self.status_loading || self.status_transitioning,
+            self.status_loading
+                || self.assignees_loading
+                || self.current_user_loading
+                || !self.syncing_ticket_keys.borrow().is_empty(),
             self.issue_types_loading,
             self.rank_refresh_retry.pending(),
         ) {
@@ -2382,6 +3033,7 @@ impl TuiNode for BacklogPage {
         self.view.mount(ctx);
         self.focus_backlog_after_load = true;
         self.load_issue_types();
+        self.load_assignees();
         self.load(false, false);
         ctx.request_tick();
     }

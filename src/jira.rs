@@ -1326,6 +1326,37 @@ pub(crate) fn set_status(settings: &AppSettings, status: &StatusTransition) -> R
     Ok(())
 }
 
+pub(crate) fn assign_users(
+    settings: &AppSettings,
+    issue_keys: &[String],
+    account_id: Option<&str>,
+) -> Result<(), String> {
+    let (client, base_url, email, token) = configured_client(settings)?;
+    for issue_key in issue_keys {
+        let response = client
+            .put(format!("{base_url}/rest/api/3/issue/{issue_key}/assignee"))
+            .basic_auth(&email, Some(&token))
+            .json(&json!({ "accountId": account_id }))
+            .send()
+            .map_err(|error| error.to_string())?;
+        ensure_success(response)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn current_user(settings: &AppSettings) -> Result<JiraAssignee, String> {
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let response = client
+        .get(format!("{base_url}/rest/api/3/myself"))
+        .basic_auth(email, Some(token))
+        .send()
+        .map_err(|error| error.to_string())?;
+    response_json::<JiraUser>(response).map(|user| JiraAssignee {
+        account_id: user.account_id,
+        display_name: user.display_name,
+    })
+}
+
 pub(crate) fn assignees(
     settings: &AppSettings,
     project_key: &str,

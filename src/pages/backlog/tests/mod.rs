@@ -1,4 +1,9 @@
-use std::{cell::Cell, rc::Rc, sync::mpsc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashSet,
+    rc::Rc,
+    sync::mpsc,
+};
 
 use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Modifier};
 use tuicore::{
@@ -8,12 +13,16 @@ use tuicore::{
 };
 
 use super::{
-    components::{BacklogQuickMenu, BacklogQuickMenuEvent, backlog_tree, selectable_issue_types},
+    components::{
+        BacklogQuickMenu, BacklogQuickMenuEvent, backlog_tree, backlog_tree_with_issue_types,
+        selectable_issue_types,
+    },
     page::{
         BacklogPage, MAX_UNCONFIRMED_TRANSFER_REFRESHES, PendingRank, PendingRankReconciliation,
-        PendingTransfer, PendingTransferReconciliation, StatusTransitionCache,
-        apply_status_to_snapshot, move_work_items_to_edge, recalculate_capacity,
-        reconcile_pending_rank, reconcile_pending_transfer, should_poll, source_transfer_highlight,
+        PendingTransfer, PendingTransferReconciliation, RequestGenerations, StatusTransitionCache,
+        apply_assignee_to_snapshot, apply_status_to_snapshot, current_user_assignment,
+        move_work_items_to_edge, quick_menu_labels, recalculate_capacity, reconcile_pending_rank,
+        reconcile_pending_transfer, should_poll, source_transfer_highlight,
         source_transfer_highlight_key, sprint_report, transfer_destinations,
         transfer_reconciliation_highlight, velocity_dialog, velocity_share_report,
     },
@@ -236,7 +245,8 @@ fn backlog_header_places_web_menu_before_the_right_aligned_toolbar_controls() {
 
     assert!(cell_position(&header, "Web") < cell_position(&header, "󰓅"));
     assert!(cell_position(&header, "󰓅") < cell_position(&header, "󰑓"));
-    assert!(cell_position(&header, "󰑓") < cell_position(&header, "Type"));
+    assert!(cell_position(&header, "󰑓") < cell_position(&header, "User"));
+    assert!(cell_position(&header, "User") < cell_position(&header, "Type"));
     assert!(cell_position(&header, "Type") < cell_position(&header, "󰑭"));
 }
 
@@ -344,6 +354,39 @@ fn issue_type_filter_shows_only_matching_ticket_types() {
     assert!(text.contains("Bug ticket"));
     assert!(text.contains("Task ticket"));
     assert!(text.contains("Story ticket"));
+}
+
+#[test]
+fn user_filter_shows_only_matching_assignees() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    snapshot.work_items = vec![
+        WorkItem {
+            assignee: "Ada".into(),
+            ..work_item("FIN-8", "Ada ticket")
+        },
+        WorkItem {
+            assignee: "Maya".into(),
+            ..work_item("FIN-9", "Maya ticket")
+        },
+    ];
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    tree.set_users_filter(vec!["Maya".into()]);
+    let area = Rect::new(0, 0, 100, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(!text.contains("Ada ticket"));
+    assert!(text.contains("Maya ticket"));
 }
 
 #[test]
@@ -905,6 +948,49 @@ fn page_refresh_keeps_the_highlighted_ticket() {
             .as_deref(),
         Some("ticket:FIN-8")
     );
+}
+
+#[test]
+fn status_shortcut_starts_loading_without_another_keypress() {
+    tuicore::init();
+    let mut page = BacklogPage::with_snapshot_for_test(snapshot());
+    page.view_for_test()
+        .base_mut()
+        .base_mut()
+        .highlight("ticket:FIN-8");
+    let area = Rect::new(0, 0, 80, 16);
+    page.layout(area, &mut LayoutCtx::new());
+    let route = EventRoute::new(TreePath::from_keys([
+        ChildKey::first(),
+        ChildKey::first(),
+        ChildKey::new("data"),
+    ]));
+    let target = FocusTarget {
+        id: FocusId::new("data-view"),
+        path: route.path.clone(),
+        area: Rect::default(),
+        enabled: true,
+        tab_stop: true,
+        control: true,
+        hotkey: None,
+        hotkeys: Vec::new(),
+        hotkey_sequences: Vec::new(),
+        suppress_global_hotkeys: false,
+        focused_events_before_global_hotkeys: false,
+    };
+    page.dispatch_focus(
+        &target,
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+
+    page.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('s'))),
+        &mut EventCtx::new(AnimationSettings::default()),
+    );
+
+    assert!(page.is_status_loading_for_test());
 }
 
 #[test]
@@ -2023,6 +2109,30 @@ fn unified_tree_uses_same_section_transient_selection_for_the_quick_menu() {
     assert!(
         matches!(receiver.try_recv(), Ok(super::components::BacklogSectionEvent::OpenQuickMenu { section_id, keys, source_order }) if section_id == "backlog" && keys == ["FIN-1", "FIN-2"] && source_order == ["FIN-1", "FIN-2"])
     );
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('s'))),
+        &mut ctx,
+    );
+    assert!(
+        matches!(receiver.try_recv(), Ok(super::components::BacklogSectionEvent::OpenStatusMenu { section_id, keys, source_order }) if section_id == "backlog" && keys == ["FIN-1", "FIN-2"] && source_order == ["FIN-1", "FIN-2"])
+    );
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('a'))),
+        &mut ctx,
+    );
+    assert!(
+        matches!(receiver.try_recv(), Ok(super::components::BacklogSectionEvent::OpenAssignMenu { section_id, keys, source_order }) if section_id == "backlog" && keys == ["FIN-1", "FIN-2"] && source_order == ["FIN-1", "FIN-2"])
+    );
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('i'))),
+        &mut ctx,
+    );
+    assert!(
+        matches!(receiver.try_recv(), Ok(super::components::BacklogSectionEvent::ToggleCurrentUser { keys }) if keys == ["FIN-1", "FIN-2"])
+    );
 }
 
 #[test]
@@ -2181,6 +2291,16 @@ fn quick_menu_omits_its_current_section_from_transfer_destinations() {
 }
 
 #[test]
+fn quick_menu_labels_show_the_selected_ticket_status_and_assignee() {
+    let snapshot = snapshot();
+
+    assert_eq!(
+        quick_menu_labels(Some(&snapshot), &["FIN-8".into()]),
+        ("To Do".into(), "Ada".into())
+    );
+}
+
+#[test]
 fn quick_menu_opens_statuses_before_move_actions() {
     tuicore::init();
     let mut menu = BacklogQuickMenu::new(Default::default());
@@ -2189,15 +2309,29 @@ fn quick_menu_opens_statuses_before_move_actions() {
         "backlog".into(),
         vec!["FIN-1".into()],
         vec!["FIN-1".into(), "FIN-2".into()],
+        "In progress".into(),
+        "Marlo Vlietstra".into(),
         Vec::new(),
         &mut ctx,
     ));
     assert_eq!(
-        BacklogQuickMenu::main_action_labels(),
-        ["Set status", "Move to top", "Move to bottom"]
+        BacklogQuickMenu::main_action_labels("In progress", "Marlo Vlietstra"),
+        [
+            "Assign user (@MV)",
+            "Set status (In progress)",
+            "Move to top",
+            "Move to bottom"
+        ]
     );
     let area = Rect::new(0, 0, 60, 14);
     menu.layout(area, &mut LayoutCtx::new());
+    menu.event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('j'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::new(AnimationSettings::default()),
+    );
 
     menu.event(
         &TuiEvent::Key(KeyEvent::from(Key::Enter)),
@@ -2224,6 +2358,93 @@ fn quick_menu_opens_statuses_before_move_actions() {
         [BacklogQuickMenuEvent::SetStatus { status }]
             if status.label == "Done" && status.issues[0].transition_id == "31"
     ));
+}
+
+#[test]
+fn quick_menu_assigns_a_user_or_unassigns_tickets() {
+    tuicore::init();
+    let mut menu = BacklogQuickMenu::new(Default::default());
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    assert!(menu.open(
+        "backlog".into(),
+        vec!["FIN-1".into()],
+        vec!["FIN-1".into()],
+        "To do".into(),
+        "Unassigned".into(),
+        Vec::new(),
+        &mut ctx,
+    ));
+    let area = Rect::new(0, 0, 60, 14);
+    menu.layout(area, &mut LayoutCtx::new());
+    menu.event(
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::new(AnimationSettings::default()),
+    );
+    assert!(matches!(
+        menu.take_events().as_slice(),
+        [BacklogQuickMenuEvent::LoadAssignees]
+    ));
+
+    menu.set_assignees(vec![super::components::BacklogAssignee {
+        account_id: String::new(),
+        display_name: "Unassigned".into(),
+    }]);
+    menu.event(
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::new(AnimationSettings::default()),
+    );
+    assert!(matches!(
+        menu.take_events().as_slice(),
+        [BacklogQuickMenuEvent::AssignUser { keys, assignee }]
+            if keys.as_slice() == ["FIN-1"]
+                && assignee.account_id.is_empty()
+                && assignee.display_name == "Unassigned"
+    ));
+}
+
+#[test]
+fn quick_menu_can_open_and_close_the_assign_menu_directly() {
+    tuicore::init();
+    let mut menu = BacklogQuickMenu::new(Default::default());
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    assert!(menu.open_assign_menu(
+        "backlog".into(),
+        vec!["FIN-1".into()],
+        vec!["FIN-1".into()],
+        &mut ctx,
+    ));
+    assert!(menu.is_open_for_test());
+    assert!(matches!(
+        menu.take_events().as_slice(),
+        [BacklogQuickMenuEvent::LoadAssignees]
+    ));
+
+    menu.event(
+        &TuiEvent::Key(KeyEvent::from(Key::Esc)),
+        &mut EventCtx::new(AnimationSettings::default()),
+    );
+    assert!(!menu.is_open_for_test());
+    assert!(matches!(
+        menu.take_events().as_slice(),
+        [BacklogQuickMenuEvent::Closed]
+    ));
+}
+
+#[test]
+fn current_user_assignment_toggles_the_selected_ticket_assignee() {
+    let snapshot = snapshot();
+    let current = crate::jira::JiraAssignee {
+        account_id: "ada".into(),
+        display_name: "Ada".into(),
+    };
+
+    assert_eq!(
+        current_user_assignment(Some(&snapshot), &["FIN-8".into()], &current),
+        super::components::BacklogAssignee {
+            account_id: String::new(),
+            display_name: "Unassigned".into(),
+        }
+    );
 }
 
 #[test]
@@ -2308,6 +2529,98 @@ fn status_change_updates_active_sprint_done_totals() {
             .concat()
             .contains("5/5 (20c) pts • ✓ 1/1 • 1/1 items")
     );
+}
+
+#[test]
+fn assignment_updates_the_selected_ticket_without_refreshing_the_backlog() {
+    let mut snapshot = snapshot();
+
+    assert!(apply_assignee_to_snapshot(
+        &mut snapshot,
+        &["FIN-8".into()],
+        "Marlo Vlietstra",
+    ));
+    assert_eq!(snapshot.work_items[0].assignee, "Marlo Vlietstra");
+}
+
+#[test]
+fn separate_ticket_updates_complete_independently() {
+    let mut generations = RequestGenerations::default();
+    let assignee_update = generations.start_users_assign();
+    let status_update = generations.start_status_set();
+
+    assert!(generations.complete_status_set(status_update));
+    assert!(generations.complete_users_assign(assignee_update));
+}
+
+#[test]
+fn syncing_ticket_rows_show_a_jira_sync_indicator() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let syncing = Rc::new(RefCell::new(HashSet::from(["FIN-8".to_owned()])));
+    let mut tree =
+        backlog_tree_with_issue_types(&snapshot(), sender, Default::default(), syncing, Vec::new());
+    let area = Rect::new(0, 0, 100, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    assert!(
+        rendered_lines(&terminal, area)
+            .concat()
+            .contains("Syncing with Jira")
+    );
+}
+
+#[test]
+fn assignee_updates_remain_available_for_other_tickets_while_one_syncs() {
+    tuicore::init();
+    let (sender, receiver) = mpsc::channel();
+    let syncing = Rc::new(RefCell::new(HashSet::from(["FIN-7".to_owned()])));
+    let mut tree = backlog_tree_with_issue_types(
+        &snapshot(),
+        sender,
+        Default::default(),
+        Rc::clone(&syncing),
+        Vec::new(),
+    );
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    tree.dispatch_focus(
+        &data_focus_target(),
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+
+    tree.highlight("ticket:FIN-8");
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('a'))),
+        &mut ctx,
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(super::components::BacklogSectionEvent::OpenAssignMenu { keys, .. }) if keys == ["FIN-8"]
+    ));
+
+    *syncing.borrow_mut() = HashSet::from(["FIN-8".to_owned()]);
+    tree.refresh_syncing_tickets();
+    tree.highlight("ticket:FIN-8");
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('a'))),
+        &mut ctx,
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(super::components::BacklogSectionEvent::TicketsSyncing { keys }) if keys == ["FIN-8"]
+    ));
 }
 
 #[test]

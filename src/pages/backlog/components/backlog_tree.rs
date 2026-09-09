@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::Rc,
     sync::mpsc::Sender,
     time::Duration,
@@ -23,6 +23,7 @@ use tuicore::{
 
 use crate::{
     components::{
+        avatar::initials,
         ticket_number_jump::{TicketNumberJump, exact_ticket_number_matches},
         work_item_rows::{
             TicketRowDetails, WorkItemKind, WorkItemRow, ticket_summary_text,
@@ -60,6 +61,7 @@ struct BacklogWorkItem {
     subtask_progress: Option<SubtaskProgress>,
     fix_versions: Vec<String>,
     epic_name: Option<String>,
+    syncing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +69,7 @@ pub(in crate::pages::backlog) enum BacklogSectionEvent {
     Refresh,
     EstimatedChanged(bool),
     IssueTypesChanged(Vec<String>),
+    UsersChanged(Vec<String>),
     OpenVelocity,
     OpenReports,
     OpenTimeline,
@@ -74,6 +77,9 @@ pub(in crate::pages::backlog) enum BacklogSectionEvent {
     OpenReleases,
     WebMenuClosed,
     MoveLocked,
+    TicketsSyncing {
+        keys: Vec<String>,
+    },
     OpenTicket {
         key: String,
     },
@@ -90,6 +96,19 @@ pub(in crate::pages::backlog) enum BacklogSectionEvent {
         section_id: String,
         keys: Vec<String>,
         source_order: Vec<String>,
+    },
+    OpenStatusMenu {
+        section_id: String,
+        keys: Vec<String>,
+        source_order: Vec<String>,
+    },
+    OpenAssignMenu {
+        section_id: String,
+        keys: Vec<String>,
+        source_order: Vec<String>,
+    },
+    ToggleCurrentUser {
+        keys: Vec<String>,
     },
     Moved {
         section_id: String,
@@ -116,20 +135,27 @@ pub(in crate::pages::backlog) fn backlog_tree(
     events: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
 ) -> BacklogTree {
-    backlog_tree_with_issue_types(snapshot, events, move_locked, Vec::new())
+    backlog_tree_with_issue_types(
+        snapshot,
+        events,
+        move_locked,
+        Rc::new(RefCell::new(HashSet::new())),
+        Vec::new(),
+    )
 }
 
 pub(in crate::pages::backlog) fn backlog_tree_with_issue_types(
     snapshot: &BacklogSnapshot,
     events: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
+    syncing_ticket_keys: Rc<RefCell<HashSet<String>>>,
     issue_types: Vec<JiraOption>,
 ) -> BacklogTree {
     let number_jump = Rc::new(RefCell::new(TicketNumberJump::default()));
     let filters = BacklogFilters::default();
     let issue_types = selectable_issue_types(issue_types);
     let mut control = ListControl::new(
-        backlog_rows(snapshot, &filters),
+        backlog_rows(snapshot, &filters, &syncing_ticket_keys.borrow()),
         |row: &BacklogRow| row.id.clone(),
         |_, _| unreachable!("backlog does not add rows"),
     )
@@ -190,6 +216,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types(
     let velocity_events = events.clone();
     let estimated_events = events.clone();
     let issue_type_events = events.clone();
+    let user_events = events.clone();
     let issue_type_labels = Rc::new(RefCell::new(issue_type_labels(&issue_types)));
     let selected_issue_type_labels = Rc::clone(&issue_type_labels);
     BacklogTree {
@@ -215,14 +242,33 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types(
         .label_position(DropdownLabelPosition::Inline)
         .alt_style(true)
         .variant(DropdownVariant::Filled)
-        .placeholder(" Type")
+        .placeholder("Type")
+        .field_padding_left(1)
         .hotkey("shift+t")
+        .max_popup_width(24)
         .on_select(move |selected| {
             let issue_types = selected
                 .into_iter()
                 .filter_map(|id| selected_issue_type_labels.borrow().get(&id).cloned())
                 .collect();
             let _ = issue_type_events.send(BacklogSectionEvent::IssueTypesChanged(issue_types));
+        }),
+        users: Dropdown::multi(
+            selectable_users(snapshot),
+            |user: &String| user.clone(),
+            |user| user.clone(),
+        )
+        .label_position(DropdownLabelPosition::Inline)
+        .alt_style(true)
+        .variant(DropdownVariant::Filled)
+        .placeholder("User")
+        .field_padding_left(1)
+        .selected_label_by(initials)
+        .show_multi_labels(true)
+        .hotkey("shift+u")
+        .max_popup_width(24)
+        .on_select(move |selected| {
+            let _ = user_events.send(BacklogSectionEvent::UsersChanged(selected));
         }),
         web: MenuButton::new(
             "Web",
@@ -233,16 +279,19 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types(
                 MenuItem::new(WebMenuItem::Reports, "Reports"),
             ],
         )
+        .min_popup_width(12)
         .hotkey("shift+w"),
         loading: false,
         refresh_area: ratatui::layout::Rect::default(),
         velocity_area: ratatui::layout::Rect::default(),
         estimated_area: ratatui::layout::Rect::default(),
         issue_types_area: ratatui::layout::Rect::default(),
+        users_area: ratatui::layout::Rect::default(),
         web_area: ratatui::layout::Rect::default(),
         control_area: ratatui::layout::Rect::default(),
         events,
         move_locked,
+        syncing_ticket_keys,
         runway_markers_visible,
         filters,
         issue_type_labels,
@@ -257,16 +306,19 @@ pub(in crate::pages::backlog) struct BacklogTree {
     velocity: Button<()>,
     estimated: Toggle<()>,
     issue_types: Dropdown<JiraOption, String>,
+    users: Dropdown<String, String>,
     web: MenuButton<WebMenuItem>,
     loading: bool,
     refresh_area: ratatui::layout::Rect,
     velocity_area: ratatui::layout::Rect,
     estimated_area: ratatui::layout::Rect,
     issue_types_area: ratatui::layout::Rect,
+    users_area: ratatui::layout::Rect,
     web_area: ratatui::layout::Rect,
     control_area: ratatui::layout::Rect,
     events: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
+    syncing_ticket_keys: Rc<RefCell<HashSet<String>>>,
     runway_markers_visible: Rc<Cell<bool>>,
     filters: BacklogFilters,
     issue_type_labels: Rc<RefCell<HashMap<String, String>>>,
@@ -277,6 +329,7 @@ pub(in crate::pages::backlog) struct BacklogTree {
 impl BacklogTree {
     pub(in crate::pages::backlog) fn set_snapshot(&mut self, snapshot: &BacklogSnapshot) {
         self.snapshot = snapshot.clone();
+        self.users.set_rows(selectable_users(snapshot));
         let highlighted = self.control.data_view().highlighted_id();
         let expanded = self.control.data_view().tree_expansion_snapshot();
         let highlighted_parent = highlighted.as_ref().and_then(|id| {
@@ -286,7 +339,11 @@ impl BacklogTree {
                 .find(|row| &row.id == id)
                 .and_then(|row| row.parent_id.clone())
         });
-        self.control.set_rows(backlog_rows(snapshot, &self.filters));
+        self.control.set_rows(backlog_rows(
+            snapshot,
+            &self.filters,
+            &self.syncing_ticket_keys.borrow(),
+        ));
         self.sync_search_results();
         let expanded = expanded
             .into_iter()
@@ -331,6 +388,13 @@ impl BacklogTree {
         self.set_snapshot(&snapshot);
     }
 
+    pub(in crate::pages::backlog) fn set_users_filter(&mut self, users: Vec<String>) {
+        self.filters.users = users;
+        self.runway_markers_visible.set(self.show_runway_bands());
+        let snapshot = self.snapshot.clone();
+        self.set_snapshot(&snapshot);
+    }
+
     pub(in crate::pages::backlog) fn set_issue_types(&mut self, issue_types: Vec<JiraOption>) {
         let issue_types = selectable_issue_types(issue_types);
         *self.issue_type_labels.borrow_mut() = issue_type_labels(&issue_types);
@@ -343,6 +407,12 @@ impl BacklogTree {
         self.velocity.set_disabled(loading);
         self.estimated.set_disabled(loading);
         self.issue_types.set_disabled(loading);
+        self.users.set_disabled(loading);
+    }
+
+    pub(in crate::pages::backlog) fn refresh_syncing_tickets(&mut self) {
+        let snapshot = self.snapshot.clone();
+        self.set_snapshot(&snapshot);
     }
 
     pub(in crate::pages::backlog) fn highlight(&mut self, row_id: &str) {
@@ -427,6 +497,11 @@ impl BacklogTree {
         Some((section, keys, order))
     }
 
+    fn tickets_are_syncing(&self, keys: &[String]) -> bool {
+        let syncing = self.syncing_ticket_keys.borrow();
+        keys.iter().any(|key| syncing.contains(key))
+    }
+
     fn issue_keys_in_section(&self, section: &str) -> Vec<String> {
         let parent = section_row_id(section);
         self.control
@@ -468,18 +543,78 @@ impl BacklogTree {
     }
 
     fn open_quick_menu(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
-        if !matches!(event, TuiEvent::Key(key) if KeySpec::plain('.').matches(*key)) {
+        self.open_item_menu(
+            event,
+            '.',
+            true,
+            |section_id, keys, source_order| BacklogSectionEvent::OpenQuickMenu {
+                section_id,
+                keys,
+                source_order,
+            },
+            ctx,
+        )
+    }
+
+    fn open_status_menu(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        self.open_item_menu(
+            event,
+            's',
+            false,
+            |section_id, keys, source_order| BacklogSectionEvent::OpenStatusMenu {
+                section_id,
+                keys,
+                source_order,
+            },
+            ctx,
+        )
+    }
+
+    fn open_assign_menu(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        self.open_item_menu(
+            event,
+            'a',
+            false,
+            |section_id, keys, source_order| BacklogSectionEvent::OpenAssignMenu {
+                section_id,
+                keys,
+                source_order,
+            },
+            ctx,
+        )
+    }
+
+    fn toggle_current_user(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        self.open_item_menu(
+            event,
+            'i',
+            false,
+            |_, keys, _| BacklogSectionEvent::ToggleCurrentUser { keys },
+            ctx,
+        )
+    }
+
+    fn open_item_menu(
+        &self,
+        event: &TuiEvent,
+        key: char,
+        requires_move_unlocked: bool,
+        event_for_selection: impl FnOnce(String, Vec<String>, Vec<String>) -> BacklogSectionEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> bool {
+        if !matches!(event, TuiEvent::Key(pressed) if KeySpec::plain(key).matches(*pressed)) {
             return false;
         }
-        if self.move_locked.get() {
+        if requires_move_unlocked && self.move_locked.get() {
             let _ = self.events.send(BacklogSectionEvent::MoveLocked);
         } else if !self.control.is_reordering() {
             if let Some((section_id, keys, source_order)) = self.selected_issue_keys() {
-                let _ = self.events.send(BacklogSectionEvent::OpenQuickMenu {
-                    section_id,
-                    keys,
-                    source_order,
-                });
+                let event = if self.tickets_are_syncing(&keys) {
+                    BacklogSectionEvent::TicketsSyncing { keys }
+                } else {
+                    event_for_selection(section_id, keys, source_order)
+                };
+                let _ = self.events.send(event);
             }
         }
         ctx.stop_propagation();
@@ -744,10 +879,27 @@ impl BacklogTree {
         if self.open_quick_menu(event, ctx) {
             return EventOutcome::Handled;
         }
-        if (self.move_locked.get() && self.blocks_locked_gesture(event))
+        if self.open_status_menu(event, ctx) {
+            return EventOutcome::Handled;
+        }
+        if self.open_assign_menu(event, ctx) {
+            return EventOutcome::Handled;
+        }
+        if self.toggle_current_user(event, ctx) {
+            return EventOutcome::Handled;
+        }
+        let selected_syncing = self
+            .selected_issue_keys()
+            .is_some_and(|(_, keys, _)| self.tickets_are_syncing(&keys));
+        if ((self.move_locked.get() || selected_syncing) && self.blocks_locked_gesture(event))
             || ((self.highlighted_section() || self.highlighted_subtask())
                 && self.blocks_section_gesture(event))
         {
+            if selected_syncing && let Some((_, keys, _)) = self.selected_issue_keys() {
+                let _ = self
+                    .events
+                    .send(BacklogSectionEvent::TicketsSyncing { keys });
+            }
             ctx.stop_propagation();
             return EventOutcome::Handled;
         }
@@ -893,18 +1045,33 @@ impl TuiNode for BacklogTree {
         .preferred
         .width
         .min(area.width.saturating_sub(estimated_width));
+        let users_width = <Dropdown<String, String> as TuiNode<()>>::measure(
+            &self.users,
+            LayoutProposal::at_most(area.width, header_height),
+        )
+        .preferred
+        .width
+        .min(
+            area.width
+                .saturating_sub(estimated_width)
+                .saturating_sub(issue_types_width)
+                .saturating_sub(u16::from(issue_types_width > 0)),
+        );
         let refresh_width = button_width(&self.refresh).min(
             area.width
                 .saturating_sub(estimated_width)
                 .saturating_sub(issue_types_width)
+                .saturating_sub(users_width)
                 .saturating_sub(u16::from(estimated_width > 0))
-                .saturating_sub(u16::from(issue_types_width > 0)),
+                .saturating_sub(u16::from(issue_types_width > 0))
+                .saturating_sub(u16::from(users_width > 0)),
         );
         let velocity_width = button_width(&self.velocity).min(
             area.width
                 .saturating_sub(refresh_width)
                 .saturating_sub(estimated_width)
                 .saturating_sub(issue_types_width)
+                .saturating_sub(users_width)
                 .saturating_sub(u16::from(refresh_width > 0)),
         );
         let web_width = self
@@ -918,9 +1085,12 @@ impl TuiNode for BacklogTree {
                     .saturating_sub(velocity_width)
                     .saturating_sub(estimated_width)
                     .saturating_sub(issue_types_width)
+                    .saturating_sub(users_width)
                     .saturating_sub(u16::from(refresh_width > 0))
                     .saturating_sub(u16::from(velocity_width > 0))
-                    .saturating_sub(u16::from(estimated_width > 0)),
+                    .saturating_sub(u16::from(estimated_width > 0))
+                    .saturating_sub(u16::from(issue_types_width > 0))
+                    .saturating_sub(u16::from(users_width > 0)),
             );
         self.web_area = ratatui::layout::Rect::new(area.x, area.y, web_width, header_height);
         self.estimated_area = ratatui::layout::Rect::new(
@@ -939,8 +1109,17 @@ impl TuiNode for BacklogTree {
             issue_types_width,
             header_height,
         );
-        self.refresh_area = ratatui::layout::Rect::new(
+        self.users_area = ratatui::layout::Rect::new(
             self.issue_types_area
+                .x
+                .saturating_sub(users_width)
+                .saturating_sub(u16::from(users_width > 0)),
+            area.y,
+            users_width,
+            header_height,
+        );
+        self.refresh_area = ratatui::layout::Rect::new(
+            self.users_area
                 .x
                 .saturating_sub(refresh_width)
                 .saturating_sub(u16::from(refresh_width > 0)),
@@ -990,6 +1169,9 @@ impl TuiNode for BacklogTree {
                 ctx,
             )
         });
+        ctx.push_slot(ChildKey::new("users"), self.users_area, |ctx| {
+            <Dropdown<String, String> as TuiNode<()>>::layout(&mut self.users, self.users_area, ctx)
+        });
         ctx.push_slot(ChildKey::new("web"), self.web_area, |ctx| {
             self.web.layout(self.web_area, ctx)
         });
@@ -1005,6 +1187,7 @@ impl TuiNode for BacklogTree {
         self.velocity.render(frame, self.velocity_area);
         self.estimated.render(frame, self.estimated_area);
         self.issue_types.render(frame, self.issue_types_area, ctx);
+        self.users.render(frame, self.users_area, ctx);
         self.web.render(frame, self.web_area, ctx);
         self.control.render(frame, self.control_area, ctx);
     }
@@ -1015,6 +1198,7 @@ impl TuiNode for BacklogTree {
                 || self.velocity.event(event, ctx) == EventOutcome::Handled
                 || self.estimated.event(event, ctx) == EventOutcome::Handled
                 || self.issue_types.event(event, ctx) == EventOutcome::Handled
+                || self.users.event(event, ctx) == EventOutcome::Handled
                 || self.web.event(event, ctx) == EventOutcome::Handled)
         {
             self.drain_web_menu(web_was_open);
@@ -1061,6 +1245,15 @@ impl TuiNode for BacklogTree {
             let outcome =
                 self.issue_types
                     .dispatch_event(&EventRoute::new(issue_types_path), event, ctx);
+            return self
+                .refocus_data_view_after_unfocus(event, ctx)
+                .then_some(EventOutcome::Handled)
+                .unwrap_or(outcome);
+        }
+        if let Some(users_path) = route.path.without_first_if(&ChildKey::new("users")) {
+            let outcome = self
+                .users
+                .dispatch_event(&EventRoute::new(users_path), event, ctx);
             return self
                 .refocus_data_view_after_unfocus(event, ctx)
                 .then_some(EventOutcome::Handled)
@@ -1124,6 +1317,11 @@ impl TuiNode for BacklogTree {
                 dt,
                 settings,
             ))
+            .merge(<Dropdown<String, String> as TuiNode<()>>::tick(
+                &mut self.users,
+                dt,
+                settings,
+            ))
             .merge(self.web.tick(dt, settings))
             .merge(number_jump)
     }
@@ -1149,6 +1347,10 @@ impl TuiNode for BacklogTree {
                 .dispatch_focus(&issue_types_target, focused, ctx);
             return;
         }
+        if let Some(users_target) = target.for_child(&ChildKey::new("users")) {
+            self.users.dispatch_focus(&users_target, focused, ctx);
+            return;
+        }
         if let Some(web_target) = target.for_child(&ChildKey::new("web")) {
             self.web.dispatch_focus(&web_target, focused, ctx);
             return;
@@ -1159,27 +1361,32 @@ impl TuiNode for BacklogTree {
         self.control.init(ctx);
         self.estimated.init(ctx);
         self.issue_types.init(ctx);
+        self.users.init(ctx);
     }
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.control.mount(ctx);
         self.estimated.mount(ctx);
         self.issue_types.mount(ctx);
+        self.users.mount(ctx);
     }
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.control.unmount(ctx);
         self.estimated.unmount(ctx);
         self.issue_types.unmount(ctx);
+        self.users.unmount(ctx);
     }
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.control.destroy(ctx);
         self.estimated.destroy(ctx);
         self.issue_types.destroy(ctx);
+        self.users.destroy(ctx);
     }
 }
 
 struct BacklogFilters {
     estimated: bool,
     issue_types: Vec<String>,
+    users: Vec<String>,
 }
 
 impl Default for BacklogFilters {
@@ -1187,13 +1394,14 @@ impl Default for BacklogFilters {
         Self {
             estimated: true,
             issue_types: Vec::new(),
+            users: Vec::new(),
         }
     }
 }
 
 impl BacklogFilters {
     fn is_active(&self) -> bool {
-        !self.estimated || !self.issue_types.is_empty()
+        !self.estimated || !self.issue_types.is_empty() || !self.users.is_empty()
     }
 }
 
@@ -1218,7 +1426,26 @@ fn issue_type_labels(issue_types: &[JiraOption]) -> HashMap<String, String> {
         .collect()
 }
 
-fn backlog_rows(snapshot: &BacklogSnapshot, filters: &BacklogFilters) -> Vec<BacklogRow> {
+fn selectable_users(snapshot: &BacklogSnapshot) -> Vec<String> {
+    let mut users = snapshot
+        .sprints
+        .iter()
+        .flat_map(|sprint| &sprint.work_items)
+        .chain(&snapshot.work_items)
+        .map(|item| item.assignee.trim())
+        .filter(|user| !user.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    users.sort_unstable_by_key(|user| user.to_ascii_lowercase());
+    users.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    users
+}
+
+fn backlog_rows(
+    snapshot: &BacklogSnapshot,
+    filters: &BacklogFilters,
+    syncing_ticket_keys: &HashSet<String>,
+) -> Vec<BacklogRow> {
     let mut rows = Vec::new();
     for sprint in &snapshot.sprints {
         let section = format!("sprint-{}", sprint.id);
@@ -1244,6 +1471,7 @@ fn backlog_rows(snapshot: &BacklogSnapshot, filters: &BacklogFilters) -> Vec<Bac
                     )
                 }),
                 index % 2 == 0,
+                syncing_ticket_keys.contains(&item.key),
             )
         }));
     }
@@ -1267,6 +1495,7 @@ fn backlog_rows(snapshot: &BacklogSnapshot, filters: &BacklogFilters) -> Vec<Bac
                 .cloned(),
             None,
             index % 2 == 0,
+            syncing_ticket_keys.contains(&item.key),
         )
     }));
     rows
@@ -1317,6 +1546,11 @@ fn matches_filters(item: &WorkItem, filters: &BacklogFilters) -> bool {
                 .issue_types
                 .iter()
                 .any(|issue_type| item.kind.eq_ignore_ascii_case(issue_type)))
+        && (filters.users.is_empty()
+            || filters
+                .users
+                .iter()
+                .any(|user| item.assignee.eq_ignore_ascii_case(user)))
 }
 
 fn initially_expanded_rows(snapshot: &BacklogSnapshot) -> Vec<String> {
@@ -1451,6 +1685,7 @@ fn work_item_row(
     runway: Option<RunwayTicket>,
     assumed_ticket_size: Option<(f64, bool)>,
     alternate_background: bool,
+    syncing: bool,
 ) -> BacklogRow {
     let assumed_ticket_size = matches!(
         work_item_kind(&item.kind),
@@ -1501,6 +1736,7 @@ fn work_item_row(
             subtask_progress: item.subtask_progress.clone(),
             fix_versions: item.fix_versions.clone(),
             epic_name: item.epic_name.clone(),
+            syncing,
         }),
     }
 }
@@ -1568,7 +1804,7 @@ fn backlog_work_item_text(row: &BacklogWorkItem, number_query: Option<&str>) -> 
                 .map(|progress| (progress.completed, progress.total)),
             fix_versions: &row.fix_versions,
             epic_name: row.epic_name.as_deref(),
-            annotation: None,
+            annotation: row.syncing.then_some("Syncing with Jira"),
         },
     )
 }

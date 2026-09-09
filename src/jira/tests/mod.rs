@@ -11,10 +11,10 @@ use serde_json::json;
 use super::{
     AgileBoard, AgileIssuePage, BACKLOG_FIELDS, BACKLOG_JQL, COMPOSER_FIELDS, ISSUE_FIELDS,
     JiraIssue, JiraSprint, MAX_VELOCITY_GOAL_LOOKUPS, SubmitBatchOutcome, ambiguous_create_failure,
-    apply_attachment_changes, apply_web_link_changes, backlog_page_complete, board_backlog,
-    board_backlog_query, board_sprints, commit_order, common_status_transitions, composer_fields,
-    create_available_statuses_from_value, create_issue_fields, create_issue_type,
-    create_issue_types_from_value, create_response_failure, created_issue_failure,
+    apply_attachment_changes, apply_web_link_changes, assign_users, backlog_page_complete,
+    board_backlog, board_backlog_query, board_sprints, commit_order, common_status_transitions,
+    composer_fields, create_available_statuses_from_value, create_issue_fields, create_issue_type,
+    create_issue_types_from_value, create_response_failure, created_issue_failure, current_user,
     discover_story_points, fetch_composer_issues, fix_versions, hydrate_sprint_subtasks,
     is_ticket_number_query, issue_fields, issue_key_jql, labels, move_payload, options_from_values,
     rank_payload, same_jira_content, search_composer_issues, search_jql, select_backlog_board,
@@ -615,6 +615,52 @@ fn setting_status_posts_each_ticket_transition_id() {
     assert!(requests[0].contains(r#"{"transition":{"id":"31"}}"#));
     assert!(requests[1].starts_with("POST /rest/api/3/issue/FIN-2/transitions "));
     assert!(requests[1].contains(r#"{"transition":{"id":"42"}}"#));
+}
+
+#[test]
+fn assigning_users_updates_each_ticket_and_can_unassign() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = request_server(listener, vec![String::new(), String::new()]);
+
+    assign_users(
+        &jira_settings(base_url),
+        &["FIN-1".into(), "FIN-2".into()],
+        Some("ada-1"),
+    )
+    .unwrap();
+    let requests = server.join().unwrap();
+
+    assert!(requests[0].starts_with("PUT /rest/api/3/issue/FIN-1/assignee "));
+    assert!(requests[0].contains(r#"{"accountId":"ada-1"}"#));
+    assert!(requests[1].starts_with("PUT /rest/api/3/issue/FIN-2/assignee "));
+    assert!(requests[1].contains(r#"{"accountId":"ada-1"}"#));
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = one_request_server(listener, String::new());
+    assign_users(&jira_settings(base_url), &["FIN-1".into()], None).unwrap();
+    let (request, extra_request) = server.join().unwrap();
+    assert!(!extra_request);
+    assert!(request.contains(r#"{"accountId":null}"#));
+}
+
+#[test]
+fn current_user_returns_the_authenticated_jira_user() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = one_request_server(
+        listener,
+        r#"{"accountId":"marlo","displayName":"Marlo Vlietstra"}"#.into(),
+    );
+
+    let user = current_user(&jira_settings(base_url)).unwrap();
+    let (request, extra_request) = server.join().unwrap();
+
+    assert_eq!(user.account_id, "marlo");
+    assert_eq!(user.display_name, "Marlo Vlietstra");
+    assert!(!extra_request);
+    assert!(request.starts_with("GET /rest/api/3/myself "));
 }
 
 #[test]
