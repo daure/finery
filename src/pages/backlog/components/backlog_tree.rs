@@ -17,11 +17,11 @@ use tuicore::{
     DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusRequest,
     FocusTarget, HotkeyEvent, Key, KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult,
     LayoutSizeHint, LifecycleCtx, ListControl, ListControlEvent, ListControlKeyBindings,
-    MenuButton, MenuItem, RenderCtx, SearchMode, TickResult, TreeAdapter, TuiEvent, TuiNode,
+    MenuButton, MenuItem, RenderCtx, SearchMode, TickResult, Toggle, TreeAdapter, TuiEvent,
+    TuiNode,
 };
 
 use crate::{
-    app_settings::{BacklogFilter, BacklogFilterSettings},
     components::{
         ticket_number_jump::{TicketNumberJump, exact_ticket_number_matches},
         work_item_rows::{
@@ -29,6 +29,7 @@ use crate::{
             work_item_title_prefix_width,
         },
     },
+    jira::JiraOption,
     store::work_items::{
         BacklogSnapshot, RunwayCapacitySource, RunwayTicket, Sprint, SprintCapacityState,
         SubtaskProgress, WorkItem,
@@ -64,8 +65,8 @@ struct BacklogWorkItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::pages::backlog) enum BacklogSectionEvent {
     Refresh,
-    FiltersChanged(Vec<BacklogFilter>),
-    FiltersSubmitted,
+    EstimatedChanged(bool),
+    IssueTypesChanged(Vec<String>),
     OpenVelocity,
     OpenReports,
     OpenTimeline,
@@ -115,21 +116,18 @@ pub(in crate::pages::backlog) fn backlog_tree(
     events: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
 ) -> BacklogTree {
-    backlog_tree_with_filters(
-        snapshot,
-        events,
-        move_locked,
-        BacklogFilterSettings::default(),
-    )
+    backlog_tree_with_issue_types(snapshot, events, move_locked, Vec::new())
 }
 
-pub(in crate::pages::backlog) fn backlog_tree_with_filters(
+pub(in crate::pages::backlog) fn backlog_tree_with_issue_types(
     snapshot: &BacklogSnapshot,
     events: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
-    filters: BacklogFilterSettings,
+    issue_types: Vec<JiraOption>,
 ) -> BacklogTree {
     let number_jump = Rc::new(RefCell::new(TicketNumberJump::default()));
+    let filters = BacklogFilters::default();
+    let issue_types = selectable_issue_types(issue_types);
     let mut control = ListControl::new(
         backlog_rows(snapshot, &filters),
         |row: &BacklogRow| row.id.clone(),
@@ -190,29 +188,41 @@ pub(in crate::pages::backlog) fn backlog_tree_with_filters(
         });
     let refresh_events = events.clone();
     let velocity_events = events.clone();
-    let filter_events = events.clone();
+    let estimated_events = events.clone();
+    let issue_type_events = events.clone();
+    let issue_type_labels = Rc::new(RefCell::new(issue_type_labels(&issue_types)));
+    let selected_issue_type_labels = Rc::clone(&issue_type_labels);
     BacklogTree {
         control,
-        refresh: Button::new("Refresh").hotkey("shift+r").on_press(move || {
+        refresh: Button::new("󰑓").hotkey("shift+r").on_press(move || {
             let _ = refresh_events.send(BacklogSectionEvent::Refresh);
         }),
-        velocity: Button::new("Velocity").hotkey("shift+v").on_press(move || {
+        velocity: Button::new("󰓅").hotkey("shift+v").on_press(move || {
             let _ = velocity_events.send(BacklogSectionEvent::OpenVelocity);
         }),
-        filters: Dropdown::multi(
-            BacklogFilter::ALL,
-            |filter| *filter,
-            |filter| filter.label().into(),
+        estimated: Toggle::new("󰑭")
+            .checked(true)
+            .hotkey("shift+e")
+            .preserve_focus_on_hotkey(true)
+            .on_change(move |estimated| {
+                let _ = estimated_events.send(BacklogSectionEvent::EstimatedChanged(estimated));
+            }),
+        issue_types: Dropdown::multi(
+            issue_types,
+            |issue_type: &JiraOption| issue_type.id.clone(),
+            |issue_type| issue_type.label.clone(),
         )
-        .label("Filter")
         .label_position(DropdownLabelPosition::Inline)
         .alt_style(true)
         .variant(DropdownVariant::Filled)
-        .placeholder("None")
-        .hotkey("shift+f")
-        .selected(filters.selected().iter().copied())
+        .placeholder(" Type")
+        .hotkey("shift+t")
         .on_select(move |selected| {
-            let _ = filter_events.send(BacklogSectionEvent::FiltersChanged(selected));
+            let issue_types = selected
+                .into_iter()
+                .filter_map(|id| selected_issue_type_labels.borrow().get(&id).cloned())
+                .collect();
+            let _ = issue_type_events.send(BacklogSectionEvent::IssueTypesChanged(issue_types));
         }),
         web: MenuButton::new(
             "Web",
@@ -227,13 +237,15 @@ pub(in crate::pages::backlog) fn backlog_tree_with_filters(
         loading: false,
         refresh_area: ratatui::layout::Rect::default(),
         velocity_area: ratatui::layout::Rect::default(),
-        filters_area: ratatui::layout::Rect::default(),
+        estimated_area: ratatui::layout::Rect::default(),
+        issue_types_area: ratatui::layout::Rect::default(),
         web_area: ratatui::layout::Rect::default(),
         control_area: ratatui::layout::Rect::default(),
         events,
         move_locked,
         runway_markers_visible,
-        filter_settings: filters,
+        filters,
+        issue_type_labels,
         snapshot: snapshot.clone(),
         number_jump,
     }
@@ -243,18 +255,21 @@ pub(in crate::pages::backlog) struct BacklogTree {
     control: ListControl<BacklogRow, String>,
     refresh: Button<()>,
     velocity: Button<()>,
-    filters: Dropdown<BacklogFilter, BacklogFilter>,
+    estimated: Toggle<()>,
+    issue_types: Dropdown<JiraOption, String>,
     web: MenuButton<WebMenuItem>,
     loading: bool,
     refresh_area: ratatui::layout::Rect,
     velocity_area: ratatui::layout::Rect,
-    filters_area: ratatui::layout::Rect,
+    estimated_area: ratatui::layout::Rect,
+    issue_types_area: ratatui::layout::Rect,
     web_area: ratatui::layout::Rect,
     control_area: ratatui::layout::Rect,
     events: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
     runway_markers_visible: Rc<Cell<bool>>,
-    filter_settings: BacklogFilterSettings,
+    filters: BacklogFilters,
+    issue_type_labels: Rc<RefCell<HashMap<String, String>>>,
     snapshot: BacklogSnapshot,
     number_jump: Rc<RefCell<TicketNumberJump>>,
 }
@@ -271,8 +286,7 @@ impl BacklogTree {
                 .find(|row| &row.id == id)
                 .and_then(|row| row.parent_id.clone())
         });
-        self.control
-            .set_rows(backlog_rows(snapshot, &self.filter_settings));
+        self.control.set_rows(backlog_rows(snapshot, &self.filters));
         self.sync_search_results();
         let expanded = expanded
             .into_iter()
@@ -302,20 +316,33 @@ impl BacklogTree {
         }
     }
 
-    pub(in crate::pages::backlog) fn set_filters(&mut self, filters: BacklogFilterSettings) {
-        self.filter_settings = filters;
-        self.filters
-            .set_selected(self.filter_settings.selected().iter().copied());
+    pub(in crate::pages::backlog) fn set_estimated(&mut self, estimated: bool) {
+        self.filters.estimated = estimated;
+        self.estimated.set_value(estimated);
         self.runway_markers_visible.set(self.show_runway_bands());
         let snapshot = self.snapshot.clone();
         self.set_snapshot(&snapshot);
+    }
+
+    pub(in crate::pages::backlog) fn set_issue_types_filter(&mut self, issue_types: Vec<String>) {
+        self.filters.issue_types = issue_types;
+        self.runway_markers_visible.set(self.show_runway_bands());
+        let snapshot = self.snapshot.clone();
+        self.set_snapshot(&snapshot);
+    }
+
+    pub(in crate::pages::backlog) fn set_issue_types(&mut self, issue_types: Vec<JiraOption>) {
+        let issue_types = selectable_issue_types(issue_types);
+        *self.issue_type_labels.borrow_mut() = issue_type_labels(&issue_types);
+        self.issue_types.set_rows(issue_types);
     }
 
     pub(in crate::pages::backlog) fn set_loading(&mut self, loading: bool) {
         self.loading = loading;
         self.refresh.set_disabled(loading);
         self.velocity.set_disabled(loading);
-        self.filters.set_disabled(loading);
+        self.estimated.set_disabled(loading);
+        self.issue_types.set_disabled(loading);
     }
 
     pub(in crate::pages::backlog) fn highlight(&mut self, row_id: &str) {
@@ -726,7 +753,7 @@ impl BacklogTree {
     }
 
     fn show_runway_bands(&self) -> bool {
-        !self.filter_settings.is_active()
+        !self.filters.is_active()
             && self
                 .control
                 .data_view()
@@ -809,12 +836,6 @@ impl BacklogTree {
         }
     }
 
-    fn drain_filter_close(&self, was_open: bool) {
-        if was_open && !self.filters.is_open() {
-            let _ = self.events.send(BacklogSectionEvent::FiltersSubmitted);
-        }
-    }
-
     fn refocus_data_view_after_unfocus(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
         let TuiEvent::Key(key) = event else {
             return false;
@@ -840,22 +861,32 @@ impl TuiNode for BacklogTree {
                 .preferred
                 .width
         };
-        let filters_width = <Dropdown<BacklogFilter, BacklogFilter> as TuiNode<()>>::measure(
-            &self.filters,
+        let estimated_width = <Toggle<()> as TuiNode<()>>::measure(
+            &self.estimated,
             LayoutProposal::at_most(area.width, header_height),
         )
         .preferred
         .width
         .min(area.width);
+        let issue_types_width = <Dropdown<JiraOption, String> as TuiNode<()>>::measure(
+            &self.issue_types,
+            LayoutProposal::at_most(area.width, header_height),
+        )
+        .preferred
+        .width
+        .min(area.width.saturating_sub(estimated_width));
         let refresh_width = button_width(&self.refresh).min(
             area.width
-                .saturating_sub(filters_width)
-                .saturating_sub(u16::from(filters_width > 0)),
+                .saturating_sub(estimated_width)
+                .saturating_sub(issue_types_width)
+                .saturating_sub(u16::from(estimated_width > 0))
+                .saturating_sub(u16::from(issue_types_width > 0)),
         );
         let velocity_width = button_width(&self.velocity).min(
             area.width
                 .saturating_sub(refresh_width)
-                .saturating_sub(filters_width)
+                .saturating_sub(estimated_width)
+                .saturating_sub(issue_types_width)
                 .saturating_sub(u16::from(refresh_width > 0)),
         );
         let web_width = self
@@ -867,20 +898,31 @@ impl TuiNode for BacklogTree {
                 area.width
                     .saturating_sub(refresh_width)
                     .saturating_sub(velocity_width)
-                    .saturating_sub(filters_width)
+                    .saturating_sub(estimated_width)
+                    .saturating_sub(issue_types_width)
                     .saturating_sub(u16::from(refresh_width > 0))
-                    .saturating_sub(u16::from(velocity_width > 0)),
+                    .saturating_sub(u16::from(velocity_width > 0))
+                    .saturating_sub(u16::from(estimated_width > 0)),
             );
         self.web_area = ratatui::layout::Rect::new(area.x, area.y, web_width, header_height);
-        self.filters_area = ratatui::layout::Rect::new(
+        self.estimated_area = ratatui::layout::Rect::new(
             area.x
-                .saturating_add(area.width.saturating_sub(filters_width)),
+                .saturating_add(area.width.saturating_sub(estimated_width)),
             area.y,
-            filters_width,
+            estimated_width,
+            header_height,
+        );
+        self.issue_types_area = ratatui::layout::Rect::new(
+            self.estimated_area
+                .x
+                .saturating_sub(issue_types_width)
+                .saturating_sub(u16::from(issue_types_width > 0)),
+            area.y,
+            issue_types_width,
             header_height,
         );
         self.refresh_area = ratatui::layout::Rect::new(
-            self.filters_area
+            self.issue_types_area
                 .x
                 .saturating_sub(refresh_width)
                 .saturating_sub(u16::from(refresh_width > 0)),
@@ -915,10 +957,13 @@ impl TuiNode for BacklogTree {
         ctx.push_slot(ChildKey::new("velocity"), self.velocity_area, |ctx| {
             self.velocity.layout(self.velocity_area, ctx)
         });
-        ctx.push_slot(ChildKey::new("filters"), self.filters_area, |ctx| {
-            <Dropdown<BacklogFilter, BacklogFilter> as TuiNode<()>>::layout(
-                &mut self.filters,
-                self.filters_area,
+        ctx.push_slot(ChildKey::new("estimated"), self.estimated_area, |ctx| {
+            <Toggle<()> as TuiNode<()>>::layout(&mut self.estimated, self.estimated_area, ctx)
+        });
+        ctx.push_slot(ChildKey::new("issue-types"), self.issue_types_area, |ctx| {
+            <Dropdown<JiraOption, String> as TuiNode<()>>::layout(
+                &mut self.issue_types,
+                self.issue_types_area,
                 ctx,
             )
         });
@@ -935,26 +980,25 @@ impl TuiNode for BacklogTree {
     ) {
         self.refresh.render(frame, self.refresh_area);
         self.velocity.render(frame, self.velocity_area);
-        self.filters.render(frame, self.filters_area, ctx);
+        self.estimated.render(frame, self.estimated_area);
+        self.issue_types.render(frame, self.issue_types_area, ctx);
         self.web.render(frame, self.web_area, ctx);
         self.control.render(frame, self.control_area, ctx);
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
         let web_was_open = self.web.is_open();
-        let filters_was_open = self.filters.is_open();
         if matches!(event, TuiEvent::Mouse(_))
             && (self.refresh.event(event, ctx) == EventOutcome::Handled
                 || self.velocity.event(event, ctx) == EventOutcome::Handled
-                || self.filters.event(event, ctx) == EventOutcome::Handled
+                || self.estimated.event(event, ctx) == EventOutcome::Handled
+                || self.issue_types.event(event, ctx) == EventOutcome::Handled
                 || self.web.event(event, ctx) == EventOutcome::Handled)
         {
             self.drain_web_menu(web_was_open);
-            self.drain_filter_close(filters_was_open);
             return EventOutcome::Handled;
         }
         let outcome = self.handle_event(event, ctx, |control, ctx| control.event(event, ctx));
         self.drain_web_menu(web_was_open);
-        self.drain_filter_close(filters_was_open);
         outcome
     }
     fn dispatch_event(
@@ -981,12 +1025,19 @@ impl TuiNode for BacklogTree {
                 .then_some(EventOutcome::Handled)
                 .unwrap_or(outcome);
         }
-        if let Some(filters_path) = route.path.without_first_if(&ChildKey::new("filters")) {
-            let filters_was_open = self.filters.is_open();
-            let outcome = self
-                .filters
-                .dispatch_event(&EventRoute::new(filters_path), event, ctx);
-            self.drain_filter_close(filters_was_open);
+        if let Some(estimated_path) = route.path.without_first_if(&ChildKey::new("estimated")) {
+            let outcome =
+                self.estimated
+                    .dispatch_event(&EventRoute::new(estimated_path), event, ctx);
+            return self
+                .refocus_data_view_after_unfocus(event, ctx)
+                .then_some(EventOutcome::Handled)
+                .unwrap_or(outcome);
+        }
+        if let Some(issue_types_path) = route.path.without_first_if(&ChildKey::new("issue-types")) {
+            let outcome =
+                self.issue_types
+                    .dispatch_event(&EventRoute::new(issue_types_path), event, ctx);
             return self
                 .refocus_data_view_after_unfocus(event, ctx)
                 .then_some(EventOutcome::Handled)
@@ -1040,13 +1091,16 @@ impl TuiNode for BacklogTree {
                 dt,
                 settings,
             ))
-            .merge(
-                <Dropdown<BacklogFilter, BacklogFilter> as TuiNode<()>>::tick(
-                    &mut self.filters,
-                    dt,
-                    settings,
-                ),
-            )
+            .merge(<Toggle<()> as TuiNode<()>>::tick(
+                &mut self.estimated,
+                dt,
+                settings,
+            ))
+            .merge(<Dropdown<JiraOption, String> as TuiNode<()>>::tick(
+                &mut self.issue_types,
+                dt,
+                settings,
+            ))
             .merge(self.web.tick(dt, settings))
             .merge(number_jump)
     }
@@ -1062,8 +1116,14 @@ impl TuiNode for BacklogTree {
             self.velocity.dispatch_focus(&velocity_target, focused, ctx);
             return;
         }
-        if let Some(filters_target) = target.for_child(&ChildKey::new("filters")) {
-            self.filters.dispatch_focus(&filters_target, focused, ctx);
+        if let Some(estimated_target) = target.for_child(&ChildKey::new("estimated")) {
+            self.estimated
+                .dispatch_focus(&estimated_target, focused, ctx);
+            return;
+        }
+        if let Some(issue_types_target) = target.for_child(&ChildKey::new("issue-types")) {
+            self.issue_types
+                .dispatch_focus(&issue_types_target, focused, ctx);
             return;
         }
         if let Some(web_target) = target.for_child(&ChildKey::new("web")) {
@@ -1074,23 +1134,68 @@ impl TuiNode for BacklogTree {
     }
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.control.init(ctx);
-        self.filters.init(ctx);
+        self.estimated.init(ctx);
+        self.issue_types.init(ctx);
     }
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.control.mount(ctx);
-        self.filters.mount(ctx);
+        self.estimated.mount(ctx);
+        self.issue_types.mount(ctx);
     }
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.control.unmount(ctx);
-        self.filters.unmount(ctx);
+        self.estimated.unmount(ctx);
+        self.issue_types.unmount(ctx);
     }
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.control.destroy(ctx);
-        self.filters.destroy(ctx);
+        self.estimated.destroy(ctx);
+        self.issue_types.destroy(ctx);
     }
 }
 
-fn backlog_rows(snapshot: &BacklogSnapshot, filters: &BacklogFilterSettings) -> Vec<BacklogRow> {
+struct BacklogFilters {
+    estimated: bool,
+    issue_types: Vec<String>,
+}
+
+impl Default for BacklogFilters {
+    fn default() -> Self {
+        Self {
+            estimated: true,
+            issue_types: Vec::new(),
+        }
+    }
+}
+
+impl BacklogFilters {
+    fn is_active(&self) -> bool {
+        !self.estimated || !self.issue_types.is_empty()
+    }
+}
+
+pub(in crate::pages::backlog) fn selectable_issue_types(
+    issue_types: Vec<JiraOption>,
+) -> Vec<JiraOption> {
+    issue_types
+        .into_iter()
+        .filter(|issue_type| {
+            !matches!(
+                issue_type.label.to_ascii_lowercase().as_str(),
+                "subtask" | "sub-task" | "epic"
+            )
+        })
+        .collect()
+}
+
+fn issue_type_labels(issue_types: &[JiraOption]) -> HashMap<String, String> {
+    issue_types
+        .iter()
+        .map(|issue_type| (issue_type.id.clone(), issue_type.label.clone()))
+        .collect()
+}
+
+fn backlog_rows(snapshot: &BacklogSnapshot, filters: &BacklogFilters) -> Vec<BacklogRow> {
     let mut rows = Vec::new();
     for sprint in &snapshot.sprints {
         let section = format!("sprint-{}", sprint.id);
@@ -1144,10 +1249,7 @@ fn backlog_rows(snapshot: &BacklogSnapshot, filters: &BacklogFilterSettings) -> 
     rows
 }
 
-fn visible_work_items<'a>(
-    items: &'a [WorkItem],
-    filters: &BacklogFilterSettings,
-) -> Vec<&'a WorkItem> {
+fn visible_work_items<'a>(items: &'a [WorkItem], filters: &BacklogFilters) -> Vec<&'a WorkItem> {
     let items_by_key = items
         .iter()
         .map(|item| (item.key.as_str(), item))
@@ -1169,7 +1271,7 @@ fn visible_work_items<'a>(
 fn ancestors_match_filters(
     item: &WorkItem,
     items_by_key: &std::collections::HashMap<&str, &WorkItem>,
-    filters: &BacklogFilterSettings,
+    filters: &BacklogFilters,
 ) -> bool {
     let mut ancestor = item;
     let mut seen = std::collections::HashSet::from([item.key.as_str()]);
@@ -1185,13 +1287,13 @@ fn ancestors_match_filters(
     true
 }
 
-fn matches_filters(item: &WorkItem, filters: &BacklogFilterSettings) -> bool {
-    filters.selected().iter().all(|filter| match filter {
-        BacklogFilter::Done => crate::store::work_items::is_done_status(&item.status),
-        BacklogFilter::Open => !crate::store::work_items::is_done_status(&item.status),
-        BacklogFilter::Pointed => !estimation_eligible(item) || item.story_points.is_some(),
-        BacklogFilter::Unpointed => estimation_eligible(item) && item.story_points.is_none(),
-    })
+fn matches_filters(item: &WorkItem, filters: &BacklogFilters) -> bool {
+    (filters.estimated || (estimation_eligible(item) && item.story_points.is_none()))
+        && (filters.issue_types.is_empty()
+            || filters
+                .issue_types
+                .iter()
+                .any(|issue_type| item.kind.eq_ignore_ascii_case(issue_type)))
 }
 
 fn initially_expanded_rows(snapshot: &BacklogSnapshot) -> Vec<String> {

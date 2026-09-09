@@ -1806,3 +1806,75 @@ fn backlog_loading_hides_epics_and_includes_embedded_subtasks() {
     assert_eq!(backlog.top_level_keys, ["FIN-EPIC", "FIN-1"]);
     assert!(request.contains("/rest/agile/1.0/board/42/backlog"));
 }
+
+#[test]
+fn backlog_totals_load_independently_of_on_demand_velocity_tickets() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut settings = jira_settings(format!("http://{}", listener.local_addr().unwrap()));
+    settings.jira_default_board = "42".into();
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = requests.clone();
+    let server = thread::spawn(move || {
+        for _ in 0..7 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0; 4096];
+            let size = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
+            let path = request.split_whitespace().nth(1).unwrap();
+            let mut status = "200 OK";
+            let body = if path == "/rest/agile/1.0/board/42" {
+                json!({"id": 42, "name": "Finery", "type": "scrum"})
+            } else if path.contains("velocity.json") {
+                json!({"sprints": [{"id": 12, "name": "Sprint 12"}, {"id": 13, "name": "Sprint 13"}],
+                    "velocityStatEntries": {"12": {"completed": {"value": 3}}, "13": {"completed": {"value": 5}}}})
+            } else if path.contains("state=closed") {
+                json!({"values": [{"id": 12, "name": "Sprint 12", "state": "closed"},
+                    {"id": 13, "name": "Sprint 13", "state": "closed"}], "isLast": true, "startAt": 0, "maxResults": 50})
+            } else if path.contains("/board/42/sprint") {
+                json!({"values": [], "isLast": true, "startAt": 0, "maxResults": 50})
+            } else if path.contains("/board/42/backlog") {
+                json!({"issues": [], "isLast": true})
+            } else if path.contains("/sprint/12/issue") {
+                json!({"issues": [{"key": "FIN-12", "fields": {"summary": "Report ticket", "customfield_10016": 3}}], "isLast": true})
+            } else {
+                assert!(path.contains("/sprint/13/issue"), "Unexpected request: {path}");
+                status = "503 Service Unavailable";
+                json!({"errorMessages": ["Report unavailable"]})
+            }.to_string();
+            observed.lock().unwrap().push(request);
+            write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+
+    let loaded = super::backlog(&settings).unwrap();
+    let initial_requests = requests.lock().unwrap().clone();
+    let reports = super::velocity_tickets(&settings, &[12, 13]).unwrap();
+    server.join().unwrap();
+
+    let velocity = loaded.snapshot.velocity.unwrap();
+    assert_eq!(velocity.dynamic_capacity, Some(4.0));
+    assert!(
+        velocity
+            .sprints
+            .iter()
+            .all(|sprint| sprint.work_items.is_none())
+    );
+    assert_eq!(initial_requests.len(), 5);
+    assert!(
+        initial_requests
+            .iter()
+            .all(|request| !request.contains("/issue?"))
+    );
+    assert_eq!(reports[0].0, 12);
+    let tickets = reports[0].1.as_ref().unwrap();
+    assert_eq!(tickets[0].key, "FIN-12");
+    assert_eq!(tickets[0].story_points, Some(3.0));
+    assert_eq!(reports[1].0, 13);
+    assert!(
+        reports[1]
+            .1
+            .as_ref()
+            .unwrap_err()
+            .contains("Report unavailable")
+    );
+}

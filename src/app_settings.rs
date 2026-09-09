@@ -23,7 +23,6 @@ pub(crate) const BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING: &str = "backlog.use_av
 pub(crate) const BACKLOG_FIXED_TICKET_SIZE_SETTING: &str = "backlog.fixed_ticket_size";
 pub(crate) const BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING: &str =
     "backlog.sprint_tolerance_percent";
-pub(crate) const BACKLOG_FILTERS_SETTING: &str = "backlog.filters";
 pub(crate) const BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING: &str =
     "backlog.excluded_sprint_name_fragments";
 pub(crate) const SPEED_READER_WPM_SETTING: &str = "reader.wpm";
@@ -320,7 +319,6 @@ pub(crate) struct AppSettings {
     pub(crate) jira_story_points_board_id: String,
     pub(crate) jira_story_points_discovery_complete: bool,
     pub(crate) backlog_runway: BacklogRunwaySettings,
-    pub(crate) backlog_filters: BacklogFilterSettings,
     pub(crate) excluded_sprint_name_fragments: Vec<String>,
     pub(crate) speed_reader: SpeedReaderSettings,
     pub(crate) recent_tickets_limit: usize,
@@ -340,7 +338,6 @@ impl Default for AppSettings {
             jira_story_points_board_id: String::new(),
             jira_story_points_discovery_complete: false,
             backlog_runway: BacklogRunwaySettings::default(),
-            backlog_filters: BacklogFilterSettings::default(),
             excluded_sprint_name_fragments: Vec::new(),
             speed_reader: SpeedReaderSettings::default(),
             recent_tickets_limit: 15,
@@ -357,83 +354,6 @@ pub(crate) struct BacklogRunwaySettings {
     pub(crate) use_average_ticket_size: bool,
     pub(crate) fixed_ticket_size: f64,
     pub(crate) sprint_tolerance_percent: u8,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum BacklogFilter {
-    Done,
-    Open,
-    Pointed,
-    Unpointed,
-}
-
-impl BacklogFilter {
-    pub(crate) const ALL: [Self; 4] = [Self::Done, Self::Open, Self::Pointed, Self::Unpointed];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Done => "Done",
-            Self::Open => "Open",
-            Self::Pointed => "Pointed",
-            Self::Unpointed => "Unpointed",
-        }
-    }
-
-    fn setting_value(self) -> &'static str {
-        match self {
-            Self::Done => "hide_done",
-            Self::Open => "hide_not_done",
-            Self::Pointed => "hide_estimated",
-            Self::Unpointed => "hide_unestimated",
-        }
-    }
-
-    fn from_setting_value(value: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|filter| filter.setting_value() == value)
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct BacklogFilterSettings {
-    selected: Vec<BacklogFilter>,
-}
-
-impl BacklogFilterSettings {
-    pub(crate) fn selected(&self) -> &[BacklogFilter] {
-        &self.selected
-    }
-
-    pub(crate) fn set_selected(&mut self, selected: Vec<BacklogFilter>) {
-        self.selected = BacklogFilter::ALL
-            .into_iter()
-            .filter(|filter| selected.contains(filter))
-            .collect();
-    }
-
-    pub(crate) fn is_active(&self) -> bool {
-        !self.selected.is_empty()
-    }
-
-    fn from_setting_value(value: Option<&String>) -> Self {
-        let selected = value
-            .into_iter()
-            .flat_map(|value| value.split(','))
-            .filter_map(|value| BacklogFilter::from_setting_value(value.trim()))
-            .collect();
-        let mut settings = Self::default();
-        settings.set_selected(selected);
-        settings
-    }
-
-    fn setting_value(&self) -> String {
-        self.selected
-            .iter()
-            .map(|filter| filter.setting_value())
-            .collect::<Vec<_>>()
-            .join(",")
-    }
 }
 
 impl Default for BacklogRunwaySettings {
@@ -511,9 +431,6 @@ impl AppSettings {
                     .filter(|value| *value <= 100)
                     .unwrap_or(defaults.backlog_runway.sprint_tolerance_percent),
             },
-            backlog_filters: BacklogFilterSettings::from_setting_value(
-                values.get(BACKLOG_FILTERS_SETTING),
-            ),
             excluded_sprint_name_fragments: sprint_name_fragments(
                 values.get(BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING),
             ),
@@ -585,10 +502,6 @@ impl AppSettings {
             (
                 BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING,
                 self.backlog_runway.sprint_tolerance_percent.to_string(),
-            ),
-            (
-                BACKLOG_FILTERS_SETTING,
-                self.backlog_filters.setting_value(),
             ),
             (
                 BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING,

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::{
-    AppSettings, BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING, BACKLOG_FILTERS_SETTING,
+    AppSettings, BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING,
     BACKLOG_FIXED_SPRINT_CAPACITY_SETTING, BACKLOG_FIXED_TICKET_SIZE_SETTING,
     BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING, BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING,
     BACKLOG_USE_JIRA_VELOCITY_SETTING, COMPOSER_ADD_CHILD_KEY_SETTING,
@@ -146,26 +146,6 @@ fn backlog_runway_settings_round_trip_and_reject_invalid_values() {
     .unwrap();
     assert_eq!(defaults.backlog_runway.fixed_sprint_capacity, 20.0);
     assert_eq!(defaults.backlog_runway.sprint_tolerance_percent, 20);
-}
-
-#[test]
-fn backlog_filters_round_trip_in_their_display_order() {
-    let settings = AppSettings::resolve(&HashMap::from([(
-        BACKLOG_FILTERS_SETTING.into(),
-        "hide_unestimated,hide_done,unknown,hide_estimated".into(),
-    )]))
-    .unwrap();
-
-    assert_eq!(
-        settings
-            .values()
-            .into_iter()
-            .find(|(key, _)| *key == BACKLOG_FILTERS_SETTING),
-        Some((
-            BACKLOG_FILTERS_SETTING,
-            "hide_done,hide_estimated,hide_unestimated".into()
-        ))
-    );
 }
 
 #[test]

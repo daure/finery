@@ -43,3 +43,32 @@ fn background_notifications_render_on_the_next_tick() {
 
     assert!(text.contains("Refresh complete"));
 }
+
+#[test]
+fn background_copy_schedules_ticks_and_a_direct_copy_supersedes_it() {
+    tuicore::init();
+    let service = AppService::for_tests();
+    let mut app = root(service.clone(), Vec::new());
+    let (release, gate) = std::sync::mpsc::channel();
+    service.copy_in_background(move || {
+        gate.recv_timeout(Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        Ok("Sprint report".into())
+    });
+    let mut ctx = tuicore::EventCtx::new(AnimationSettings::default());
+    app.apply_dialog_signals(&mut ctx);
+    assert!(ctx.tick_requested());
+    assert!(ctx.notifications().is_empty());
+    assert!(
+        app.tick(Duration::ZERO, AnimationSettings::default())
+            .next_tick
+            .is_some()
+    );
+    assert_eq!(app.take_pending_clipboard_request(), None);
+
+    ctx.copy_to_clipboard("A later direct copy");
+    app.apply_dialog_signals(&mut ctx);
+    assert!(!service.clipboard_pending());
+    release.send(()).unwrap();
+    assert_eq!(app.take_pending_clipboard_request(), None);
+}

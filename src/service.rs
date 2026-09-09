@@ -28,6 +28,7 @@ use crate::{
     store::work_items::{BacklogSnapshot, RankPlan, StatusTransition, WorkItem},
 };
 
+mod background_clipboard;
 pub(crate) mod composer_attachments;
 pub(crate) mod composer_service;
 
@@ -43,6 +44,7 @@ pub(crate) struct AppService {
     runtime: Arc<Runtime>,
     errors: Arc<Mutex<Vec<String>>>,
     notifications: Arc<Mutex<Vec<tuicore::Notification>>>,
+    background_clipboard: Arc<Mutex<background_clipboard::BackgroundClipboard>>,
     jira_reorder: Arc<Mutex<()>>,
     persistence: Sender<PersistenceCommand>,
     composer_sync: Arc<Mutex<ComposerSyncState>>,
@@ -288,6 +290,7 @@ impl AppService {
                 runtime,
                 errors,
                 notifications,
+                background_clipboard: Default::default(),
                 jira_reorder: Arc::new(Mutex::new(())),
                 persistence,
                 composer_sync,
@@ -325,6 +328,7 @@ impl AppService {
             runtime,
             errors,
             notifications,
+            background_clipboard: Default::default(),
             jira_reorder: Arc::new(Mutex::new(())),
             persistence,
             composer_sync,
@@ -630,6 +634,32 @@ impl AppService {
 
     pub(crate) fn jira_backlog(&self) -> Result<BacklogSnapshot, String> {
         self.with_jira_reorder(|service| service.jira_backlog_while_reorder_locked())
+    }
+
+    pub(crate) fn jira_velocity_tickets(
+        &self,
+        sprint_ids: &[u64],
+    ) -> Result<(String, Vec<jira::VelocityTicketLoad>), String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        let base_url = settings
+            .jira_base_url
+            .trim()
+            .trim_end_matches('/')
+            .to_owned();
+        jira::velocity_tickets(&settings, sprint_ids).map(|tickets| (base_url, tickets))
+    }
+
+    pub(crate) fn jira_project_issue_types(&self) -> Result<Vec<jira::JiraOption>, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::project_issue_types(&settings)
     }
 
     pub(crate) fn jira_status_transitions_by_issue(

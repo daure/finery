@@ -577,74 +577,6 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         }
         report
     });
-    let active_sprint_ids = sprints
-        .iter()
-        .map(|sprint| sprint.id)
-        .collect::<HashSet<_>>();
-    let mut velocity = velocity;
-    let velocity_sprint_warning = velocity.as_mut().ok().and_then(|report| {
-        let historical_sprint_ids = report
-            .sprints
-            .iter()
-            .filter(|sprint| !active_sprint_ids.contains(&sprint.id))
-            .map(|sprint| sprint.id)
-            .collect::<Vec<_>>();
-        let results = std::thread::scope(|scope| {
-            historical_sprint_ids
-                .iter()
-                .map(|&sprint_id| {
-                    let client = client.clone();
-                    let base_url = base_url.clone();
-                    let email = email.clone();
-                    let token = token.clone();
-                    let story_points_field_id = story_points_field_id.map(str::to_owned);
-                    scope.spawn(move || {
-                        sprint_issues(
-                            &client,
-                            &base_url,
-                            &email,
-                            &token,
-                            sprint_id,
-                            story_points_field_id.as_deref(),
-                        )
-                    })
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .zip(historical_sprint_ids)
-                .map(|(request, sprint_id)| {
-                    (
-                        sprint_id,
-                        request
-                            .join()
-                            .map_err(|_| "Jira velocity sprint request panicked".to_string())
-                            .and_then(|result| result),
-                    )
-                })
-                .collect::<Vec<_>>()
-        });
-        let mut errors = Vec::new();
-        for (sprint_id, result) in results {
-            match result {
-                Ok(work_items) => {
-                    report
-                        .sprints
-                        .iter_mut()
-                        .find(|sprint| sprint.id == sprint_id)
-                        .expect("historical velocity sprint must exist")
-                        .work_items = Some(work_items)
-                }
-                Err(error) => errors.push(error),
-            }
-        }
-        (!errors.is_empty()).then(|| {
-            format!(
-                "Could not load {} historical velocity sprint report(s): {}",
-                errors.len(),
-                errors.join("; ")
-            )
-        })
-    });
     let mut snapshot = BacklogSnapshot {
         board_name: board.name,
         story_points_configured: story_points_field_id.is_some(),
@@ -659,9 +591,6 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         snapshot.warnings.push(warning);
     }
     if let Some(warning) = sprint_hydration_warning {
-        snapshot.warnings.push(warning);
-    }
-    if let Some(warning) = velocity_sprint_warning {
         snapshot.warnings.push(warning);
     }
     if let Some(warning) = story_points_warning(&snapshot) {
@@ -1102,6 +1031,42 @@ fn discover_story_points(
     }
 }
 
+pub(crate) type VelocityTicketLoad = (u64, Result<Vec<WorkItem>, String>);
+
+pub(crate) fn velocity_tickets(
+    settings: &AppSettings,
+    sprint_ids: &[u64],
+) -> Result<Vec<VelocityTicketLoad>, String> {
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let field_id = story_points_field_for_load(settings, None);
+    let mut results = Vec::new();
+    for batch in sprint_ids.chunks(MAX_PARALLEL_SPRINT_LOADS) {
+        results.extend(std::thread::scope(|scope| {
+            batch
+                .iter()
+                .map(|&id| {
+                    let (client, base_url, email, token) = (&client, &base_url, &email, &token);
+                    let request = scope
+                        .spawn(move || sprint_issues(client, base_url, email, token, id, field_id));
+                    (id, request)
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|(id, request)| {
+                    (
+                        id,
+                        request
+                            .join()
+                            .map_err(|_| "Jira velocity sprint request panicked".to_string())
+                            .and_then(|result| result),
+                    )
+                })
+                .collect::<Vec<_>>()
+        }));
+    }
+    Ok(results)
+}
+
 fn sprint_issues(
     client: &Client,
     base_url: &str,
@@ -1456,6 +1421,15 @@ pub(crate) fn fix_versions(
         .collect::<Vec<_>>();
     versions.sort_by_cached_key(|version| version.name.to_ascii_lowercase());
     Ok(versions)
+}
+
+pub(crate) fn project_issue_types(settings: &AppSettings) -> Result<Vec<JiraOption>, String> {
+    let project_key = settings.jira_default_project.trim();
+    if project_key.is_empty() {
+        return Err("Default Jira project is required to load issue types".into());
+    }
+    let (client, base_url, email, token) = configured_client(settings)?;
+    create_issue_types(&client, &base_url, &email, &token, project_key)
 }
 
 fn create_issue_types(

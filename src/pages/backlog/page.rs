@@ -22,7 +22,7 @@ use tuicore::{
 };
 
 use crate::{
-    app_settings::{BacklogFilter, BacklogRunwaySettings},
+    app_settings::BacklogRunwaySettings,
     jira::{self, JiraOption},
     service::AppService,
     store::work_items::{
@@ -33,8 +33,9 @@ use crate::{
 
 use super::components::{
     BacklogDestination, BacklogQuickMenu, BacklogQuickMenuEvent, BacklogSectionEvent, BacklogTree,
-    backlog_tree_with_filters,
+    backlog_tree_with_issue_types,
 };
+use super::velocity_reports::copy_report;
 
 type BacklogQuickMenuLayer = DialogLayer<BacklogTree, BacklogQuickMenu>;
 type VelocityDialog = DialogHost<Flex<()>, ()>;
@@ -45,13 +46,16 @@ struct VelocityRow {
     sprint: VelocitySprint,
     alternate_background: bool,
     share_goal: String,
-    share_report: String,
 }
 
 enum BacklogResult {
     Loaded {
         generation: u64,
         result: Result<BacklogSnapshot, String>,
+    },
+    IssueTypesLoaded {
+        generation: u64,
+        result: Result<Vec<JiraOption>, String>,
     },
     Ranked {
         generation: u64,
@@ -125,6 +129,7 @@ pub(super) struct RequestGenerations {
     active_rank: Option<u64>,
     active_status_load: Option<u64>,
     active_status_set: Option<u64>,
+    active_issue_types_load: Option<u64>,
     rank_refresh_load: Option<u64>,
     preserve_optimistic_view_load: Option<u64>,
 }
@@ -160,6 +165,20 @@ impl RequestGenerations {
         let generation = self.next();
         self.active_status_load = Some(generation);
         generation
+    }
+
+    fn start_issue_types_load(&mut self) -> u64 {
+        let generation = self.next();
+        self.active_issue_types_load = Some(generation);
+        generation
+    }
+
+    fn complete_issue_types_load(&mut self, generation: u64) -> bool {
+        if self.active_issue_types_load != Some(generation) {
+            return false;
+        }
+        self.active_issue_types_load = None;
+        true
     }
 
     fn complete_status_load(&mut self, generation: u64) -> bool {
@@ -292,9 +311,10 @@ pub(super) fn should_poll(
     loading: bool,
     ranking: bool,
     status_working: bool,
+    issue_types_loading: bool,
     retry_pending: bool,
 ) -> bool {
-    loading || ranking || status_working || retry_pending
+    loading || ranking || status_working || issue_types_loading || retry_pending
 }
 
 pub(crate) fn page(service: AppService) -> BacklogPage {
@@ -311,6 +331,7 @@ pub(crate) struct BacklogPage {
     loading: bool,
     ranking: bool,
     status_loading: bool,
+    issue_types_loading: bool,
     status_transitioning: bool,
     move_locked: Rc<Cell<bool>>,
     generations: RequestGenerations,
@@ -326,6 +347,7 @@ pub(crate) struct BacklogPage {
     data_focus_path: TreePath,
     reload_notification_pending: bool,
     settings_revision: u64,
+    issue_types_requested: bool,
     velocity_dialog_close_requested: Rc<Cell<bool>>,
 }
 
@@ -336,12 +358,6 @@ impl BacklogPage {
         let move_locked = Rc::new(Cell::new(false));
         let velocity_dialog_close_requested = Rc::new(Cell::new(false));
         let settings_revision = service.settings_revision();
-        let filters = service
-            .settings()
-            .read()
-            .expect("settings lock poisoned")
-            .backlog_filters
-            .clone();
         Self {
             service,
             sender,
@@ -352,12 +368,13 @@ impl BacklogPage {
                 section_sender.clone(),
                 move_locked.clone(),
                 Rc::clone(&velocity_dialog_close_requested),
-                filters,
+                Vec::new(),
             ),
             loading_view: loading_view(),
             loading: false,
             ranking: false,
             status_loading: false,
+            issue_types_loading: false,
             status_transitioning: false,
             move_locked,
             generations: RequestGenerations::default(),
@@ -377,13 +394,22 @@ impl BacklogPage {
             ]),
             reload_notification_pending: false,
             settings_revision,
+            issue_types_requested: false,
             velocity_dialog_close_requested,
         }
     }
 
     #[cfg(test)]
     pub(super) fn with_snapshot_for_test(snapshot: BacklogSnapshot) -> Self {
-        let mut page = Self::new(AppService::for_tests());
+        Self::with_snapshot_and_service_for_test(snapshot, AppService::for_tests())
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_snapshot_and_service_for_test(
+        snapshot: BacklogSnapshot,
+        service: AppService,
+    ) -> Self {
+        let mut page = Self::new(service);
         page.snapshot = Some(snapshot);
         page.restore_snapshot();
         page
@@ -499,6 +525,31 @@ impl BacklogPage {
         }
     }
 
+    fn load_issue_types(&mut self) {
+        if self.issue_types_requested {
+            return;
+        }
+        self.issue_types_requested = true;
+        let generation = self.generations.start_issue_types_load();
+        self.issue_types_loading = true;
+        let service = self.service.clone();
+        let sender = self.sender.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("finery-jira-issue-types".into())
+            .spawn(move || {
+                let _ = sender.send(BacklogResult::IssueTypesLoaded {
+                    generation,
+                    result: service.jira_project_issue_types(),
+                });
+            })
+            && self.generations.complete_issue_types_load(generation)
+        {
+            self.issue_types_loading = false;
+            self.service
+                .report_error(format!("Could not load Jira issue types: {error}"));
+        }
+    }
+
     fn shows_initial_loading(&self) -> bool {
         self.loading
     }
@@ -509,6 +560,9 @@ impl BacklogPage {
             changed |= match result {
                 BacklogResult::Loaded { generation, result } => {
                     self.apply_load_result(generation, result)
+                }
+                BacklogResult::IssueTypesLoaded { generation, result } => {
+                    self.apply_issue_types_result(generation, result)
                 }
                 BacklogResult::Ranked { generation, result } => {
                     self.apply_rank_result(generation, result)
@@ -531,6 +585,24 @@ impl BacklogPage {
             };
         }
         changed
+    }
+
+    fn apply_issue_types_result(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<JiraOption>, String>,
+    ) -> bool {
+        if !self.generations.complete_issue_types_load(generation) {
+            return false;
+        }
+        self.issue_types_loading = false;
+        match result {
+            Ok(issue_types) => self.view.base_mut().base_mut().set_issue_types(issue_types),
+            Err(error) => self
+                .service
+                .report_error(format!("Could not load Jira issue types: {error}")),
+        }
+        true
     }
 
     fn apply_load_result(
@@ -738,11 +810,17 @@ impl BacklogPage {
                         self.reload();
                     }
                 }
-                BacklogSectionEvent::FiltersChanged(selected) => {
-                    self.set_filters(selected);
+                BacklogSectionEvent::EstimatedChanged(estimated) => {
+                    self.view.base_mut().base_mut().set_estimated(estimated);
                     self.focus_backlog_data(ctx);
                 }
-                BacklogSectionEvent::FiltersSubmitted => self.focus_backlog_data(ctx),
+                BacklogSectionEvent::IssueTypesChanged(issue_types) => {
+                    self.view
+                        .base_mut()
+                        .base_mut()
+                        .set_issue_types_filter(issue_types);
+                    self.focus_backlog_data(ctx);
+                }
                 BacklogSectionEvent::OpenVelocity => self.open_velocity_dialog(ctx),
                 BacklogSectionEvent::OpenReports => {
                     self.service.open_jira_board_page(Some("reports"));
@@ -778,20 +856,16 @@ impl BacklogPage {
                     }) else {
                         continue;
                     };
-                    let base_url = self
-                        .service
-                        .settings()
-                        .read()
-                        .ok()
-                        .map(|settings| {
-                            settings
-                                .jira_base_url
-                                .trim()
-                                .trim_end_matches('/')
-                                .to_owned()
-                        })
-                        .filter(|url| !url.is_empty());
-                    ctx.copy_to_clipboard(sprint_report(sprint, base_url.as_deref()));
+                    copy_report(
+                        &self.service,
+                        VelocitySprint {
+                            id: sprint.id,
+                            name: sprint.name.clone(),
+                            goal: sprint.goal.clone(),
+                            completed: 0.0,
+                            work_items: None,
+                        },
+                    );
                 }
                 BacklogSectionEvent::OpenQuickMenu {
                     section_id,
@@ -1084,22 +1158,16 @@ impl BacklogPage {
     fn open_velocity_dialog(&mut self, ctx: &mut EventCtx<()>) {
         let settings = self.service.settings();
         let settings = settings.read().expect("settings lock poisoned");
-        let jira_base_url = settings
-            .jira_base_url
-            .trim()
-            .trim_end_matches('/')
-            .to_owned();
         self.velocity_dialog_close_requested.set(false);
         self.view.replace_layer(
             velocity_dialog(
                 self.snapshot
                     .as_ref()
                     .and_then(|snapshot| snapshot.velocity.as_ref()),
-                self.snapshot.as_ref(),
-                (!jira_base_url.is_empty()).then_some(jira_base_url.as_str()),
                 &settings.backlog_runway,
                 self.snapshot.as_ref().and_then(loaded_story_point_average),
                 Rc::clone(&self.velocity_dialog_close_requested),
+                Some(self.service.clone()),
             ),
             ctx,
         );
@@ -1465,16 +1533,6 @@ impl BacklogPage {
         self.load(false, false);
         true
     }
-
-    fn set_filters(&mut self, selected: Vec<BacklogFilter>) {
-        let settings = self.service.settings();
-        let mut updated = settings.read().expect("settings lock poisoned").clone();
-        updated.backlog_filters.set_selected(selected);
-        let filters = updated.backlog_filters.clone();
-        self.service.save_settings(updated);
-        self.settings_revision = self.service.settings_revision();
-        self.view.base_mut().base_mut().set_filters(filters);
-    }
 }
 
 pub(super) fn recalculate_capacity(
@@ -1775,10 +1833,10 @@ fn backlog_view(
     section_sender: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
     velocity_dialog_close_requested: Rc<Cell<bool>>,
-    filters: crate::app_settings::BacklogFilterSettings,
+    issue_types: Vec<JiraOption>,
 ) -> BacklogView {
     let quick_menu = DialogLayer::new(
-        backlog_tree_with_filters(snapshot, section_sender, move_locked.clone(), filters),
+        backlog_tree_with_issue_types(snapshot, section_sender, move_locked.clone(), issue_types),
         BacklogQuickMenu::new(move_locked),
     )
     .active(false)
@@ -1789,11 +1847,10 @@ fn backlog_view(
         quick_menu,
         velocity_dialog(
             None,
-            None,
-            None,
             &BacklogRunwaySettings::default(),
             None,
             velocity_dialog_close_requested,
+            None,
         ),
     )
     .active(false)
@@ -1804,11 +1861,10 @@ fn backlog_view(
 
 pub(super) fn velocity_dialog(
     report: Option<&VelocityReport>,
-    snapshot: Option<&BacklogSnapshot>,
-    jira_base_url: Option<&str>,
     settings: &BacklogRunwaySettings,
     dynamic_ticket_size: Option<f64>,
     close_requested: Rc<Cell<bool>>,
+    service: Option<AppService>,
 ) -> VelocityDialog {
     let latest_sprints = report.map_or(settings.jira_velocity_sprints, |report| {
         report.configured_sprints
@@ -1831,7 +1887,6 @@ pub(super) fn velocity_dialog(
             .enumerate()
             .map(|(index, sprint)| VelocityRow {
                 share_goal: sprint.goal.clone().unwrap_or_default(),
-                share_report: velocity_share_report(&sprint, snapshot, jira_base_url),
                 sprint,
                 alternate_background: index % 2 == 0,
             })
@@ -1857,7 +1912,12 @@ pub(super) fn velocity_dialog(
         .row_height(2)
         .wrap_cells()
         .copy_hotkey("yg", |row| Some(row.share_goal.clone()))
-        .copy_hotkey("yv", |row| Some(row.share_report.clone()))
+        .copy_hotkey("yv", move |row| {
+            if let Some(service) = &service {
+                copy_report(service, row.sprint.clone());
+            }
+            None
+        })
         .focused(true);
     table.set_row_style_by(|row| {
         row.alternate_background
@@ -2287,6 +2347,7 @@ impl TuiNode for BacklogPage {
             self.loading,
             self.ranking,
             self.status_loading || self.status_transitioning,
+            self.issue_types_loading,
             self.rank_refresh_retry.pending(),
         ) {
             result.merge(TickResult::scheduled_after(Duration::from_millis(50)))
@@ -2320,6 +2381,7 @@ impl TuiNode for BacklogPage {
         self.loading_view.mount(ctx);
         self.view.mount(ctx);
         self.focus_backlog_after_load = true;
+        self.load_issue_types();
         self.load(false, false);
         ctx.request_tick();
     }

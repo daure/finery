@@ -8,9 +8,7 @@ use tuicore::{
 };
 
 use super::{
-    components::{
-        BacklogQuickMenu, BacklogQuickMenuEvent, backlog_tree, backlog_tree_with_filters,
-    },
+    components::{BacklogQuickMenu, BacklogQuickMenuEvent, backlog_tree, selectable_issue_types},
     page::{
         BacklogPage, MAX_UNCONFIRMED_TRANSFER_REFRESHES, PendingRank, PendingRankReconciliation,
         PendingTransfer, PendingTransferReconciliation, StatusTransitionCache,
@@ -20,7 +18,7 @@ use super::{
         transfer_reconciliation_highlight, velocity_dialog, velocity_share_report,
     },
 };
-use crate::app_settings::{BacklogFilter, BacklogFilterSettings, BacklogRunwaySettings};
+use crate::app_settings::BacklogRunwaySettings;
 use crate::jira::JiraOption;
 use crate::store::work_items::{
     BacklogSnapshot, IssueStatusTransition, RunwayCapacitySource, Sprint, StatusTransition,
@@ -220,7 +218,7 @@ fn backlog_hides_the_existing_data_view_while_reloading() {
 }
 
 #[test]
-fn backlog_header_places_web_menu_before_the_right_aligned_refresh_button() {
+fn backlog_header_places_web_menu_before_the_right_aligned_toolbar_controls() {
     tuicore::init();
     let (sender, _) = mpsc::channel();
     let mut view = backlog_tree(&snapshot(), sender, Default::default());
@@ -236,13 +234,14 @@ fn backlog_header_places_web_menu_before_the_right_aligned_refresh_button() {
         .unwrap();
     let header = rendered_lines(&terminal, area).remove(0);
 
-    assert!(cell_position(&header, "Web") < cell_position(&header, "Velocity"));
-    assert!(cell_position(&header, "Velocity") < cell_position(&header, "Refresh"));
-    assert!(cell_position(&header, "Refresh") < cell_position(&header, "Filter"));
+    assert!(cell_position(&header, "Web") < cell_position(&header, "󰓅"));
+    assert!(cell_position(&header, "󰓅") < cell_position(&header, "󰑓"));
+    assert!(cell_position(&header, "󰑓") < cell_position(&header, "Type"));
+    assert!(cell_position(&header, "Type") < cell_position(&header, "󰑭"));
 }
 
 #[test]
-fn unpointed_filter_only_shows_unpointed_stories_and_tasks() {
+fn disabling_estimated_only_shows_unestimated_stories_and_tasks() {
     tuicore::init();
     let mut snapshot = snapshot();
     let unpointed_parent = work_item("FIN-8", "Unpointed parent");
@@ -276,10 +275,9 @@ fn unpointed_filter_only_shows_unpointed_stories_and_tasks() {
         RunwayCapacitySource::Fixed,
         20,
     );
-    let mut filters = BacklogFilterSettings::default();
-    filters.set_selected(vec![BacklogFilter::Unpointed]);
     let (sender, _) = mpsc::channel();
-    let mut tree = backlog_tree_with_filters(&snapshot, sender, Default::default(), filters);
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    tree.set_estimated(false);
     let area = Rect::new(0, 0, 100, 16);
     tree.layout(area, &mut LayoutCtx::new());
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
@@ -301,27 +299,23 @@ fn unpointed_filter_only_shows_unpointed_stories_and_tasks() {
 }
 
 #[test]
-fn done_filter_matches_done_status_case_insensitively() {
+fn issue_type_filter_shows_only_matching_ticket_types() {
     tuicore::init();
     let mut snapshot = snapshot();
     snapshot.work_items = vec![
         WorkItem {
-            status: "Done".into(),
-            ..work_item("FIN-8", "Uppercase done")
+            kind: "Bug".into(),
+            ..work_item("FIN-8", "Bug ticket")
         },
         WorkItem {
-            status: "done".into(),
-            ..work_item("FIN-9", "Lowercase done")
+            kind: "Task".into(),
+            ..work_item("FIN-9", "Task ticket")
         },
-        WorkItem {
-            status: "Closed".into(),
-            ..work_item("FIN-10", "Closed ticket")
-        },
+        work_item("FIN-10", "Story ticket"),
     ];
-    let mut filters = BacklogFilterSettings::default();
-    filters.set_selected(vec![BacklogFilter::Done]);
     let (sender, _) = mpsc::channel();
-    let mut tree = backlog_tree_with_filters(&snapshot, sender, Default::default(), filters);
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    tree.set_issue_types_filter(vec!["Bug".into(), "Task".into()]);
     let area = Rect::new(0, 0, 100, 16);
     tree.layout(area, &mut LayoutCtx::new());
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
@@ -334,9 +328,52 @@ fn done_filter_matches_done_status_case_insensitively() {
         .unwrap();
 
     let text = rendered_lines(&terminal, area).concat();
-    assert!(text.contains("Uppercase done"));
-    assert!(text.contains("Lowercase done"));
-    assert!(!text.contains("Closed ticket"));
+    assert!(text.contains("Bug ticket"));
+    assert!(text.contains("Task ticket"));
+    assert!(!text.contains("Story ticket"));
+
+    tree.set_issue_types_filter(Vec::new());
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(text.contains("Bug ticket"));
+    assert!(text.contains("Task ticket"));
+    assert!(text.contains("Story ticket"));
+}
+
+#[test]
+fn issue_type_dropdown_excludes_epics_and_subtasks() {
+    let issue_types = selectable_issue_types(vec![
+        JiraOption {
+            id: "1".into(),
+            label: "Story".into(),
+        },
+        JiraOption {
+            id: "2".into(),
+            label: "Epic".into(),
+        },
+        JiraOption {
+            id: "3".into(),
+            label: "Subtask".into(),
+        },
+        JiraOption {
+            id: "4".into(),
+            label: "Sub-task".into(),
+        },
+    ]);
+
+    assert_eq!(
+        issue_types
+            .iter()
+            .map(|issue_type| issue_type.label.as_str())
+            .collect::<Vec<_>>(),
+        ["Story"]
+    );
 }
 
 #[test]
@@ -408,7 +445,7 @@ fn backlog_header_controls_return_focus_to_the_data_view_when_unfocused() {
     let (sender, _) = mpsc::channel();
     let mut view = backlog_tree(&snapshot(), sender, Default::default());
 
-    for control in ["refresh", "velocity", "filters", "web"] {
+    for control in ["refresh", "velocity", "estimated", "issue-types", "web"] {
         for key in [
             KeyEvent::from(Key::Esc),
             KeyEvent {
@@ -468,7 +505,7 @@ fn backlog_velocity_is_focusable_with_shift_v() {
 }
 
 #[test]
-fn backlog_filter_is_focusable_with_shift_f() {
+fn backlog_estimated_toggle_is_focusable_with_shift_e() {
     tuicore::init();
     let (sender, _) = mpsc::channel();
     let mut view = backlog_tree(&snapshot(), sender, Default::default());
@@ -476,16 +513,56 @@ fn backlog_filter_is_focusable_with_shift_f() {
     let mut layout = LayoutCtx::new();
     view.layout(area, &mut layout);
 
-    let filter = layout
+    let estimated = layout
         .focus_targets()
         .iter()
-        .find(|target| {
-            target.path == TreePath::from_keys([ChildKey::new("filters")])
-                && target.id.as_str() == "field"
-        })
+        .find(|target| target.path == TreePath::from_keys([ChildKey::new("estimated")]))
         .unwrap();
 
-    assert_eq!(filter.hotkey_sequences, ["shift+f"]);
+    assert_eq!(estimated.hotkey_sequences, ["shift+e"]);
+}
+
+#[test]
+fn estimated_toggle_filters_the_loaded_backlog_without_reloading() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    snapshot.work_items = vec![
+        WorkItem {
+            story_points: Some(3.0),
+            ..work_item("FIN-8", "Estimated story")
+        },
+        work_item("FIN-9", "Unestimated story"),
+    ];
+    let mut page = BacklogPage::with_snapshot_for_test(snapshot);
+    let area = Rect::new(0, 0, 100, 16);
+    page.layout(area, &mut LayoutCtx::new());
+
+    page.dispatch_event(
+        &EventRoute::new(TreePath::from_keys([
+            ChildKey::first(),
+            ChildKey::first(),
+            ChildKey::new("estimated"),
+        ])),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('e'),
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut EventCtx::new(AnimationSettings::default()),
+    );
+
+    assert!(!page.is_loading_for_test());
+    page.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            page.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(!text.contains("Estimated story"));
+    assert!(text.contains("Unestimated story"));
 }
 
 #[test]
@@ -963,8 +1040,8 @@ fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
         }
     }
 
-    assert!(text.contains("Refresh"));
-    assert!(text.contains("Velocity"));
+    assert!(text.contains("󰑓"));
+    assert!(text.contains("󰓅"));
     assert!(text.contains("┃"));
     assert!(text.contains("3 • @AD • To Do"));
     let lines = rendered_lines(&terminal, area);
@@ -1033,7 +1110,7 @@ fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
             text.push_str(terminal.backend().buffer().cell((x, y)).unwrap().symbol());
         }
     }
-    assert!(text.contains("Velocity"));
+    assert!(text.contains("󰓅"));
     assert!(text.contains(" Sprint 7 • 18 Jun – 2 Jul"));
     assert!(text.contains(" ~0/5.4 (20v) pts • ✓ 1/1 • 0/1 items"));
     assert!(text.contains("5.4 • @AD • To Do"));
@@ -1512,11 +1589,10 @@ fn velocity_dialog_shows_goals_in_alternating_two_line_rows() {
     };
     let mut dialog = velocity_dialog(
         Some(&report),
-        None,
-        None,
         &BacklogRunwaySettings::default(),
         None,
         Rc::new(Cell::new(false)),
+        None,
     );
     let area = Rect::new(0, 0, 80, 24);
     dialog.layout(area, &mut LayoutCtx::new());
@@ -1624,11 +1700,10 @@ fn velocity_dialog_wraps_long_sprint_goals() {
     };
     let mut dialog = velocity_dialog(
         Some(&report),
-        None,
-        None,
         &BacklogRunwaySettings::default(),
         None,
         Rc::new(Cell::new(false)),
+        None,
     );
     let area = Rect::new(0, 0, 46, 24);
     dialog.layout(area, &mut LayoutCtx::new());
@@ -2412,10 +2487,11 @@ fn unconfirmed_transfer_refreshes_exhaust() {
 
 #[test]
 fn polling_runs_only_while_work_is_pending() {
-    assert!(should_poll(true, false, false, false));
-    assert!(should_poll(false, true, false, false));
-    assert!(should_poll(false, false, true, false));
-    assert!(!should_poll(false, false, false, false));
+    assert!(should_poll(true, false, false, false, false));
+    assert!(should_poll(false, true, false, false, false));
+    assert!(should_poll(false, false, true, false, false));
+    assert!(should_poll(false, false, false, true, false));
+    assert!(!should_poll(false, false, false, false, false));
 }
 
 #[test]

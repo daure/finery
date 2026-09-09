@@ -92,6 +92,12 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
 
 impl App {
     fn apply_dialog_signals(&mut self, ctx: &mut EventCtx<()>) {
+        if ctx.clipboard_request().is_some() {
+            self.service.cancel_pending_clipboard();
+        }
+        if self.service.clipboard_pending() {
+            ctx.request_tick();
+        }
         if self.open_settings.replace(false) {
             self.view
                 .base_mut()
@@ -222,7 +228,13 @@ impl TuiNode for App {
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let view_tick = self.view.tick(dt, settings);
         let notifications_added = self.drain_service_notifications();
+        let clipboard_tick = if self.service.clipboard_pending() {
+            TickResult::scheduled_after(Duration::from_millis(50))
+        } else {
+            TickResult::IDLE
+        };
         view_tick
+            .merge(clipboard_tick)
             .merge(self.service_notifications.tick(dt, settings))
             .merge(if notifications_added {
                 TickResult::CHANGED
@@ -233,6 +245,10 @@ impl TuiNode for App {
 
     fn take_pending_focus_request(&mut self) -> Option<tuicore::FocusRequest> {
         self.view.take_pending_focus_request()
+    }
+
+    fn take_pending_clipboard_request(&mut self) -> Option<String> {
+        self.service.take_pending_clipboard()
     }
 
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
