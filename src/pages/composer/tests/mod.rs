@@ -712,6 +712,19 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
 }
 
 #[test]
+fn active_change_set_panel_title_ellipsizes_at_the_viewport_edge() {
+    tuicore::init();
+    let mut change_sets = ComposerState::demo().change_sets;
+    change_sets[0].name = "Publish negotiation cancelled event to EventBridge".into();
+    let mut page = composer_page_with_change_sets(change_sets);
+    open_change_set(&mut page, 1);
+
+    let text = render_text_at(&mut page, 32);
+
+    assert!(text.contains("CS-1 • Publish negotiat..."));
+}
+
+#[test]
 fn desktop_composer_keeps_the_ticket_list_as_the_only_primary_data_view() {
     tuicore::init();
     let mut page = composer_page();

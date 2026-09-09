@@ -12,7 +12,8 @@ use rmcp::{
     transport::{StreamableHttpServerConfig, StreamableHttpService, stdio},
 };
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::Error as _};
+use serde_json::Value;
 
 use crate::{
     service::{
@@ -133,8 +134,51 @@ struct DeleteChangeSet {
 struct PatchChangeSet {
     change_set_id: String,
     expected_revision: i64,
+    /// An ordered JSON array of operation objects, never JSON-encoded strings. Every object needs
+    /// a `type`. For example, include a Jira ticket with
+    /// `{ "type": "include_jira_ticket", "jira_key": "FIN-1" }`; this operation uses
+    /// `jira_key` rather than `ticket_id`.
     #[schemars(length(min = 1))]
+    #[serde(deserialize_with = "deserialize_patch_operations")]
     operations: Vec<ChangeSetPatchOperation>,
+}
+
+fn deserialize_patch_operations<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ChangeSetPatchOperation>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let operations = value.as_array().ok_or_else(|| {
+        D::Error::custom(
+            "operations must be a non-empty JSON array of operation objects; for example, \
+             [{\"type\":\"include_jira_ticket\",\"jira_key\":\"FIN-1\"}]",
+        )
+    })?;
+    if operations.is_empty() {
+        return Err(D::Error::custom(
+            "operations must contain at least one operation",
+        ));
+    }
+    operations
+        .iter()
+        .enumerate()
+        .map(|(index, operation)| {
+            if !operation.is_object() {
+                return Err(D::Error::custom(format!(
+                    "operations[{index}] must be an object with a \"type\"; for example, \
+                     {{\"type\":\"include_jira_ticket\",\"jira_key\":\"FIN-1\"}}"
+                )));
+            }
+            serde_json::from_value(operation.clone()).map_err(|error| {
+                D::Error::custom(format!(
+                    "operations[{index}] is invalid: {error}; expected an operation object with \
+                     a \"type\", for example {{\"type\":\"include_jira_ticket\",\"jira_key\":\"FIN-1\"}}"
+                ))
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1120,7 +1164,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Apply a nonempty ordered local patch atomically. Operations may add a draft and then add its web links, while also changing links on other tickets. New web-link IDs must start with local-. Attachment additions load up to 5 MiB from a local file path or an http(s) URL and store the bytes in the change set; optional filenames and MIME types default from the source where possible. Image signatures and filename extensions are validated. Removing a local addition drops it, while removing a synced attachment stages its Jira deletion. Mermaid operations add, update, or remove diagrams; add_mermaid_diagram requires ticket_id, title, diagram_type, and markup. Supported diagram_types: flowchart, sequence, class, state, ER, gantt, mindmap, architecture, C4, kanban, git graph, pie, packet, timeline, journey, requirement, sankey, radar, info, treemap, block, quadrant chart, XY chart, tree view, ishikawa, event modeling, Venn (any non-empty Mermaid type). This persists once and never submits Jira."
+        description = "Apply a nonempty ordered local patch atomically. `operations` must be a JSON array of objects, never JSON-encoded strings; each object requires `type`. To include Jira FIN-1, pass `{\"type\":\"include_jira_ticket\",\"jira_key\":\"FIN-1\"}`. This operation uses `jira_key`; ticket mutations use `ticket_id`. Operations may add a draft and then add its web links, while also changing links on other tickets. New web-link IDs must start with local-. Attachment additions load up to 5 MiB from a local file path or an http(s) URL and store the bytes in the change set; optional filenames and MIME types default from the source where possible. Image signatures and filename extensions are validated. Removing a local addition drops it, while removing a synced attachment stages its Jira deletion. Mermaid operations add, update, or remove diagrams; add_mermaid_diagram requires ticket_id, title, diagram_type, and markup. Supported diagram_types: flowchart, sequence, class, state, ER, gantt, mindmap, architecture, C4, kanban, git graph, pie, packet, timeline, journey, requirement, sankey, radar, info, treemap, block, quadrant chart, XY chart, tree view, ishikawa, event modeling, Venn (any non-empty Mermaid type). This persists once and never submits Jira."
     )]
     async fn apply_change_set_patch(
         &self,

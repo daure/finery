@@ -7,10 +7,11 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rmcp::model::ResourceContents;
+use serde_json::json;
 
 use crate::{
     mcp::{
-        CHANGE_SET_GUIDANCE, GetChangeSetAttachments, JiraPosition, JiraSection,
+        CHANGE_SET_GUIDANCE, GetChangeSetAttachments, JiraPosition, JiraSection, PatchChangeSet,
         attachment_contents, final_order, issue_sections, placement_rank_plan, run_composer,
         section_order, validate_issue_keys, workspace_capacity_guidance_view, workspace_view,
     },
@@ -18,8 +19,8 @@ use crate::{
         AppService,
         composer_attachments::{AttachmentRequest, TicketSnapshotView},
         composer_service::{
-            ChangeSetCatalogChangeSetView, ChangeSetCatalogView, JiraTicketLookup, Versioned,
-            test_service,
+            ChangeSetCatalogChangeSetView, ChangeSetCatalogView, ChangeSetPatchOperation,
+            JiraTicketLookup, Versioned, test_service,
         },
     },
     storage::Storage,
@@ -51,6 +52,82 @@ fn composer_calls_complete_from_async_runtime() {
         }));
 
     assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn patch_input_reports_an_index_for_json_encoded_operation() {
+    let error = serde_json::from_value::<PatchChangeSet>(json!({
+        "change_set_id": "CS-1",
+        "expected_revision": 1,
+        "operations": ["{\"type\":\"include_jira_ticket\",\"jira_key\":\"FIN-1\"}"],
+    }))
+    .unwrap_err();
+
+    assert!(error.to_string().contains("operations[0]"));
+    assert!(
+        error
+            .to_string()
+            .contains("must be an object with a \"type\"")
+    );
+    assert!(error.to_string().contains("include_jira_ticket"));
+}
+
+#[test]
+fn patch_input_reports_the_required_operations_array() {
+    let error = serde_json::from_value::<PatchChangeSet>(json!({
+        "change_set_id": "CS-1",
+        "expected_revision": 1,
+        "operations": { "type": "include_jira_ticket", "jira_key": "FIN-1" },
+    }))
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("operations must be a non-empty JSON array")
+    );
+    assert!(error.to_string().contains("include_jira_ticket"));
+}
+
+#[test]
+fn patch_input_accepts_a_jira_ticket_include_object() {
+    let patch = serde_json::from_value::<PatchChangeSet>(json!({
+        "change_set_id": "CS-1",
+        "expected_revision": 1,
+        "operations": [{ "type": "include_jira_ticket", "jira_key": "FIN-1" }],
+    }))
+    .unwrap();
+
+    assert!(matches!(
+        patch.operations.as_slice(),
+        [ChangeSetPatchOperation::IncludeJiraTicket { jira_key, parent_ticket_id: None }]
+            if jira_key == "FIN-1"
+    ));
+}
+
+#[test]
+fn rejected_patch_input_leaves_the_change_set_revision_unchanged() {
+    let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    let storage = runtime.block_on(Storage::connect_for_tests()).unwrap();
+    let jira: Arc<dyn JiraTicketLookup> =
+        Arc::new(|_: &str| -> Result<Ticket, String> { Err("not used".into()) });
+    let service = test_service(storage, runtime, jira);
+    let before = service
+        .create_change_set("Input validation".into())
+        .unwrap()
+        .change_set;
+
+    let error = serde_json::from_value::<PatchChangeSet>(json!({
+        "change_set_id": before.value.id,
+        "expected_revision": before.revision,
+        "operations": ["{\"type\":\"include_jira_ticket\",\"jira_key\":\"FIN-1\"}"],
+    }))
+    .unwrap_err();
+    let after = service.change_set(&before.value.id).unwrap();
+
+    assert!(error.to_string().contains("operations[0]"));
+    assert_eq!(after.revision, before.revision);
+    assert!(after.value.tickets.is_empty());
 }
 
 #[test]
