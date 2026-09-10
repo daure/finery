@@ -25,6 +25,9 @@ pub(crate) const BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING: &str =
     "backlog.sprint_tolerance_percent";
 pub(crate) const BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING: &str =
     "backlog.excluded_sprint_name_fragments";
+pub(crate) const BACKLOG_MOVE_TO_TOP_KEY_SETTING: &str = "backlog.move_to_top_key";
+pub(crate) const BACKLOG_MOVE_TO_BOTTOM_KEY_SETTING: &str = "backlog.move_to_bottom_key";
+pub(crate) const BACKLOG_VIEW_DESCRIPTION_KEY_SETTING: &str = "backlog.view_description_key";
 pub(crate) const SPEED_READER_WPM_SETTING: &str = "reader.wpm";
 pub(crate) const SPEED_READER_BLOCK_DELAY_SETTING: &str = "reader.markdown_block_pause_ms";
 pub(crate) const RECENT_TICKETS_LIMIT_SETTING: &str = "recent_tickets.limit";
@@ -284,6 +287,44 @@ impl ComposerKeyBindings {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BacklogKeyBindings {
+    pub(crate) move_to_top: ComposerKeyBinding,
+    pub(crate) move_to_bottom: ComposerKeyBinding,
+    pub(crate) view_description: ComposerKeyBinding,
+}
+
+impl Default for BacklogKeyBindings {
+    fn default() -> Self {
+        Self::from_values(&HashMap::new()).expect("built-in Backlog keys must be valid")
+    }
+}
+
+impl BacklogKeyBindings {
+    fn from_values(values: &HashMap<String, String>) -> Result<Self, String> {
+        let binding = |setting: &str, default: &str| {
+            ComposerKeyBinding::parse(
+                values
+                    .get(setting)
+                    .cloned()
+                    .unwrap_or_else(|| default.into()),
+                setting,
+            )
+        };
+        let bindings = Self {
+            move_to_top: binding(BACKLOG_MOVE_TO_TOP_KEY_SETTING, "t")?,
+            move_to_bottom: binding(BACKLOG_MOVE_TO_BOTTOM_KEY_SETTING, "b")?,
+            view_description: binding(BACKLOG_VIEW_DESCRIPTION_KEY_SETTING, "v")?,
+        };
+        ensure_unambiguous(&[
+            bindings.move_to_top.sequence(),
+            bindings.move_to_bottom.sequence(),
+            bindings.view_description.sequence(),
+        ])?;
+        Ok(bindings)
+    }
+}
+
 fn ensure_unambiguous(sequences: &[&str]) -> Result<(), String> {
     sequences
         .iter()
@@ -296,7 +337,7 @@ fn ensure_unambiguous(sequences: &[&str]) -> Result<(), String> {
         })
         .then_some(())
         .ok_or_else(|| {
-            "Composer action keys must be unique and non-prefix within their active context".into()
+            "Action keys must be unique and non-prefix within their active context".into()
         })
 }
 
@@ -320,6 +361,7 @@ pub(crate) struct AppSettings {
     pub(crate) jira_story_points_discovery_complete: bool,
     pub(crate) backlog_runway: BacklogRunwaySettings,
     pub(crate) excluded_sprint_name_fragments: Vec<String>,
+    pub(crate) backlog_keys: BacklogKeyBindings,
     pub(crate) speed_reader: SpeedReaderSettings,
     pub(crate) recent_tickets_limit: usize,
     pub(crate) composer_keys: ComposerKeyBindings,
@@ -339,6 +381,7 @@ impl Default for AppSettings {
             jira_story_points_discovery_complete: false,
             backlog_runway: BacklogRunwaySettings::default(),
             excluded_sprint_name_fragments: Vec::new(),
+            backlog_keys: BacklogKeyBindings::default(),
             speed_reader: SpeedReaderSettings::default(),
             recent_tickets_limit: 15,
             composer_keys: ComposerKeyBindings::default(),
@@ -434,6 +477,7 @@ impl AppSettings {
             excluded_sprint_name_fragments: sprint_name_fragments(
                 values.get(BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING),
             ),
+            backlog_keys: BacklogKeyBindings::from_values(values)?,
             speed_reader: SpeedReaderSettings {
                 wpm: values
                     .get(SPEED_READER_WPM_SETTING)
@@ -506,6 +550,18 @@ impl AppSettings {
             (
                 BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING,
                 self.excluded_sprint_name_fragments.join(","),
+            ),
+            (
+                BACKLOG_MOVE_TO_TOP_KEY_SETTING,
+                self.backlog_keys.move_to_top.sequence.clone(),
+            ),
+            (
+                BACKLOG_MOVE_TO_BOTTOM_KEY_SETTING,
+                self.backlog_keys.move_to_bottom.sequence.clone(),
+            ),
+            (
+                BACKLOG_VIEW_DESCRIPTION_KEY_SETTING,
+                self.backlog_keys.view_description.sequence.clone(),
             ),
             (SPEED_READER_WPM_SETTING, self.speed_reader.wpm.to_string()),
             (

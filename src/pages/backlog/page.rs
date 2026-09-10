@@ -11,18 +11,18 @@ use ratatui::{
     layout::{Constraint, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Paragraph as RatatuiParagraph, Wrap},
+    widgets::{Borders, Paragraph as RatatuiParagraph, Wrap},
 };
 use tuicore::{
     AnimationSettings, ChildKey, Column, CrossAlign, DataView, Dialog, DialogBackdrop, DialogHost,
-    DialogLayer, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId,
-    FocusRequest, FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint,
-    LifecycleCtx, MainAlign, Paragraph, RenderCtx, ScrollContainer, Spinner, TickResult, TreePath,
-    TuiEvent, TuiNode,
+    DialogLayer, DialogLayerPlacement, DockSpec, EventCtx, EventOutcome, EventRoute, Flex,
+    FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, Language, LayoutCtx, LayoutProposal,
+    LayoutResult, LayoutSizeHint, LifecycleCtx, MainAlign, Paragraph, RenderCtx, ScrollContainer,
+    Spinner, SyntaxHighlighter, TickResult, TreePath, TuiEvent, TuiNode,
 };
 
 use crate::{
-    app_settings::BacklogRunwaySettings,
+    app_settings::{BacklogKeyBindings, BacklogRunwaySettings},
     jira::{self, JiraAssignee, JiraEpic, JiraFixVersion, JiraOption},
     service::AppService,
     store::work_items::{
@@ -34,13 +34,15 @@ use crate::{
 use super::components::{
     BacklogAssignee, BacklogDestination, BacklogEpic, BacklogQuickMenu, BacklogQuickMenuEvent,
     BacklogRelease, BacklogSectionEvent, BacklogTree, RELEASE_DROPDOWN_KEY,
-    backlog_tree_with_issue_types,
+    backlog_tree_with_issue_types_and_keys,
 };
 use super::velocity_reports::copy_report;
 
 type BacklogQuickMenuLayer = DialogLayer<BacklogTree, BacklogQuickMenu>;
-type VelocityDialog = DialogHost<Flex<()>, ()>;
-type BacklogView = DialogLayer<BacklogQuickMenuLayer, VelocityDialog>;
+type BacklogDialog = DialogHost<Flex<()>, ()>;
+type BacklogView = DialogLayer<BacklogQuickMenuLayer, BacklogDialog>;
+
+const MOBILE_BACKLOG_WIDTH: u16 = 100;
 
 #[derive(Clone)]
 struct VelocityRow {
@@ -531,6 +533,8 @@ pub(crate) struct BacklogPage {
     settings_revision: u64,
     issue_types_requested: bool,
     velocity_dialog_close_requested: Rc<Cell<bool>>,
+    description_dialog_close_requested: Rc<Cell<bool>>,
+    area: Rect,
 }
 
 impl BacklogPage {
@@ -540,7 +544,13 @@ impl BacklogPage {
         let move_locked = Rc::new(Cell::new(false));
         let syncing_ticket_keys = Rc::new(RefCell::new(HashSet::new()));
         let velocity_dialog_close_requested = Rc::new(Cell::new(false));
+        let description_dialog_close_requested = Rc::new(Cell::new(false));
         let settings_revision = service.settings_revision();
+        let backlog_keys = service
+            .settings()
+            .read()
+            .map(|settings| settings.backlog_keys.clone())
+            .unwrap_or_default();
         Self {
             service,
             sender,
@@ -553,6 +563,7 @@ impl BacklogPage {
                 Rc::clone(&syncing_ticket_keys),
                 Rc::clone(&velocity_dialog_close_requested),
                 Vec::new(),
+                backlog_keys,
             ),
             loading_view: loading_view(),
             loading: false,
@@ -592,6 +603,8 @@ impl BacklogPage {
             settings_revision,
             issue_types_requested: false,
             velocity_dialog_close_requested,
+            description_dialog_close_requested,
+            area: Rect::default(),
         }
     }
 
@@ -1118,6 +1131,9 @@ impl BacklogPage {
                 BacklogSectionEvent::MoveLocked => self.report_move_locked(),
                 BacklogSectionEvent::TicketsSyncing { keys } => self.report_ticket_syncing(&keys),
                 BacklogSectionEvent::OpenTicket { key } => self.service.open_jira_issue(&key),
+                BacklogSectionEvent::OpenDescription { key } => {
+                    self.open_ticket_description(&key, ctx)
+                }
                 BacklogSectionEvent::YankTicketUrl { key } => {
                     self.copy_jira_url(&key, ctx);
                 }
@@ -1264,6 +1280,12 @@ impl BacklogPage {
                     self.focus_release_menu(ctx);
                 }
                 BacklogSectionEvent::ToggleCurrentUser { keys } => self.assign_current_user(keys),
+                BacklogSectionEvent::MoveToEdge {
+                    section_id,
+                    key,
+                    source_order,
+                    to_top,
+                } => self.move_from_menu(section_id, vec![key], source_order, to_top),
                 BacklogSectionEvent::Moved {
                     section_id,
                     moved_keys,
@@ -1321,6 +1343,10 @@ impl BacklogPage {
                 BacklogQuickMenuEvent::SetReleases { keys, releases } => {
                     self.set_releases(keys, releases);
                     self.view.base_mut().set_active_with_context(false, ctx);
+                }
+                BacklogQuickMenuEvent::ViewDescription { key } => {
+                    self.view.base_mut().set_active_with_context(false, ctx);
+                    self.open_ticket_description(&key, ctx);
                 }
                 BacklogQuickMenuEvent::MoveToTop {
                     section_id,
@@ -2276,6 +2302,7 @@ impl BacklogPage {
         let settings = self.service.settings();
         let settings = settings.read().expect("settings lock poisoned");
         self.velocity_dialog_close_requested.set(false);
+        self.description_dialog_close_requested.set(false);
         self.view.replace_layer(
             velocity_dialog(
                 self.snapshot
@@ -2288,7 +2315,59 @@ impl BacklogPage {
             ),
             ctx,
         );
+        self.view.set_fit_content(true);
+        self.view.set_fit_content_max(96, 26);
+        self.view.set_placement(DialogLayerPlacement::Center);
+        self.view
+            .layer_mut()
+            .dialog_mut()
+            .set_edge_borders(Borders::ALL);
         self.view.set_active_with_context(true, ctx);
+    }
+
+    fn open_description_dialog(
+        &mut self,
+        key: String,
+        title: String,
+        description: String,
+        ctx: &mut EventCtx<()>,
+    ) {
+        self.velocity_dialog_close_requested.set(false);
+        self.description_dialog_close_requested.set(false);
+        let close_requested = Rc::clone(&self.description_dialog_close_requested);
+        let content = Flex::column().child(
+            "description",
+            SyntaxHighlighter::new(description, Language::Markdown),
+            FlexItem::fill(1),
+        );
+        let dialog = Dialog::new()
+            .top_left_keyed(key, title)
+            .on_close(move |_| close_requested.set(true))
+            .host(content);
+        self.view.replace_layer(dialog, ctx);
+        self.view.set_docked(
+            DockSpec::bottom(50).cross_percent(description_width_percent(self.area.width)),
+        );
+        self.view.set_active_with_context(true, ctx);
+    }
+
+    fn open_ticket_description(&mut self, key: &str, ctx: &mut EventCtx<()>) {
+        let ticket = self
+            .snapshot
+            .as_ref()
+            .into_iter()
+            .flat_map(|snapshot| {
+                snapshot
+                    .sprints
+                    .iter()
+                    .flat_map(|sprint| &sprint.work_items)
+                    .chain(&snapshot.work_items)
+            })
+            .find(|work_item| work_item.key == key);
+        let (title, description) = ticket
+            .map(|work_item| (work_item.title.clone(), work_item.description.clone()))
+            .unwrap_or_default();
+        self.open_description_dialog(key.to_owned(), title, description, ctx);
     }
 
     fn copy_jira_url(&self, key: &str, ctx: &mut EventCtx<()>) {
@@ -2306,8 +2385,10 @@ impl BacklogPage {
         }
     }
 
-    fn close_velocity_dialog(&mut self, ctx: &mut EventCtx<()>) {
-        if self.velocity_dialog_close_requested.replace(false) {
+    fn close_backlog_dialog(&mut self, ctx: &mut EventCtx<()>) {
+        if self.velocity_dialog_close_requested.replace(false)
+            || self.description_dialog_close_requested.replace(false)
+        {
             self.view.set_active_with_context(false, ctx);
             self.focus_backlog_data(ctx);
         }
@@ -2331,6 +2412,7 @@ impl BacklogPage {
         if keys.is_empty() || !keys.iter().all(|key| final_order.contains(key)) {
             return;
         }
+        let selection_key = next_or_previous_unmoved_key(&final_order, &keys);
         final_order.retain(|item| !keys.contains(item));
         if to_top {
             final_order.splice(0..0, keys.iter().cloned());
@@ -2342,6 +2424,12 @@ impl BacklogPage {
             return;
         }
         self.rank(section_id, keys, final_order);
+        if let Some(key) = selection_key {
+            self.view
+                .base_mut()
+                .base_mut()
+                .clear_selection_and_highlight_ticket(&key);
+        }
     }
 
     fn transfer_to_section(
@@ -2678,6 +2766,17 @@ impl BacklogPage {
             return false;
         }
         self.settings_revision = settings_revision;
+        if let Ok(settings) = self.service.settings().read() {
+            let backlog_keys = settings.backlog_keys.clone();
+            self.view
+                .base_mut()
+                .base_mut()
+                .set_backlog_keys(backlog_keys.clone());
+            self.view
+                .base_mut()
+                .layer_mut()
+                .set_backlog_keys(backlog_keys);
+        }
         self.assignees = None;
         self.load_assignees();
         self.load(false, false);
@@ -2937,6 +3036,22 @@ fn source_order(snapshot: Option<&BacklogSnapshot>, section_id: &str) -> Vec<Str
         return Vec::new();
     };
     work_items.iter().map(|item| item.key.clone()).collect()
+}
+
+fn next_or_previous_unmoved_key(order: &[String], moved_keys: &[String]) -> Option<String> {
+    let first_moved = order.iter().position(|key| moved_keys.contains(key))?;
+    let last_moved = order.iter().rposition(|key| moved_keys.contains(key))?;
+    order
+        .iter()
+        .skip(last_moved + 1)
+        .find(|key| !moved_keys.contains(key))
+        .or_else(|| {
+            order[..first_moved]
+                .iter()
+                .rev()
+                .find(|key| !moved_keys.contains(key))
+        })
+        .cloned()
 }
 
 pub(super) fn reconcile_pending_transfer(
@@ -3332,16 +3447,18 @@ fn backlog_view(
     syncing_ticket_keys: Rc<RefCell<HashSet<String>>>,
     velocity_dialog_close_requested: Rc<Cell<bool>>,
     issue_types: Vec<JiraOption>,
+    backlog_keys: BacklogKeyBindings,
 ) -> BacklogView {
     let quick_menu = DialogLayer::new(
-        backlog_tree_with_issue_types(
+        backlog_tree_with_issue_types_and_keys(
             snapshot,
             section_sender,
             move_locked.clone(),
             syncing_ticket_keys,
             issue_types,
+            backlog_keys.clone(),
         ),
-        BacklogQuickMenu::new(move_locked),
+        BacklogQuickMenu::new_with_keys(move_locked, backlog_keys),
     )
     .active(false)
     .fit_content()
@@ -3363,13 +3480,21 @@ fn backlog_view(
     .backdrop(DialogBackdrop::dim().amount(0.55))
 }
 
+pub(super) fn description_width_percent(width: u16) -> u16 {
+    if width < MOBILE_BACKLOG_WIDTH {
+        100
+    } else {
+        60
+    }
+}
+
 pub(super) fn velocity_dialog(
     report: Option<&VelocityReport>,
     settings: &BacklogRunwaySettings,
     dynamic_ticket_size: Option<f64>,
     close_requested: Rc<Cell<bool>>,
     service: Option<AppService>,
-) -> VelocityDialog {
+) -> BacklogDialog {
     let latest_sprints = report.map_or(settings.jira_velocity_sprints, |report| {
         report.configured_sprints
     });
@@ -3770,6 +3895,7 @@ impl TuiNode for BacklogPage {
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.area = area;
         if self.shows_initial_loading() {
             ctx.with_focus_fallback(FocusId::new("backlog-loading"), area, |ctx| {
                 self.loading_view.layout(area, ctx)
@@ -3797,7 +3923,7 @@ impl TuiNode for BacklogPage {
             return self.loading_view.event(event, ctx);
         }
         let outcome = self.view.event(event, ctx);
-        self.close_velocity_dialog(ctx);
+        self.close_backlog_dialog(ctx);
         if self.drain_events(ctx) {
             ctx.request_redraw();
             ctx.request_tick();
@@ -3815,7 +3941,7 @@ impl TuiNode for BacklogPage {
             return self.loading_view.dispatch_event(route, event, ctx);
         }
         let outcome = self.view.dispatch_event(route, event, ctx);
-        self.close_velocity_dialog(ctx);
+        self.close_backlog_dialog(ctx);
         if self.drain_events(ctx) {
             ctx.request_redraw();
             ctx.request_tick();

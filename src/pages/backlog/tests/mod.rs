@@ -21,8 +21,9 @@ use super::{
         BacklogPage, MAX_UNCONFIRMED_TRANSFER_REFRESHES, PendingRank, PendingRankReconciliation,
         PendingTransfer, PendingTransferReconciliation, RequestGenerations, StatusTransitionCache,
         apply_assignee_to_snapshot, apply_status_to_snapshot, apply_story_points_to_snapshot,
-        current_user_assignment, move_work_items_to_edge, quick_menu_labels, recalculate_capacity,
-        reconcile_pending_rank, reconcile_pending_transfer, should_poll, source_transfer_highlight,
+        current_user_assignment, description_width_percent, move_work_items_to_edge,
+        quick_menu_labels, recalculate_capacity, reconcile_pending_rank,
+        reconcile_pending_transfer, should_poll, source_transfer_highlight,
         source_transfer_highlight_key, sprint_report, transfer_destinations,
         transfer_reconciliation_highlight, velocity_dialog, velocity_share_report,
     },
@@ -38,6 +39,7 @@ fn work_item(key: &str, title: &str) -> WorkItem {
     WorkItem {
         key: key.into(),
         title: title.into(),
+        description: String::new(),
         kind: "Story".into(),
         status: "To Do".into(),
         done: false,
@@ -2440,6 +2442,132 @@ fn unified_tree_uses_same_section_transient_selection_for_the_quick_menu() {
 }
 
 #[test]
+fn focused_root_ticket_move_hotkeys_target_the_section_edges() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    snapshot.work_items = vec![
+        work_item("FIN-1", "First"),
+        work_item("FIN-2", "Second"),
+        work_item("FIN-3", "Third"),
+    ];
+    let mut subtask = work_item("FIN-4", "Child");
+    subtask.kind = "Sub-task".into();
+    subtask.parent_key = Some("FIN-1".into());
+    snapshot.work_items.push(subtask);
+    let (sender, receiver) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    tree.dispatch_focus(
+        &data_focus_target(),
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    tree.highlight("ticket:FIN-2");
+
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('t'))),
+        &mut ctx,
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(super::components::BacklogSectionEvent::MoveToEdge {
+            section_id,
+            key,
+            source_order,
+            to_top: true,
+        }) if section_id == "backlog" && key == "FIN-2" && source_order == ["FIN-1", "FIN-2", "FIN-3"]
+    ));
+
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('b'))),
+        &mut ctx,
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(super::components::BacklogSectionEvent::MoveToEdge {
+            section_id,
+            key,
+            source_order,
+            to_top: false,
+        }) if section_id == "backlog" && key == "FIN-2" && source_order == ["FIN-1", "FIN-2", "FIN-3"]
+    ));
+
+    tree.highlight("ticket:FIN-4");
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('t'))),
+        &mut ctx,
+    );
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn moving_to_an_edge_selects_the_next_ticket_or_the_previous_ticket() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    snapshot.work_items = vec![
+        work_item("FIN-1", "First"),
+        work_item("FIN-2", "Second"),
+        work_item("FIN-3", "Third"),
+    ];
+    let order = vec!["FIN-1".into(), "FIN-2".into(), "FIN-3".into()];
+
+    let mut top_page = BacklogPage::with_snapshot_for_test(snapshot.clone());
+    top_page
+        .view_for_test()
+        .base_mut()
+        .base_mut()
+        .highlight("ticket:FIN-2");
+    top_page.move_from_menu("backlog".into(), vec!["FIN-2".into()], order.clone(), true);
+    assert_eq!(
+        top_page
+            .view_for_test()
+            .base_mut()
+            .base_mut()
+            .highlighted_id_for_test()
+            .as_deref(),
+        Some("ticket:FIN-3")
+    );
+
+    let mut bottom_page = BacklogPage::with_snapshot_for_test(snapshot.clone());
+    bottom_page
+        .view_for_test()
+        .base_mut()
+        .base_mut()
+        .highlight("ticket:FIN-2");
+    bottom_page.move_from_menu("backlog".into(), vec!["FIN-2".into()], order.clone(), false);
+    assert_eq!(
+        bottom_page
+            .view_for_test()
+            .base_mut()
+            .base_mut()
+            .highlighted_id_for_test()
+            .as_deref(),
+        Some("ticket:FIN-3")
+    );
+
+    let mut fallback_page = BacklogPage::with_snapshot_for_test(snapshot);
+    fallback_page
+        .view_for_test()
+        .base_mut()
+        .base_mut()
+        .highlight("ticket:FIN-3");
+    fallback_page.move_from_menu("backlog".into(), vec!["FIN-3".into()], order, true);
+    assert_eq!(
+        fallback_page
+            .view_for_test()
+            .base_mut()
+            .base_mut()
+            .highlighted_id_for_test()
+            .as_deref(),
+        Some("ticket:FIN-2")
+    );
+}
+
+#[test]
 fn ctrl_enter_opens_the_highlighted_ticket() {
     tuicore::init();
     let (sender, receiver) = mpsc::channel();
@@ -2467,6 +2595,79 @@ fn ctrl_enter_opens_the_highlighted_ticket() {
         receiver.try_recv(),
         Ok(super::components::BacklogSectionEvent::OpenTicket { key }) if key == "FIN-8"
     ));
+}
+
+#[test]
+fn v_opens_a_focused_description_snackbar() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    snapshot.work_items[0].title =
+        "Here is the title and this one is too long to fit in the snackbar without truncation"
+            .into();
+    snapshot.work_items[0].description = "## Details\n\nScrollable description".into();
+    let mut page = BacklogPage::with_snapshot_for_test(snapshot);
+    page.view_for_test()
+        .base_mut()
+        .base_mut()
+        .highlight("ticket:FIN-8");
+    let area = Rect::new(0, 0, 120, 30);
+    page.layout(area, &mut LayoutCtx::new());
+    let mut event = EventCtx::new(AnimationSettings::default());
+
+    page.dispatch_event(
+        &EventRoute::new(TreePath::from_keys([
+            ChildKey::first(),
+            ChildKey::first(),
+            ChildKey::new("data"),
+        ])),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('v'))),
+        &mut event,
+    );
+
+    assert!(page.view_for_test().is_active());
+    assert!(
+        matches!(event.focus_request(), Some(FocusRequest::Path(path)) if path == &TreePath::from_keys([ChildKey::second()]))
+    );
+    let mut layout = LayoutCtx::new();
+    page.layout(area, &mut layout);
+    assert!(
+        layout
+            .focus_targets()
+            .iter()
+            .any(|target| target.id == FocusId::new("syntax-highlighter"))
+    );
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            page.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let lines = rendered_lines(&terminal, area);
+    let text = lines.concat();
+    assert!(text.contains("Scrollable description"));
+    assert!(text.contains("FIN-8 Here is the title and this one is too long"));
+    assert!(text.contains("..."));
+
+    let (y, title_line) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.contains("FIN-8 Here is") && line.contains("..."))
+        .expect("description title should render");
+    let x = cell_position(title_line, "FIN-8").expect("description key should render");
+    let key_cell = terminal
+        .backend()
+        .buffer()
+        .cell((x as u16, y as u16))
+        .unwrap();
+    assert_eq!(key_cell.fg, tuicore::theme().muted_fg());
+}
+
+#[test]
+fn description_snackbar_is_full_width_on_mobile_and_sixty_percent_on_desktop() {
+    assert_eq!(description_width_percent(99), 100);
+    assert_eq!(description_width_percent(100), 60);
 }
 
 #[test]
@@ -2629,6 +2830,7 @@ fn quick_menu_opens_statuses_before_move_actions() {
             "Set story points",
             "Set epic",
             "Set release",
+            "View description",
             "Move to top",
             "Move to bottom"
         ]
@@ -2667,6 +2869,92 @@ fn quick_menu_opens_statuses_before_move_actions() {
         menu.take_events().as_slice(),
         [BacklogQuickMenuEvent::SetStatus { status }]
             if status.label == "Done" && status.issues[0].transition_id == "31"
+    ));
+}
+
+#[test]
+fn quick_menu_right_aligns_action_hotkeys() {
+    tuicore::init();
+    let mut menu = BacklogQuickMenu::new(Default::default());
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    assert!(menu.open(
+        "backlog".into(),
+        vec!["FIN-1".into()],
+        vec!["FIN-1".into()],
+        "To Do".into(),
+        "Ada".into(),
+        "3".into(),
+        "FIN-42".into(),
+        "v1.4".into(),
+        Vec::new(),
+        &mut ctx,
+    ));
+    let area = Rect::new(0, 0, 60, 14);
+    let mut layout = LayoutCtx::new();
+    layout.with_overlay_bounds(area, |ctx| menu.layout(area, ctx));
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            menu.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let lines = rendered_lines(&terminal, area);
+
+    for (label, hotkey) in [
+        ("Assign user (@AD)", "a"),
+        ("Set status (To Do)", "s"),
+        ("Set story points (3)", "p"),
+        ("Set epic (FIN-42)", "e"),
+        ("Set release (v1.4)", "r"),
+        ("View description", "v"),
+        ("Move to top", "t"),
+        ("Move to bottom", "b"),
+    ] {
+        let line = lines
+            .iter()
+            .find(|line| line.contains(label))
+            .expect("action should be visible");
+        assert!(line.trim_end().ends_with(hotkey));
+    }
+}
+
+#[test]
+fn quick_menu_view_description_targets_the_selected_ticket() {
+    tuicore::init();
+    let mut menu = BacklogQuickMenu::new(Default::default());
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    assert!(menu.open(
+        "backlog".into(),
+        vec!["FIN-1".into()],
+        vec!["FIN-1".into()],
+        "To Do".into(),
+        "Ada".into(),
+        String::new(),
+        String::new(),
+        String::new(),
+        Vec::new(),
+        &mut ctx,
+    ));
+    for _ in 0..5 {
+        menu.event(
+            &TuiEvent::Key(KeyEvent {
+                code: Key::Char('j'),
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            &mut EventCtx::new(AnimationSettings::default()),
+        );
+    }
+
+    menu.event(
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::new(AnimationSettings::default()),
+    );
+
+    assert!(matches!(
+        menu.take_events().as_slice(),
+        [BacklogQuickMenuEvent::ViewDescription { key }] if key == "FIN-1"
     ));
 }
 

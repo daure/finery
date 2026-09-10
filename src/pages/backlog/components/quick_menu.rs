@@ -14,10 +14,13 @@ use tuicore::{
     AnimationSettings, ChildKey, Dropdown, DropdownCommitMode, DropdownLabelPosition,
     DropdownSearchMode, DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId,
     FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx,
-    TickResult, TuiEvent, TuiNode, keybindings,
+    TickResult, TuiEvent, TuiNode, keybindings, line_width,
 };
 
-use crate::{components::avatar::initials, store::work_items::StatusTransition};
+use crate::{
+    app_settings::BacklogKeyBindings, components::avatar::initials,
+    store::work_items::StatusTransition,
+};
 
 const MENU_HOST_WIDTH: u16 = 69;
 const MENU_HOST_HEIGHT: u16 = 18;
@@ -40,6 +43,7 @@ pub(in crate::pages::backlog) enum BacklogQuickAction {
     SetRelease(String),
     ReleasesLoading,
     SetReleaseTo(BacklogRelease),
+    ViewDescription,
     MoveToTop,
     MoveToBottom,
     MoveToSection(BacklogDestination),
@@ -54,13 +58,14 @@ impl BacklogQuickAction {
         epic: &str,
         release: &str,
         story_points: &str,
-    ) -> [Self; 7] {
+    ) -> [Self; 8] {
         [
             Self::AssignUser(assignee.to_owned()),
             Self::SetStatus(status.to_owned()),
             Self::SetStoryPoints(story_points.to_owned()),
             Self::SetEpic(epic.to_owned()),
             Self::SetRelease(release.to_owned()),
+            Self::ViewDescription,
             Self::MoveToTop,
             Self::MoveToBottom,
         ]
@@ -96,6 +101,7 @@ impl BacklogQuickAction {
             Self::SetRelease(release) => format!("Set release ({release})"),
             Self::ReleasesLoading => "Loading releases…".into(),
             Self::SetReleaseTo(release) => release.name.clone(),
+            Self::ViewDescription => "View description".into(),
             Self::MoveToTop => "Move to top".into(),
             Self::MoveToBottom => "Move to bottom".into(),
             Self::MoveToSection(destination) => format!("Move to {}", destination.label),
@@ -209,6 +215,9 @@ pub(in crate::pages::backlog) enum BacklogQuickMenuEvent {
         keys: Vec<String>,
         releases: Vec<BacklogRelease>,
     },
+    ViewDescription {
+        key: String,
+    },
     MoveToTop {
         section_id: String,
         keys: Vec<String>,
@@ -242,6 +251,7 @@ pub(in crate::pages::backlog) struct BacklogQuickMenu {
     move_locked: Rc<Cell<bool>>,
     selecting_releases: bool,
     current_release_names: Vec<String>,
+    backlog_keys: Rc<RefCell<BacklogKeyBindings>>,
 }
 
 impl BacklogQuickMenu {
@@ -263,15 +273,27 @@ impl BacklogQuickMenu {
         BacklogQuickAction::AssignUserTo(assignee).label()
     }
 
+    #[cfg(test)]
     pub(in crate::pages::backlog) fn new(move_locked: Rc<Cell<bool>>) -> Self {
+        Self::new_with_keys(move_locked, BacklogKeyBindings::default())
+    }
+
+    pub(in crate::pages::backlog) fn new_with_keys(
+        move_locked: Rc<Cell<bool>>,
+        backlog_keys: BacklogKeyBindings,
+    ) -> Self {
         let selected = Rc::new(RefCell::new(Vec::new()));
         let selected_releases = Rc::new(RefCell::new(None));
         let selected_actions = Rc::clone(&selected);
+        let action_keys = Rc::new(RefCell::new(backlog_keys));
+        let action_keys_for_renderer = Rc::clone(&action_keys);
         let dropdown = Dropdown::single_rich(
             BacklogQuickAction::main_actions("", "Unassigned", "", "", ""),
             |action| action.clone(),
             |action| action.label(),
-            quick_action_text,
+            move |action, query, mode| {
+                quick_action_text(action, query, mode, &action_keys_for_renderer.borrow())
+            },
         )
         .variant(DropdownVariant::Filled)
         .label("Backlog actions")
@@ -319,7 +341,12 @@ impl BacklogQuickMenu {
             move_locked,
             selecting_releases: false,
             current_release_names: Vec::new(),
+            backlog_keys: action_keys,
         }
+    }
+
+    pub(in crate::pages::backlog) fn set_backlog_keys(&mut self, backlog_keys: BacklogKeyBindings) {
+        *self.backlog_keys.borrow_mut() = backlog_keys;
     }
 
     pub(in crate::pages::backlog) fn open(
@@ -637,6 +664,12 @@ impl BacklogQuickMenu {
                     continue;
                 }
                 BacklogQuickAction::SetReleaseTo(_) => continue,
+                BacklogQuickAction::ViewDescription => {
+                    let Some(key) = self.keys.first().cloned() else {
+                        continue;
+                    };
+                    BacklogQuickMenuEvent::ViewDescription { key }
+                }
                 BacklogQuickAction::MoveToTop => BacklogQuickMenuEvent::MoveToTop {
                     section_id,
                     keys: self.keys.clone(),
@@ -753,7 +786,51 @@ fn quick_action_text(
     action: &BacklogQuickAction,
     _query: &str,
     _mode: DropdownSearchMode,
+    backlog_keys: &BacklogKeyBindings,
 ) -> Text<'static> {
+    let label = action.label();
+    let Some(hotkey) = quick_action_hotkey(action, backlog_keys) else {
+        return quick_action_detail_text(action);
+    };
+    let spacing = usize::from(MENU_FIELD_WIDTH)
+        .saturating_sub(line_width(&Line::from(label.as_str())))
+        .saturating_sub(line_width(&Line::from(hotkey.as_str())));
+    Text::from(Line::from(vec![
+        Span::raw(label),
+        Span::raw(" ".repeat(spacing)),
+        Span::styled(hotkey, Style::default().fg(tuicore::theme().muted_fg())),
+    ]))
+}
+
+fn quick_action_hotkey(
+    action: &BacklogQuickAction,
+    backlog_keys: &BacklogKeyBindings,
+) -> Option<String> {
+    match action {
+        BacklogQuickAction::AssignUser(_) => Some(tuicore::KeySpec::plain('a').label()),
+        BacklogQuickAction::SetStatus(_) => Some(tuicore::KeySpec::plain('s').label()),
+        BacklogQuickAction::SetStoryPoints(_) => Some(tuicore::KeySpec::plain('p').label()),
+        BacklogQuickAction::SetEpic(_) => Some(tuicore::KeySpec::plain('e').label()),
+        BacklogQuickAction::SetRelease(_) => Some(tuicore::KeySpec::plain('r').label()),
+        BacklogQuickAction::ViewDescription => Some(backlog_keys.view_description.label()),
+        BacklogQuickAction::MoveToTop => Some(backlog_keys.move_to_top.label()),
+        BacklogQuickAction::MoveToBottom => Some(backlog_keys.move_to_bottom.label()),
+        BacklogQuickAction::StatusLoading
+        | BacklogQuickAction::SetStatusTo(_)
+        | BacklogQuickAction::SetStoryPointsTo(_)
+        | BacklogQuickAction::AssigneesLoading
+        | BacklogQuickAction::AssignUserTo(_)
+        | BacklogQuickAction::EpicsLoading
+        | BacklogQuickAction::SetEpicTo(_)
+        | BacklogQuickAction::ReleasesLoading
+        | BacklogQuickAction::SetReleaseTo(_)
+        | BacklogQuickAction::MoveToSection(_)
+        | BacklogQuickAction::MoveToDestinationTop(_)
+        | BacklogQuickAction::MoveToDestinationBottom(_) => None,
+    }
+}
+
+fn quick_action_detail_text(action: &BacklogQuickAction) -> Text<'static> {
     match action {
         BacklogQuickAction::SetStoryPointsTo(BacklogStoryPoints::None) => Text::from(Line::from(
             Span::styled("None", Style::default().fg(tuicore::theme().muted_fg())),

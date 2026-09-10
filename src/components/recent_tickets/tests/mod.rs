@@ -83,6 +83,7 @@ fn work_item(kind: &str) -> WorkItem {
     WorkItem {
         key: "FIN-1".into(),
         title: "Example".into(),
+        description: String::new(),
         kind: kind.into(),
         status: "To Do".into(),
         done: false,

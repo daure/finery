@@ -4,8 +4,12 @@ mod quick_menu;
 #[cfg(test)]
 pub(super) use backlog_tree::backlog_tree;
 #[cfg(test)]
+pub(super) use backlog_tree::backlog_tree_with_issue_types;
+#[cfg(test)]
 pub(super) use backlog_tree::selectable_issue_types;
-pub(super) use backlog_tree::{BacklogSectionEvent, BacklogTree, backlog_tree_with_issue_types};
+pub(super) use backlog_tree::{
+    BacklogSectionEvent, BacklogTree, backlog_tree_with_issue_types_and_keys,
+};
 pub(super) use quick_menu::{
     BacklogAssignee, BacklogDestination, BacklogEpic, BacklogQuickMenu, BacklogQuickMenuEvent,
     BacklogRelease, RELEASE_DROPDOWN_KEY,

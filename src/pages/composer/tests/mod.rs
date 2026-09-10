@@ -2160,6 +2160,7 @@ fn composer_rows_show_current_ticket_properties_with_presentation_only_details()
                 work_item: WorkItem {
                     key: "FIN-142".into(),
                     title: "Keep checkout state across retries".into(),
+                    description: String::new(),
                     kind: "Story".into(),
                     status: "In Progress".into(),
                     done: false,

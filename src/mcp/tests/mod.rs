@@ -380,6 +380,7 @@ fn work_item(index: usize) -> WorkItem {
     WorkItem {
         key: format!("FIN-{index}"),
         title: format!("Title for FIN-{index}"),
+        description: String::new(),
         kind: "Story".into(),
         status: "To Do".into(),
         done: false,

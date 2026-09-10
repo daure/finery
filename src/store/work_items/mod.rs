@@ -2,6 +2,7 @@
 pub(crate) struct WorkItem {
     pub key: String,
     pub title: String,
+    pub description: String,
     pub kind: String,
     pub status: String,
     pub done: bool,

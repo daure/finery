@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use super::{
     AppSettings, BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING,
     BACKLOG_FIXED_SPRINT_CAPACITY_SETTING, BACKLOG_FIXED_TICKET_SIZE_SETTING,
+    BACKLOG_MOVE_TO_BOTTOM_KEY_SETTING, BACKLOG_MOVE_TO_TOP_KEY_SETTING,
     BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING, BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING,
     BACKLOG_USE_JIRA_VELOCITY_SETTING, COMPOSER_ADD_CHILD_KEY_SETTING,
     COMPOSER_ADD_SIBLING_KEY_SETTING, COMPOSER_COMMIT_KEY_SETTING,
@@ -25,6 +26,29 @@ fn persistence_only_includes_changed_settings() {
         current.changed_values(&previous),
         vec![(SPEED_READER_WPM_SETTING, "500".into())]
     );
+}
+
+#[test]
+fn backlog_move_keys_resolve_labels_and_reject_duplicates() {
+    let settings = AppSettings::resolve(&HashMap::from([
+        (BACKLOG_MOVE_TO_TOP_KEY_SETTING.into(), "shift+t".into()),
+        (BACKLOG_MOVE_TO_BOTTOM_KEY_SETTING.into(), "alt+b".into()),
+    ]))
+    .unwrap();
+
+    assert_eq!(settings.backlog_keys.move_to_top.label(), "T");
+    assert_eq!(settings.backlog_keys.move_to_bottom.label(), "⌥b");
+    assert!(
+        settings
+            .values()
+            .contains(&(BACKLOG_MOVE_TO_TOP_KEY_SETTING, "shift+t".into()))
+    );
+
+    let duplicates = HashMap::from([
+        (BACKLOG_MOVE_TO_TOP_KEY_SETTING.into(), "t".into()),
+        (BACKLOG_MOVE_TO_BOTTOM_KEY_SETTING.into(), "t".into()),
+    ]);
+    assert!(AppSettings::resolve(&duplicates).is_err());
 }
 
 #[test]

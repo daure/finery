@@ -7,6 +7,7 @@ fn work_item(key: &str, story_points: Option<f64>) -> WorkItem {
     WorkItem {
         key: key.into(),
         title: key.into(),
+        description: String::new(),
         kind: "Story".into(),
         status: "To Do".into(),
         done: false,

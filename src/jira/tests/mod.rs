@@ -294,6 +294,7 @@ fn composer_fetch_fields_combine_ticket_and_presentation_fields() {
 
     assert!(ISSUE_FIELDS.iter().all(|field| fields.contains(field)));
     assert!(BACKLOG_FIELDS.iter().all(|field| fields.contains(field)));
+    assert!(BACKLOG_FIELDS.contains(&"description"));
     assert!(COMPOSER_FIELDS.iter().all(|field| fields.contains(field)));
     assert!(fields.contains(&"customfield_10016"));
     assert!(is_ticket_number_query("42"));
@@ -798,6 +799,7 @@ fn jira_issue_maps_ticket_and_presentation_fields_together() {
     assert_eq!(ticket.parent_title.as_deref(), Some("Checkout"));
     assert_eq!(ticket.parent_kind, Some(TicketKind::Epic));
     assert_eq!(work_item.epic_name.as_deref(), Some("Checkout"));
+    assert_eq!(work_item.description, "Keep basket state.");
     assert!(ISSUE_FIELDS.contains(&"parent"));
     assert!(ISSUE_FIELDS.contains(&"subtasks"));
 }

@@ -176,6 +176,7 @@ fn search_ticket(ticket: Ticket) -> ComposerSearchTicket {
         work_item: WorkItem {
             key: ticket.key.clone(),
             title: ticket.title.clone(),
+            description: ticket.description.clone(),
             kind: format!("{:?}", ticket.kind),
             status: ticket.status.clone(),
             done: false,

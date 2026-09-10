@@ -22,6 +22,7 @@ use tuicore::{
 };
 
 use crate::{
+    app_settings::BacklogKeyBindings,
     components::{
         avatar::initials,
         ticket_number_jump::{TicketNumberJump, exact_ticket_number_matches},
@@ -88,6 +89,9 @@ pub(in crate::pages::backlog) enum BacklogSectionEvent {
     OpenTicket {
         key: String,
     },
+    OpenDescription {
+        key: String,
+    },
     YankTicketUrl {
         key: String,
     },
@@ -130,6 +134,12 @@ pub(in crate::pages::backlog) enum BacklogSectionEvent {
     },
     ToggleCurrentUser {
         keys: Vec<String>,
+    },
+    MoveToEdge {
+        section_id: String,
+        key: String,
+        source_order: Vec<String>,
+        to_top: bool,
     },
     Moved {
         section_id: String,
@@ -214,12 +224,31 @@ pub(in crate::pages::backlog) fn backlog_tree(
     )
 }
 
+#[cfg(test)]
 pub(in crate::pages::backlog) fn backlog_tree_with_issue_types(
     snapshot: &BacklogSnapshot,
     events: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
     syncing_ticket_keys: Rc<RefCell<HashSet<String>>>,
     issue_types: Vec<JiraOption>,
+) -> BacklogTree {
+    backlog_tree_with_issue_types_and_keys(
+        snapshot,
+        events,
+        move_locked,
+        syncing_ticket_keys,
+        issue_types,
+        BacklogKeyBindings::default(),
+    )
+}
+
+pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
+    snapshot: &BacklogSnapshot,
+    events: Sender<BacklogSectionEvent>,
+    move_locked: Rc<Cell<bool>>,
+    syncing_ticket_keys: Rc<RefCell<HashSet<String>>>,
+    issue_types: Vec<JiraOption>,
+    backlog_keys: BacklogKeyBindings,
 ) -> BacklogTree {
     let number_jump = Rc::new(RefCell::new(TicketNumberJump::default()));
     let filters = BacklogFilters::default();
@@ -391,6 +420,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types(
         issue_type_labels,
         snapshot: snapshot.clone(),
         number_jump,
+        backlog_keys,
     }
 }
 
@@ -422,6 +452,7 @@ pub(in crate::pages::backlog) struct BacklogTree {
     issue_type_labels: Rc<RefCell<HashMap<String, String>>>,
     snapshot: BacklogSnapshot,
     number_jump: Rc<RefCell<TicketNumberJump>>,
+    backlog_keys: BacklogKeyBindings,
 }
 
 impl BacklogTree {
@@ -506,6 +537,10 @@ impl BacklogTree {
         self.issue_types.set_rows(issue_types);
     }
 
+    pub(in crate::pages::backlog) fn set_backlog_keys(&mut self, backlog_keys: BacklogKeyBindings) {
+        self.backlog_keys = backlog_keys;
+    }
+
     pub(in crate::pages::backlog) fn set_loading(&mut self, loading: bool) {
         self.loading = loading;
         self.refresh.set_disabled(loading);
@@ -520,6 +555,22 @@ impl BacklogTree {
         self.control
             .data_view_mut()
             .highlight_id(&row_id.to_owned());
+    }
+
+    pub(in crate::pages::backlog) fn clear_selection_and_highlight_ticket(&mut self, key: &str) {
+        let row_id = self
+            .control
+            .items()
+            .iter()
+            .find_map(|row| match &row.content {
+                BacklogRowContent::WorkItem(item) if item.item.key == key => Some(row.id.clone()),
+                BacklogRowContent::Section { .. } | BacklogRowContent::Group { .. } => None,
+                BacklogRowContent::WorkItem(_) => None,
+            });
+        self.control.clear_transient_selection();
+        if let Some(row_id) = row_id {
+            self.highlight(&row_id);
+        }
     }
 
     #[cfg(test)]
@@ -815,6 +866,77 @@ impl BacklogTree {
         true
     }
 
+    fn open_highlighted_description(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        if self.control.data_view().is_searching()
+            || !matches!(event, TuiEvent::Key(key) if self.backlog_keys.view_description.matches(*key))
+        {
+            return false;
+        }
+        let Some(row) = self
+            .control
+            .data_view()
+            .highlighted_id()
+            .and_then(|id| self.control.items().iter().find(|row| row.id == id))
+        else {
+            return false;
+        };
+        let BacklogRowContent::WorkItem(item) = &row.content else {
+            return false;
+        };
+        let _ = self.events.send(BacklogSectionEvent::OpenDescription {
+            key: item.item.key.clone(),
+        });
+        ctx.stop_propagation();
+        true
+    }
+
+    fn move_highlighted_ticket_to_edge(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        if self.control.data_view().is_searching() || self.control.is_reordering() {
+            return false;
+        }
+        let TuiEvent::Key(pressed) = event else {
+            return false;
+        };
+        let to_top = if self.backlog_keys.move_to_top.matches(*pressed) {
+            true
+        } else if self.backlog_keys.move_to_bottom.matches(*pressed) {
+            false
+        } else {
+            return false;
+        };
+        let Some(row) = self
+            .control
+            .data_view()
+            .highlighted_id()
+            .and_then(|id| self.control.items().iter().find(|row| row.id == id))
+        else {
+            return false;
+        };
+        let BacklogRowContent::WorkItem(item) = &row.content else {
+            return false;
+        };
+        if !item.rankable_root || matches!(item.item.kind, WorkItemKind::Subtask) {
+            return false;
+        }
+        let key = item.item.key.clone();
+        if self.move_locked.get() {
+            let _ = self.events.send(BacklogSectionEvent::MoveLocked);
+        } else if self.tickets_are_syncing(std::slice::from_ref(&key)) {
+            let _ = self
+                .events
+                .send(BacklogSectionEvent::TicketsSyncing { keys: vec![key] });
+        } else {
+            let _ = self.events.send(BacklogSectionEvent::MoveToEdge {
+                source_order: self.issue_keys_in_section(&item.section),
+                section_id: item.section.clone(),
+                key,
+                to_top,
+            });
+        }
+        ctx.stop_propagation();
+        true
+    }
+
     fn handle_yank(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
         let TuiEvent::Hotkey(HotkeyEvent::Commit(sequence)) = event else {
             return false;
@@ -1047,6 +1169,9 @@ impl BacklogTree {
             return EventOutcome::Handled;
         }
         if self.open_highlighted_ticket(event, ctx) {
+            return EventOutcome::Handled;
+        }
+        if self.open_highlighted_description(event, ctx) {
             return EventOutcome::Handled;
         }
         if self.open_quick_menu(event, ctx) {
@@ -1475,6 +1600,7 @@ impl TuiNode for BacklogTree {
             FocusId::new("data-view"),
             self.control_area,
             [
+                self.backlog_keys.view_description.sequence().to_owned(),
                 "yu".to_owned(),
                 "yp".to_owned(),
                 "yg".to_owned(),
@@ -1590,6 +1716,14 @@ impl TuiNode for BacklogTree {
                 .refocus_data_view_after_unfocus(event, ctx)
                 .then_some(EventOutcome::Handled)
                 .unwrap_or(outcome);
+        }
+        if route
+            .path
+            .without_first_if(&ChildKey::new("data"))
+            .is_some()
+            && self.move_highlighted_ticket_to_edge(event, ctx)
+        {
+            return EventOutcome::Handled;
         }
         let keeps_data_focus = route
             .path

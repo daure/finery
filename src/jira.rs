@@ -43,8 +43,9 @@ const ISSUE_FIELDS: [&str; 14] = [
     "statuscategorychangedate",
 ];
 
-const BACKLOG_FIELDS: [&str; 10] = [
+const BACKLOG_FIELDS: [&str; 11] = [
     "summary",
+    "description",
     "issuetype",
     "status",
     "priority",

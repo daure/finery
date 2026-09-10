@@ -187,6 +187,7 @@ fn to_work_item_fields(key: &str, fields: &Value, story_points_field_id: Option<
     WorkItem {
         key: key.into(),
         title: field("summary").as_str().unwrap_or(key).into(),
+        description: adf_to_markdown(field("description")),
         kind: named_field(field("issuetype")).unwrap_or_else(|| "Issue".into()),
         status: named_field(field("status")).unwrap_or_default(),
         done: named_field(field("status")).is_some_and(|status| is_done_status(&status)),
