@@ -696,6 +696,65 @@ impl AppService {
         jira::assign_users(&settings, issue_keys, account_id)
     }
 
+    pub(crate) fn jira_set_epics(
+        &self,
+        issue_keys: &[String],
+        epic_key: Option<&str>,
+    ) -> Result<(), String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::set_epics(&settings, issue_keys, epic_key)
+    }
+
+    pub(crate) fn jira_set_fix_versions(
+        &self,
+        issue_keys: &[String],
+        version_ids: &[String],
+    ) -> Result<(), String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::set_fix_versions(&settings, issue_keys, version_ids)
+    }
+
+    pub(crate) fn jira_set_story_points(
+        &self,
+        issue_keys: &[String],
+        story_points: Option<f64>,
+    ) -> Result<(), String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::set_story_points(&settings, issue_keys, story_points)
+    }
+
+    pub(crate) fn jira_default_project_epics(&self) -> Result<Vec<jira::JiraEpic>, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::epics(&settings)
+    }
+
+    pub(crate) fn jira_default_project_fix_versions(
+        &self,
+    ) -> Result<Vec<jira::JiraFixVersion>, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::fix_versions(&settings, settings.jira_default_project.trim(), "")
+    }
+
     pub(crate) fn jira_current_user(&self) -> Result<jira::JiraAssignee, String> {
         let settings = self
             .settings

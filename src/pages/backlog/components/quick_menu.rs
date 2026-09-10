@@ -4,28 +4,42 @@ use std::{
     time::Duration,
 };
 
-use ratatui::{Frame, layout::Rect};
+use ratatui::{
+    Frame,
+    layout::Rect,
+    style::Style,
+    text::{Line, Span, Text},
+};
 use tuicore::{
-    AnimationSettings, Dropdown, DropdownCommitMode, DropdownLabelPosition, DropdownSearchMode,
-    DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId, FocusTarget, LayoutCtx,
-    LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, TickResult, TuiEvent,
-    TuiNode, keybindings,
+    AnimationSettings, ChildKey, Dropdown, DropdownCommitMode, DropdownLabelPosition,
+    DropdownSearchMode, DropdownVariant, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId,
+    FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx,
+    TickResult, TuiEvent, TuiNode, keybindings,
 };
 
 use crate::{components::avatar::initials, store::work_items::StatusTransition};
 
-const MENU_HOST_WIDTH: u16 = 46;
-const MENU_HOST_HEIGHT: u16 = 10;
-const MENU_FIELD_WIDTH: u16 = 36;
+const MENU_HOST_WIDTH: u16 = 69;
+const MENU_HOST_HEIGHT: u16 = 18;
+const MENU_FIELD_WIDTH: u16 = 54;
+pub(in crate::pages::backlog) const RELEASE_DROPDOWN_KEY: &str = "releases";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(in crate::pages::backlog) enum BacklogQuickAction {
     SetStatus(String),
     StatusLoading,
     SetStatusTo(StatusTransition),
+    SetStoryPoints(String),
+    SetStoryPointsTo(BacklogStoryPoints),
     AssignUser(String),
     AssigneesLoading,
     AssignUserTo(BacklogAssignee),
+    SetEpic(String),
+    EpicsLoading,
+    SetEpicTo(BacklogEpic),
+    SetRelease(String),
+    ReleasesLoading,
+    SetReleaseTo(BacklogRelease),
     MoveToTop,
     MoveToBottom,
     MoveToSection(BacklogDestination),
@@ -34,10 +48,19 @@ pub(in crate::pages::backlog) enum BacklogQuickAction {
 }
 
 impl BacklogQuickAction {
-    pub(in crate::pages::backlog) fn main_actions(status: &str, assignee: &str) -> [Self; 4] {
+    pub(in crate::pages::backlog) fn main_actions(
+        status: &str,
+        assignee: &str,
+        epic: &str,
+        release: &str,
+        story_points: &str,
+    ) -> [Self; 7] {
         [
             Self::AssignUser(assignee.to_owned()),
             Self::SetStatus(status.to_owned()),
+            Self::SetStoryPoints(story_points.to_owned()),
+            Self::SetEpic(epic.to_owned()),
+            Self::SetRelease(release.to_owned()),
             Self::MoveToTop,
             Self::MoveToBottom,
         ]
@@ -49,9 +72,30 @@ impl BacklogQuickAction {
             Self::SetStatus(status) => format!("Set status ({status})"),
             Self::StatusLoading => "Loading statuses…".into(),
             Self::SetStatusTo(status) => status.label.clone(),
+            Self::SetStoryPoints(story_points) if story_points.is_empty() => {
+                "Set story points".into()
+            }
+            Self::SetStoryPoints(story_points) => format!("Set story points ({story_points})"),
+            Self::SetStoryPointsTo(story_points) => story_points.label().into(),
             Self::AssignUser(assignee) => format!("Assign user (@{})", initials(assignee)),
             Self::AssigneesLoading => "Loading users…".into(),
-            Self::AssignUserTo(assignee) => assignee.display_name.clone(),
+            Self::AssignUserTo(assignee) if assignee.account_id.is_empty() => "None".into(),
+            Self::AssignUserTo(assignee) => {
+                format!(
+                    "{} (@{})",
+                    assignee.display_name,
+                    initials(&assignee.display_name)
+                )
+            }
+            Self::SetEpic(epic) if epic.is_empty() => "Set epic".into(),
+            Self::SetEpic(epic) => format!("Set epic ({epic})"),
+            Self::EpicsLoading => "Loading epics…".into(),
+            Self::SetEpicTo(epic) if epic.key.is_empty() => "None".into(),
+            Self::SetEpicTo(epic) => epic.title.clone(),
+            Self::SetRelease(release) if release.is_empty() => "Set release".into(),
+            Self::SetRelease(release) => format!("Set release ({release})"),
+            Self::ReleasesLoading => "Loading releases…".into(),
+            Self::SetReleaseTo(release) => release.name.clone(),
             Self::MoveToTop => "Move to top".into(),
             Self::MoveToBottom => "Move to bottom".into(),
             Self::MoveToSection(destination) => format!("Move to {}", destination.label),
@@ -63,10 +107,73 @@ impl BacklogQuickAction {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(in crate::pages::backlog) enum BacklogStoryPoints {
+    None,
+    One,
+    Two,
+    Three,
+    Five,
+    Eight,
+    Thirteen,
+    Twenty,
+}
+
+impl BacklogStoryPoints {
+    const ALL: [Self; 8] = [
+        Self::None,
+        Self::One,
+        Self::Two,
+        Self::Three,
+        Self::Five,
+        Self::Eight,
+        Self::Thirteen,
+        Self::Twenty,
+    ];
+
+    fn value(self) -> Option<f64> {
+        match self {
+            Self::None => None,
+            Self::One => Some(1.0),
+            Self::Two => Some(2.0),
+            Self::Three => Some(3.0),
+            Self::Five => Some(5.0),
+            Self::Eight => Some(8.0),
+            Self::Thirteen => Some(13.0),
+            Self::Twenty => Some(20.0),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::One => "1",
+            Self::Two => "2",
+            Self::Three => "3",
+            Self::Five => "5",
+            Self::Eight => "8",
+            Self::Thirteen => "13",
+            Self::Twenty => "20",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct BacklogAssignee {
     pub account_id: String,
     pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(in crate::pages::backlog) struct BacklogEpic {
+    pub key: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(in crate::pages::backlog) struct BacklogRelease {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -75,7 +182,7 @@ pub(in crate::pages::backlog) struct BacklogDestination {
     pub label: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(in crate::pages::backlog) enum BacklogQuickMenuEvent {
     LoadStatuses {
         keys: Vec<String>,
@@ -83,10 +190,24 @@ pub(in crate::pages::backlog) enum BacklogQuickMenuEvent {
     SetStatus {
         status: StatusTransition,
     },
+    SetStoryPoints {
+        keys: Vec<String>,
+        story_points: Option<f64>,
+    },
     LoadAssignees,
     AssignUser {
         keys: Vec<String>,
         assignee: BacklogAssignee,
+    },
+    LoadEpics,
+    SetEpic {
+        keys: Vec<String>,
+        epic: BacklogEpic,
+    },
+    LoadReleases,
+    SetReleases {
+        keys: Vec<String>,
+        releases: Vec<BacklogRelease>,
     },
     MoveToTop {
         section_id: String,
@@ -110,13 +231,17 @@ pub(in crate::pages::backlog) enum BacklogQuickMenuEvent {
 
 pub(in crate::pages::backlog) struct BacklogQuickMenu {
     dropdown: Dropdown<BacklogQuickAction, BacklogQuickAction>,
+    release_dropdown: Dropdown<BacklogQuickAction, BacklogQuickAction>,
     selected: Rc<RefCell<Vec<BacklogQuickAction>>>,
+    selected_releases: Rc<RefCell<Option<Vec<BacklogQuickAction>>>>,
     keys: Vec<String>,
     section_id: Option<String>,
     source_order: Vec<String>,
     events: Vec<BacklogQuickMenuEvent>,
     field_area: Rect,
     move_locked: Rc<Cell<bool>>,
+    selecting_releases: bool,
+    current_release_names: Vec<String>,
 }
 
 impl BacklogQuickMenu {
@@ -124,18 +249,48 @@ impl BacklogQuickMenu {
     pub(in crate::pages::backlog) fn main_action_labels(
         status: &str,
         assignee: &str,
+        epic: &str,
+        release: &str,
     ) -> Vec<String> {
-        BacklogQuickAction::main_actions(status, assignee)
+        BacklogQuickAction::main_actions(status, assignee, epic, release, "")
             .iter()
             .map(BacklogQuickAction::label)
             .collect()
     }
 
+    #[cfg(test)]
+    pub(in crate::pages::backlog) fn assignee_label(assignee: BacklogAssignee) -> String {
+        BacklogQuickAction::AssignUserTo(assignee).label()
+    }
+
     pub(in crate::pages::backlog) fn new(move_locked: Rc<Cell<bool>>) -> Self {
         let selected = Rc::new(RefCell::new(Vec::new()));
+        let selected_releases = Rc::new(RefCell::new(None));
         let selected_actions = Rc::clone(&selected);
-        let dropdown = Dropdown::single(
-            BacklogQuickAction::main_actions("", "Unassigned"),
+        let dropdown = Dropdown::single_rich(
+            BacklogQuickAction::main_actions("", "Unassigned", "", "", ""),
+            |action| action.clone(),
+            |action| action.label(),
+            quick_action_text,
+        )
+        .variant(DropdownVariant::Filled)
+        .label("Backlog actions")
+        .label_position(DropdownLabelPosition::Inline)
+        .search_mode(DropdownSearchMode::Fuzzy)
+        .commit_mode(DropdownCommitMode::Explicit)
+        .centered(true)
+        .show_field_when_open(false)
+        .backdrop_amount(0.0)
+        .tab_stop(false)
+        .max_popup_height(16)
+        .on_select(move |actions| {
+            if let Some(action) = actions.first() {
+                selected_actions.borrow_mut().push(action.clone());
+            }
+        });
+        let release_actions = Rc::clone(&selected_releases);
+        let release_dropdown = Dropdown::multi(
+            [BacklogQuickAction::ReleasesLoading],
             |action| action.clone(),
             |action| action.label(),
         )
@@ -148,21 +303,22 @@ impl BacklogQuickMenu {
         .show_field_when_open(false)
         .backdrop_amount(0.0)
         .tab_stop(false)
-        .max_popup_height(8)
-        .on_select(move |actions| {
-            if let Some(action) = actions.first() {
-                selected_actions.borrow_mut().push(action.clone());
-            }
-        });
+        .max_popup_height(16)
+        .external_loading_message("Loading releases…")
+        .on_select(move |actions| *release_actions.borrow_mut() = Some(actions));
         Self {
             dropdown,
+            release_dropdown,
             selected,
+            selected_releases,
             keys: Vec::new(),
             section_id: None,
             source_order: Vec::new(),
             events: Vec::new(),
             field_area: Rect::default(),
             move_locked,
+            selecting_releases: false,
+            current_release_names: Vec::new(),
         }
     }
 
@@ -173,14 +329,18 @@ impl BacklogQuickMenu {
         source_order: Vec<String>,
         status: String,
         assignee: String,
+        story_points: String,
+        epic: String,
+        release: String,
         destinations: Vec<BacklogDestination>,
         ctx: &mut EventCtx<()>,
     ) -> bool {
+        self.selecting_releases = false;
         if !self.prepare_open(section_id, keys, source_order, true) {
             return false;
         }
         self.dropdown.set_rows(
-            BacklogQuickAction::main_actions(&status, &assignee)
+            BacklogQuickAction::main_actions(&status, &assignee, &epic, &release, &story_points)
                 .into_iter()
                 .chain(
                     destinations
@@ -221,6 +381,48 @@ impl BacklogQuickMenu {
         true
     }
 
+    pub(in crate::pages::backlog) fn open_story_points_menu(
+        &mut self,
+        section_id: String,
+        keys: Vec<String>,
+        source_order: Vec<String>,
+        ctx: &mut EventCtx<()>,
+    ) -> bool {
+        if !self.prepare_open(section_id, keys, source_order, false) {
+            return false;
+        }
+        self.open_story_points(ctx);
+        true
+    }
+
+    pub(in crate::pages::backlog) fn open_epic_menu(
+        &mut self,
+        section_id: String,
+        keys: Vec<String>,
+        source_order: Vec<String>,
+        ctx: &mut EventCtx<()>,
+    ) -> bool {
+        if !self.prepare_open(section_id, keys, source_order, false) {
+            return false;
+        }
+        self.open_epics(ctx);
+        true
+    }
+
+    pub(in crate::pages::backlog) fn open_release_menu(
+        &mut self,
+        section_id: String,
+        keys: Vec<String>,
+        source_order: Vec<String>,
+        ctx: &mut EventCtx<()>,
+    ) -> bool {
+        if !self.prepare_open(section_id, keys, source_order, false) {
+            return false;
+        }
+        self.open_releases(ctx);
+        true
+    }
+
     fn prepare_open(
         &mut self,
         section_id: String,
@@ -236,11 +438,33 @@ impl BacklogQuickMenu {
         self.keys = keys;
         self.source_order = source_order;
         self.selected.borrow_mut().clear();
+        self.selected_releases.borrow_mut().take();
         self.dropdown.clear_selection();
         true
     }
 
+    pub(in crate::pages::backlog) fn set_current_release_names(&mut self, names: Vec<String>) {
+        self.current_release_names = names;
+    }
+
+    fn active_dropdown(&self) -> &Dropdown<BacklogQuickAction, BacklogQuickAction> {
+        if self.selecting_releases {
+            &self.release_dropdown
+        } else {
+            &self.dropdown
+        }
+    }
+
+    fn active_dropdown_mut(&mut self) -> &mut Dropdown<BacklogQuickAction, BacklogQuickAction> {
+        if self.selecting_releases {
+            &mut self.release_dropdown
+        } else {
+            &mut self.dropdown
+        }
+    }
+
     pub(in crate::pages::backlog) fn set_statuses(&mut self, statuses: Vec<StatusTransition>) {
+        self.selecting_releases = false;
         self.selected.borrow_mut().clear();
         self.dropdown.clear_selection();
         self.dropdown
@@ -249,11 +473,45 @@ impl BacklogQuickMenu {
     }
 
     pub(in crate::pages::backlog) fn set_assignees(&mut self, assignees: Vec<BacklogAssignee>) {
+        self.selecting_releases = false;
         self.selected.borrow_mut().clear();
         self.dropdown.clear_selection();
         self.dropdown
             .set_rows(assignees.into_iter().map(BacklogQuickAction::AssignUserTo));
         self.dropdown.set_search_query("");
+    }
+
+    pub(in crate::pages::backlog) fn set_epics(&mut self, epics: Vec<BacklogEpic>) {
+        self.selecting_releases = false;
+        self.selected.borrow_mut().clear();
+        self.dropdown.clear_selection();
+        self.dropdown.set_rows(
+            std::iter::once(BacklogQuickAction::SetEpicTo(BacklogEpic {
+                key: String::new(),
+                title: "No epic".into(),
+            }))
+            .chain(epics.into_iter().map(BacklogQuickAction::SetEpicTo)),
+        );
+        self.dropdown.set_search_query("");
+    }
+
+    pub(in crate::pages::backlog) fn set_releases(&mut self, releases: Vec<BacklogRelease>) {
+        self.selecting_releases = true;
+        self.selected.borrow_mut().clear();
+        self.release_dropdown.set_external_loading(false);
+        self.release_dropdown
+            .set_search_mode(DropdownSearchMode::Fuzzy);
+        self.release_dropdown.clear_selection();
+        let selected = releases
+            .iter()
+            .filter(|release| self.current_release_names.contains(&release.name))
+            .cloned()
+            .map(BacklogQuickAction::SetReleaseTo)
+            .collect::<Vec<_>>();
+        self.release_dropdown
+            .set_rows(releases.into_iter().map(BacklogQuickAction::SetReleaseTo));
+        self.release_dropdown.set_selected(selected);
+        self.release_dropdown.set_search_query("");
     }
 
     pub(in crate::pages::backlog) fn take_events(&mut self) -> Vec<BacklogQuickMenuEvent> {
@@ -262,13 +520,25 @@ impl BacklogQuickMenu {
 
     #[cfg(test)]
     pub(in crate::pages::backlog) fn is_open_for_test(&self) -> bool {
-        self.dropdown.is_open()
+        self.active_dropdown().is_open()
+    }
+
+    #[cfg(test)]
+    pub(in crate::pages::backlog) fn selected_release_ids_for_test(&self) -> Vec<String> {
+        self.release_dropdown
+            .selected_ids()
+            .into_iter()
+            .filter_map(|action| match action {
+                BacklogQuickAction::SetReleaseTo(release) => Some(release.id),
+                _ => None,
+            })
+            .collect()
     }
 
     fn centered_field_area(&self, area: Rect) -> Rect {
         let width = MENU_FIELD_WIDTH.min(area.width);
         let hint = <Dropdown<BacklogQuickAction, BacklogQuickAction> as TuiNode<()>>::measure(
-            &self.dropdown,
+            self.active_dropdown(),
             LayoutProposal::at_most(width, area.height),
         );
         let height = hint.preferred.height.min(area.height);
@@ -288,6 +558,22 @@ impl BacklogQuickMenu {
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
         let selected = self.selected.borrow_mut().drain(..).collect::<Vec<_>>();
+        if self.selecting_releases
+            && let Some(selected) = self.selected_releases.borrow_mut().take()
+        {
+            let releases = selected
+                .into_iter()
+                .filter_map(|action| match action {
+                    BacklogQuickAction::SetReleaseTo(release) => Some(release),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            self.events.push(BacklogQuickMenuEvent::SetReleases {
+                keys: self.keys.clone(),
+                releases,
+            });
+            return outcome;
+        }
         for action in selected {
             let Some(section_id) = self.section_id.clone() else {
                 continue;
@@ -305,6 +591,16 @@ impl BacklogQuickMenu {
                 BacklogQuickAction::SetStatusTo(status) => {
                     BacklogQuickMenuEvent::SetStatus { status }
                 }
+                BacklogQuickAction::SetStoryPoints(_) => {
+                    self.open_story_points(ctx);
+                    continue;
+                }
+                BacklogQuickAction::SetStoryPointsTo(story_points) => {
+                    BacklogQuickMenuEvent::SetStoryPoints {
+                        keys: self.keys.clone(),
+                        story_points: story_points.value(),
+                    }
+                }
                 BacklogQuickAction::AssignUser(_) => {
                     self.open_assignees(ctx);
                     continue;
@@ -318,6 +614,29 @@ impl BacklogQuickMenu {
                     keys: self.keys.clone(),
                     assignee,
                 },
+                BacklogQuickAction::SetEpic(_) => {
+                    self.open_epics(ctx);
+                    continue;
+                }
+                BacklogQuickAction::EpicsLoading => {
+                    self.dropdown.clear_selection();
+                    self.dropdown.open_with_context(ctx);
+                    continue;
+                }
+                BacklogQuickAction::SetEpicTo(epic) => BacklogQuickMenuEvent::SetEpic {
+                    keys: self.keys.clone(),
+                    epic,
+                },
+                BacklogQuickAction::SetRelease(_) => {
+                    self.open_releases(ctx);
+                    continue;
+                }
+                BacklogQuickAction::ReleasesLoading => {
+                    self.dropdown.clear_selection();
+                    self.dropdown.open_with_context(ctx);
+                    continue;
+                }
+                BacklogQuickAction::SetReleaseTo(_) => continue,
                 BacklogQuickAction::MoveToTop => BacklogQuickMenuEvent::MoveToTop {
                     section_id,
                     keys: self.keys.clone(),
@@ -357,13 +676,14 @@ impl BacklogQuickMenu {
             };
             self.events.push(event);
         }
-        if was_open && !self.dropdown.is_open() && self.events.is_empty() {
+        if was_open && !self.active_dropdown().is_open() && self.events.is_empty() {
             self.events.push(BacklogQuickMenuEvent::Closed);
         }
         outcome
     }
 
     fn open_statuses(&mut self, ctx: &mut EventCtx<()>) {
+        self.selecting_releases = false;
         self.dropdown.clear_selection();
         self.dropdown.set_rows([BacklogQuickAction::StatusLoading]);
         self.events.push(BacklogQuickMenuEvent::LoadStatuses {
@@ -374,6 +694,7 @@ impl BacklogQuickMenu {
     }
 
     fn open_assignees(&mut self, ctx: &mut EventCtx<()>) {
+        self.selecting_releases = false;
         self.dropdown.clear_selection();
         self.dropdown
             .set_rows([BacklogQuickAction::AssigneesLoading]);
@@ -382,14 +703,69 @@ impl BacklogQuickMenu {
         self.dropdown.open_with_context(ctx);
     }
 
+    fn open_story_points(&mut self, ctx: &mut EventCtx<()>) {
+        self.selecting_releases = false;
+        self.dropdown.clear_selection();
+        self.dropdown.set_rows(
+            BacklogStoryPoints::ALL
+                .into_iter()
+                .map(BacklogQuickAction::SetStoryPointsTo),
+        );
+        self.dropdown.set_search_query("");
+        self.dropdown.open_with_context(ctx);
+    }
+
+    fn open_epics(&mut self, ctx: &mut EventCtx<()>) {
+        self.selecting_releases = false;
+        self.dropdown.clear_selection();
+        self.dropdown.set_rows([BacklogQuickAction::EpicsLoading]);
+        self.events.push(BacklogQuickMenuEvent::LoadEpics);
+        self.dropdown.set_search_query("");
+        self.dropdown.open_with_context(ctx);
+    }
+
+    fn open_releases(&mut self, ctx: &mut EventCtx<()>) {
+        self.selecting_releases = true;
+        self.release_dropdown.clear_selection();
+        self.release_dropdown
+            .set_rows([BacklogQuickAction::ReleasesLoading]);
+        self.release_dropdown
+            .set_search_mode(DropdownSearchMode::External);
+        self.release_dropdown.set_external_loading(true);
+        self.events.push(BacklogQuickMenuEvent::LoadReleases);
+        self.release_dropdown.set_search_query("");
+        self.release_dropdown.open_with_context(ctx);
+    }
+
     fn close(&mut self, ctx: &mut EventCtx<()>) -> EventOutcome {
-        self.dropdown.close();
+        self.active_dropdown_mut().close();
         self.selected.borrow_mut().clear();
+        self.selected_releases.borrow_mut().take();
         self.events.push(BacklogQuickMenuEvent::Closed);
         ctx.request_layout();
         ctx.request_redraw();
         ctx.stop_propagation();
         EventOutcome::Handled
+    }
+}
+
+fn quick_action_text(
+    action: &BacklogQuickAction,
+    _query: &str,
+    _mode: DropdownSearchMode,
+) -> Text<'static> {
+    match action {
+        BacklogQuickAction::SetStoryPointsTo(BacklogStoryPoints::None) => Text::from(Line::from(
+            Span::styled("None", Style::default().fg(tuicore::theme().muted_fg())),
+        )),
+        BacklogQuickAction::AssignUserTo(BacklogAssignee { account_id, .. })
+        | BacklogQuickAction::SetEpicTo(BacklogEpic {
+            key: account_id, ..
+        }) if account_id.is_empty() => Text::from(Line::from(Span::styled(
+            "None",
+            Style::default().fg(tuicore::theme().muted_fg()),
+        ))),
+        _ => Text::raw(action.label()),
     }
 }
 
@@ -400,16 +776,27 @@ impl TuiNode for BacklogQuickMenu {
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.field_area = self.centered_field_area(area);
-        <Dropdown<BacklogQuickAction, BacklogQuickAction> as TuiNode<()>>::layout(
-            &mut self.dropdown,
-            self.field_area,
-            ctx,
-        );
+        let field_area = self.field_area;
+        if self.selecting_releases {
+            ctx.push_slot(ChildKey::new(RELEASE_DROPDOWN_KEY), field_area, |ctx| {
+                <Dropdown<BacklogQuickAction, BacklogQuickAction> as TuiNode<()>>::layout(
+                    &mut self.release_dropdown,
+                    field_area,
+                    ctx,
+                )
+            });
+        } else {
+            <Dropdown<BacklogQuickAction, BacklogQuickAction> as TuiNode<()>>::layout(
+                &mut self.dropdown,
+                field_area,
+                ctx,
+            );
+        }
         LayoutResult::new(area)
     }
 
     fn render<'a>(&'a self, frame: &mut Frame, _area: Rect, ctx: &mut RenderCtx<'a>) {
-        self.dropdown.render(frame, self.field_area, ctx);
+        self.active_dropdown().render(frame, self.field_area, ctx);
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
@@ -418,8 +805,8 @@ impl TuiNode for BacklogQuickMenu {
         {
             return self.close(ctx);
         }
-        let was_open = self.dropdown.is_open();
-        let outcome = self.dropdown.event(event, ctx);
+        let was_open = self.active_dropdown().is_open();
+        let outcome = self.active_dropdown_mut().event(event, ctx);
         self.finish_event(was_open, outcome, ctx)
     }
 
@@ -434,22 +821,35 @@ impl TuiNode for BacklogQuickMenu {
         {
             return self.close(ctx);
         }
-        let was_open = self.dropdown.is_open();
-        let outcome = self.dropdown.dispatch_event(route, event, ctx);
+        let was_open = self.active_dropdown().is_open();
+        let outcome = if self.selecting_releases {
+            route
+                .path
+                .without_first_if(&ChildKey::new(RELEASE_DROPDOWN_KEY))
+                .map(EventRoute::new)
+                .map(|route| self.release_dropdown.dispatch_event(&route, event, ctx))
+                .unwrap_or(EventOutcome::Ignored)
+        } else {
+            self.dropdown.dispatch_event(route, event, ctx)
+        };
         self.finish_event(was_open, outcome, ctx)
     }
 
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
-        self.dropdown.focus(target, focused, ctx);
+        self.active_dropdown_mut().focus(target, focused, ctx);
     }
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
-        self.dropdown.dispatch_focus(target, focused, ctx);
+        if let Some(target) = target.for_child(&ChildKey::new(RELEASE_DROPDOWN_KEY)) {
+            self.release_dropdown.dispatch_focus(&target, focused, ctx);
+        } else {
+            self.dropdown.dispatch_focus(target, focused, ctx);
+        }
     }
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         <Dropdown<BacklogQuickAction, BacklogQuickAction> as TuiNode<()>>::tick(
-            &mut self.dropdown,
+            self.active_dropdown_mut(),
             dt,
             settings,
         )
@@ -457,17 +857,21 @@ impl TuiNode for BacklogQuickMenu {
 
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.dropdown.init(ctx);
+        self.release_dropdown.init(ctx);
     }
 
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.dropdown.mount(ctx);
+        self.release_dropdown.mount(ctx);
     }
 
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.dropdown.unmount(ctx);
+        self.release_dropdown.unmount(ctx);
     }
 
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.dropdown.destroy(ctx);
+        self.release_dropdown.destroy(ctx);
     }
 }

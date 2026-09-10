@@ -15,14 +15,14 @@ use super::{
     board_backlog, board_backlog_query, board_sprints, commit_order, common_status_transitions,
     composer_fields, create_available_statuses_from_value, create_issue_fields, create_issue_type,
     create_issue_types_from_value, create_response_failure, created_issue_failure, current_user,
-    discover_story_points, fetch_composer_issues, fix_versions, hydrate_sprint_subtasks,
+    discover_story_points, epics, fetch_composer_issues, fix_versions, hydrate_sprint_subtasks,
     is_ticket_number_query, issue_fields, issue_key_jql, labels, move_payload, options_from_values,
     rank_payload, same_jira_content, search_composer_issues, search_jql, select_backlog_board,
-    set_status, should_discover_story_points, sprint_issues, story_points_field_for_load,
-    story_points_field_id, story_points_warning, submit_failure, submit_ordered_changes, to_ticket,
-    to_ticket_and_work_item, to_work_item, to_work_item_with_subtasks, update_payload,
-    velocity_average, velocity_report, velocity_sprint_goals, web_link_payload, web_links,
-    with_published_mermaid_attachments,
+    set_epics, set_fix_versions, set_status, set_story_points, should_discover_story_points,
+    sprint_issues, story_points_field_for_load, story_points_field_id, story_points_warning,
+    submit_failure, submit_ordered_changes, to_ticket, to_ticket_and_work_item, to_work_item,
+    to_work_item_with_subtasks, update_payload, velocity_average, velocity_report,
+    velocity_sprint_goals, web_link_payload, web_links, with_published_mermaid_attachments,
 };
 use crate::{
     app_settings::AppSettings,
@@ -236,8 +236,9 @@ fn jira_fix_version_lookup_returns_non_archived_project_versions() {
         listener,
         json!([
             { "id": "3", "name": "Archived", "archived": true },
-            { "id": "2", "name": "Release 2" },
-            { "id": "1", "name": "Release 1" }
+            { "id": "2", "name": "Release 2", "releaseDate": "2026-03-31" },
+            { "id": "10", "name": "Release 10", "releaseDate": "2026-01-01" },
+            { "id": "1", "name": "Release 1", "releaseDate": "2026-06-30" }
         ])
         .to_string(),
     );
@@ -250,7 +251,7 @@ fn jira_fix_version_lookup_returns_non_archived_project_versions() {
             .iter()
             .map(|version| (version.id.as_str(), version.name.as_str()))
             .collect::<Vec<_>>(),
-        [("1", "Release 1"), ("2", "Release 2")]
+        [("1", "Release 1"), ("2", "Release 2"), ("10", "Release 10")]
     );
     assert!(request.starts_with("GET /rest/api/3/project/FIN/versions HTTP/1.1"));
     assert!(!extra_request);
@@ -643,6 +644,97 @@ fn assigning_users_updates_each_ticket_and_can_unassign() {
     let (request, extra_request) = server.join().unwrap();
     assert!(!extra_request);
     assert!(request.contains(r#"{"accountId":null}"#));
+}
+
+#[test]
+fn setting_epics_updates_each_ticket_or_clears_the_parent() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = request_server(listener, vec![String::new(), String::new()]);
+
+    set_epics(
+        &jira_settings(base_url),
+        &["FIN-1".into(), "FIN-2".into()],
+        Some("FIN-99"),
+    )
+    .unwrap();
+    let requests = server.join().unwrap();
+    assert!(requests[0].starts_with("PUT /rest/api/3/issue/FIN-1 "));
+    assert!(requests[0].contains(r#"{"fields":{"parent":{"key":"FIN-99"}}}"#));
+    assert!(requests[1].starts_with("PUT /rest/api/3/issue/FIN-2 "));
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = one_request_server(listener, String::new());
+    set_epics(&jira_settings(base_url), &["FIN-1".into()], None).unwrap();
+    let (request, extra_request) = server.join().unwrap();
+    assert!(!extra_request);
+    assert!(request.contains(r#"{"update":{"parent":[{"set":null}]}}"#));
+}
+
+#[test]
+fn setting_releases_replaces_or_clears_fix_versions() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = request_server(listener, vec![String::new(), String::new()]);
+
+    set_fix_versions(
+        &jira_settings(base_url),
+        &["FIN-1".into(), "FIN-2".into()],
+        &["10001".into(), "10000".into()],
+    )
+    .unwrap();
+    let requests = server.join().unwrap();
+    assert!(requests[0].contains(r#"{"fields":{"fixVersions":[{"id":"10001"},{"id":"10000"}]}}"#));
+    assert!(requests[1].contains(r#"{"fields":{"fixVersions":[{"id":"10001"},{"id":"10000"}]}}"#));
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = one_request_server(listener, String::new());
+    set_fix_versions(&jira_settings(base_url), &["FIN-1".into()], &[]).unwrap();
+    let (request, extra_request) = server.join().unwrap();
+    assert!(!extra_request);
+    assert!(request.contains(r#"{"fields":{"fixVersions":[]}}"#));
+}
+
+#[test]
+fn setting_story_points_updates_or_clears_the_configured_field() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = request_server(listener, vec![String::new(), String::new()]);
+    let mut settings = jira_settings(base_url);
+    settings.jira_story_points_field_id = "customfield_10016".into();
+
+    set_story_points(&settings, &["FIN-1".into(), "FIN-2".into()], Some(3.0)).unwrap();
+    let requests = server.join().unwrap();
+    assert!(requests[0].contains(r#"{"fields":{"customfield_10016":3.0}}"#));
+    assert!(requests[1].contains(r#"{"fields":{"customfield_10016":3.0}}"#));
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = one_request_server(listener, String::new());
+    settings.jira_base_url = base_url;
+    set_story_points(&settings, &["FIN-1".into()], None).unwrap();
+    let (request, extra_request) = server.join().unwrap();
+    assert!(!extra_request);
+    assert!(request.contains(r#"{"fields":{"customfield_10016":null}}"#));
+}
+
+#[test]
+fn loading_epics_returns_their_keys_and_titles() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = one_request_server(
+        listener,
+        r#"{"issues":[{"key":"FIN-99","fields":{"summary":"Zebra"}},{"key":"FIN-7","fields":{"summary":"Alpha"}}]}"#.into(),
+    );
+
+    let epics = epics(&jira_settings(base_url)).unwrap();
+    let (request, extra_request) = server.join().unwrap();
+    assert!(!extra_request);
+    assert!(request.starts_with("POST /rest/api/3/search/jql "));
+    assert_eq!(epics[0].key, "FIN-7");
+    assert_eq!(epics[0].title, "Alpha");
 }
 
 #[test]

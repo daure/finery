@@ -42,7 +42,7 @@ serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "sqlite", "postgres", "migrate", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "net", "signal"] }
 tracing-appender = "0.2"
-tuicore = { version = "0.33.0", path = "../tuicore" }
+tuicore = { version = "0.34.0", path = "../tuicore" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

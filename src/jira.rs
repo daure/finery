@@ -1,5 +1,5 @@
 use std::{
-    cmp::Reverse,
+    cmp::{Ordering, Reverse},
     collections::{HashMap, HashSet},
     time::Duration,
 };
@@ -112,6 +112,12 @@ pub(crate) struct JiraFieldOptions {
 pub(crate) struct JiraAssignee {
     pub account_id: String,
     pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JiraEpic {
+    pub key: String,
+    pub title: String,
 }
 
 pub(crate) struct JiraComposerIssue {
@@ -1344,6 +1350,70 @@ pub(crate) fn assign_users(
     Ok(())
 }
 
+pub(crate) fn set_epics(
+    settings: &AppSettings,
+    issue_keys: &[String],
+    epic_key: Option<&str>,
+) -> Result<(), String> {
+    let (client, base_url, email, token) = configured_client(settings)?;
+    for issue_key in issue_keys {
+        let payload = epic_key.map_or_else(
+            || json!({ "update": { "parent": [{ "set": Value::Null }] } }),
+            |epic_key| json!({ "fields": { "parent": { "key": epic_key } } }),
+        );
+        let response = client
+            .put(format!("{base_url}/rest/api/3/issue/{issue_key}"))
+            .basic_auth(&email, Some(&token))
+            .json(&payload)
+            .send()
+            .map_err(|error| error.to_string())?;
+        ensure_success(response)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn set_fix_versions(
+    settings: &AppSettings,
+    issue_keys: &[String],
+    version_ids: &[String],
+) -> Result<(), String> {
+    let (client, base_url, email, token) = configured_client(settings)?;
+    for issue_key in issue_keys {
+        let versions = version_ids
+            .iter()
+            .map(|id| json!({ "id": id }))
+            .collect::<Vec<_>>();
+        let response = client
+            .put(format!("{base_url}/rest/api/3/issue/{issue_key}"))
+            .basic_auth(&email, Some(&token))
+            .json(&json!({ "fields": { "fixVersions": versions } }))
+            .send()
+            .map_err(|error| error.to_string())?;
+        ensure_success(response)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn set_story_points(
+    settings: &AppSettings,
+    issue_keys: &[String],
+    story_points: Option<f64>,
+) -> Result<(), String> {
+    let story_points_field_id = story_points_field_for_load(settings, None)
+        .ok_or_else(|| "Jira story points are not configured".to_string())?;
+    let (client, base_url, email, token) = configured_client(settings)?;
+    for issue_key in issue_keys {
+        let response = client
+            .put(format!("{base_url}/rest/api/3/issue/{issue_key}"))
+            .basic_auth(&email, Some(&token))
+            .json(&json!({ "fields": { story_points_field_id: story_points } }))
+            .send()
+            .map_err(|error| error.to_string())?;
+        ensure_success(response)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn current_user(settings: &AppSettings) -> Result<JiraAssignee, String> {
     let (client, base_url, email, token) = configured_client(settings)?;
     let response = client
@@ -1450,8 +1520,98 @@ pub(crate) fn fix_versions(
         .filter(|version| !version.archived)
         .filter(|version| search.is_empty() || version.name.to_ascii_lowercase().contains(&search))
         .collect::<Vec<_>>();
-    versions.sort_by_cached_key(|version| version.name.to_ascii_lowercase());
+    versions.sort_unstable_by(|left, right| version_name_cmp(&left.name, &right.name));
     Ok(versions)
+}
+
+pub(crate) fn version_name_cmp(left: &str, right: &str) -> Ordering {
+    let (mut left_index, mut right_index) = (0, 0);
+    let (left_bytes, right_bytes) = (left.as_bytes(), right.as_bytes());
+    loop {
+        let (left_done, right_done) = (
+            left_index == left_bytes.len(),
+            right_index == right_bytes.len(),
+        );
+        if left_done || right_done {
+            return left_done
+                .cmp(&right_done)
+                .then_with(|| left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase()));
+        }
+        let (left_digit, right_digit) = (
+            left_bytes[left_index].is_ascii_digit(),
+            right_bytes[right_index].is_ascii_digit(),
+        );
+        let left_end = version_chunk_end(left_bytes, left_index, left_digit);
+        let right_end = version_chunk_end(right_bytes, right_index, right_digit);
+        let comparison = if left_digit && right_digit {
+            numeric_version_chunk_cmp(
+                &left_bytes[left_index..left_end],
+                &right_bytes[right_index..right_end],
+            )
+        } else {
+            left[left_index..left_end]
+                .to_ascii_lowercase()
+                .cmp(&right[right_index..right_end].to_ascii_lowercase())
+        };
+        if comparison != Ordering::Equal {
+            return comparison;
+        }
+        left_index = left_end;
+        right_index = right_end;
+    }
+}
+
+fn version_chunk_end(bytes: &[u8], start: usize, digits: bool) -> usize {
+    let mut end = start;
+    while end < bytes.len() && bytes[end].is_ascii_digit() == digits {
+        end += 1;
+    }
+    end
+}
+
+fn numeric_version_chunk_cmp(left: &[u8], right: &[u8]) -> Ordering {
+    let left = left
+        .iter()
+        .skip_while(|byte| **byte == b'0')
+        .copied()
+        .collect::<Vec<_>>();
+    let right = right
+        .iter()
+        .skip_while(|byte| **byte == b'0')
+        .copied()
+        .collect::<Vec<_>>();
+    left.len().cmp(&right.len()).then_with(|| left.cmp(&right))
+}
+
+pub(crate) fn epics(settings: &AppSettings) -> Result<Vec<JiraEpic>, String> {
+    let project_key = settings.jira_default_project.trim();
+    if project_key.is_empty() {
+        return Err("Default Jira project is required to load epics".into());
+    }
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let jql = format!("project = \"{project_key}\" AND issuetype = Epic ORDER BY key ASC");
+    let response = request_search(&client, &base_url, &email, &token, &jql, &["summary"])
+        .map_err(|(_, error)| error)?;
+    let mut epics = response
+        .issues
+        .into_iter()
+        .map(|issue| JiraEpic {
+            key: issue.key,
+            title: issue
+                .fields
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        })
+        .collect::<Vec<_>>();
+    epics.sort_unstable_by(|left, right| {
+        left.title
+            .to_ascii_lowercase()
+            .cmp(&right.title.to_ascii_lowercase())
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    Ok(epics)
 }
 
 pub(crate) fn project_issue_types(settings: &AppSettings) -> Result<Vec<JiraOption>, String> {

@@ -23,7 +23,7 @@ use tuicore::{
 
 use crate::{
     app_settings::BacklogRunwaySettings,
-    jira::{self, JiraAssignee, JiraOption},
+    jira::{self, JiraAssignee, JiraEpic, JiraFixVersion, JiraOption},
     service::AppService,
     store::work_items::{
         BacklogSnapshot, RankPlan, Sprint, StatusTransition, VelocityReport, VelocitySprint,
@@ -32,8 +32,9 @@ use crate::{
 };
 
 use super::components::{
-    BacklogAssignee, BacklogDestination, BacklogQuickMenu, BacklogQuickMenuEvent,
-    BacklogSectionEvent, BacklogTree, backlog_tree_with_issue_types,
+    BacklogAssignee, BacklogDestination, BacklogEpic, BacklogQuickMenu, BacklogQuickMenuEvent,
+    BacklogRelease, BacklogSectionEvent, BacklogTree, RELEASE_DROPDOWN_KEY,
+    backlog_tree_with_issue_types,
 };
 use super::velocity_reports::copy_report;
 
@@ -91,6 +92,32 @@ enum BacklogResult {
         keys: Vec<String>,
         result: Result<JiraAssignee, String>,
     },
+    EpicsLoaded {
+        generation: u64,
+        result: Result<Vec<JiraEpic>, String>,
+    },
+    EpicsSet {
+        generation: u64,
+        keys: Vec<String>,
+        epic: BacklogEpic,
+        result: Result<(), String>,
+    },
+    ReleasesLoaded {
+        generation: u64,
+        result: Result<Vec<JiraFixVersion>, String>,
+    },
+    ReleasesSet {
+        generation: u64,
+        keys: Vec<String>,
+        releases: Vec<BacklogRelease>,
+        result: Result<(), String>,
+    },
+    StoryPointsSet {
+        generation: u64,
+        keys: Vec<String>,
+        story_points: Option<f64>,
+        result: Result<(), String>,
+    },
 }
 
 const RANK_REFRESH_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -147,6 +174,11 @@ pub(super) struct RequestGenerations {
     active_assignees_load: Option<u64>,
     active_users_assignments: HashSet<u64>,
     active_current_user_load: Option<u64>,
+    active_epics_load: Option<u64>,
+    active_releases_load: Option<u64>,
+    active_epic_sets: HashSet<u64>,
+    active_release_sets: HashSet<u64>,
+    active_story_points_sets: HashSet<u64>,
     active_issue_types_load: Option<u64>,
     rank_refresh_load: Option<u64>,
     preserve_optimistic_view_load: Option<u64>,
@@ -259,6 +291,64 @@ impl RequestGenerations {
         true
     }
 
+    fn start_epics_load(&mut self) -> u64 {
+        let generation = self.next();
+        self.active_epics_load = Some(generation);
+        generation
+    }
+
+    fn complete_epics_load(&mut self, generation: u64) -> bool {
+        if self.active_epics_load != Some(generation) {
+            return false;
+        }
+        self.active_epics_load = None;
+        true
+    }
+
+    fn start_epic_set(&mut self) -> u64 {
+        let generation = self.next();
+        self.active_epic_sets.insert(generation);
+        generation
+    }
+
+    fn complete_epic_set(&mut self, generation: u64) -> bool {
+        self.active_epic_sets.remove(&generation)
+    }
+
+    fn start_releases_load(&mut self) -> u64 {
+        let generation = self.next();
+        self.active_releases_load = Some(generation);
+        generation
+    }
+
+    fn complete_releases_load(&mut self, generation: u64) -> bool {
+        if self.active_releases_load != Some(generation) {
+            return false;
+        }
+        self.active_releases_load = None;
+        true
+    }
+
+    fn start_release_set(&mut self) -> u64 {
+        let generation = self.next();
+        self.active_release_sets.insert(generation);
+        generation
+    }
+
+    fn complete_release_set(&mut self, generation: u64) -> bool {
+        self.active_release_sets.remove(&generation)
+    }
+
+    fn start_story_points_set(&mut self) -> u64 {
+        let generation = self.next();
+        self.active_story_points_sets.insert(generation);
+        generation
+    }
+
+    fn complete_story_points_set(&mut self, generation: u64) -> bool {
+        self.active_story_points_sets.remove(&generation)
+    }
+
     fn cancel_status_load(&mut self) {
         self.active_status_load = None;
     }
@@ -317,6 +407,21 @@ struct PendingStatusChange {
 
 #[derive(Clone)]
 struct PendingAssigneeChange {
+    original_items: HashMap<String, WorkItem>,
+}
+
+#[derive(Clone)]
+struct PendingEpicChange {
+    original_items: HashMap<String, WorkItem>,
+}
+
+#[derive(Clone)]
+struct PendingReleaseChange {
+    original_items: HashMap<String, WorkItem>,
+}
+
+#[derive(Clone)]
+struct PendingStoryPointsChange {
     original_items: HashMap<String, WorkItem>,
 }
 
@@ -397,11 +502,15 @@ pub(crate) struct BacklogPage {
     ranking: bool,
     status_loading: bool,
     assignees_loading: bool,
+    epics_loading: bool,
+    releases_loading: bool,
     current_user_loading: bool,
     issue_types_loading: bool,
     syncing_ticket_keys: Rc<RefCell<HashSet<String>>>,
     current_user: Option<JiraAssignee>,
     assignees: Option<Vec<BacklogAssignee>>,
+    epics: Option<Vec<BacklogEpic>>,
+    releases: Option<Vec<BacklogRelease>>,
     move_locked: Rc<Cell<bool>>,
     generations: RequestGenerations,
     rank_refresh_retry: RankRefreshRetry,
@@ -411,6 +520,9 @@ pub(crate) struct BacklogPage {
     pending_rank: Option<PendingRank>,
     pending_status_changes: HashMap<u64, PendingStatusChange>,
     pending_assignee_changes: HashMap<u64, PendingAssigneeChange>,
+    pending_epic_changes: HashMap<u64, PendingEpicChange>,
+    pending_release_changes: HashMap<u64, PendingReleaseChange>,
+    pending_story_points_changes: HashMap<u64, PendingStoryPointsChange>,
     status_transition_cache: StatusTransitionCache,
     focus_backlog_after_load: bool,
     pending_focus: Option<FocusRequest>,
@@ -447,11 +559,15 @@ impl BacklogPage {
             ranking: false,
             status_loading: false,
             assignees_loading: false,
+            epics_loading: false,
+            releases_loading: false,
             current_user_loading: false,
             issue_types_loading: false,
             syncing_ticket_keys,
             current_user: None,
             assignees: None,
+            epics: None,
+            releases: None,
             move_locked,
             generations: RequestGenerations::default(),
             rank_refresh_retry: RankRefreshRetry::default(),
@@ -461,6 +577,9 @@ impl BacklogPage {
             pending_rank: None,
             pending_status_changes: HashMap::new(),
             pending_assignee_changes: HashMap::new(),
+            pending_epic_changes: HashMap::new(),
+            pending_release_changes: HashMap::new(),
+            pending_story_points_changes: HashMap::new(),
             status_transition_cache: StatusTransitionCache::default(),
             focus_backlog_after_load: false,
             pending_focus: None,
@@ -678,6 +797,30 @@ impl BacklogPage {
                     keys,
                     result,
                 } => self.apply_current_user_result(generation, keys, result),
+                BacklogResult::EpicsLoaded { generation, result } => {
+                    self.apply_epics_result(generation, result)
+                }
+                BacklogResult::EpicsSet {
+                    generation,
+                    keys,
+                    epic,
+                    result,
+                } => self.apply_epic_result(generation, keys, epic, result),
+                BacklogResult::ReleasesLoaded { generation, result } => {
+                    self.apply_releases_result(generation, result)
+                }
+                BacklogResult::ReleasesSet {
+                    generation,
+                    keys,
+                    releases,
+                    result,
+                } => self.apply_release_result(generation, keys, releases, result),
+                BacklogResult::StoryPointsSet {
+                    generation,
+                    keys,
+                    story_points,
+                    result,
+                } => self.apply_story_points_result(generation, keys, story_points, result),
             };
         }
         changed
@@ -849,6 +992,36 @@ impl BacklogPage {
         });
     }
 
+    pub(super) fn focus_release_menu(&self, ctx: &mut EventCtx<()>) {
+        ctx.focus(self.release_menu_focus_request());
+    }
+
+    pub(super) fn queue_release_menu_focus(&mut self) {
+        self.pending_focus = Some(self.release_menu_focus_request());
+    }
+
+    fn release_menu_focus_request(&self) -> FocusRequest {
+        let path = self
+            .data_focus_path
+            .parent()
+            .and_then(|path| path.parent())
+            .map(|path| {
+                path.child(ChildKey::second())
+                    .child(ChildKey::new(RELEASE_DROPDOWN_KEY))
+            })
+            .unwrap_or_else(|| {
+                TreePath::from_keys([
+                    ChildKey::first(),
+                    ChildKey::second(),
+                    ChildKey::new(RELEASE_DROPDOWN_KEY),
+                ])
+            });
+        FocusRequest::TargetAt {
+            path,
+            id: FocusId::new("input"),
+        }
+    }
+
     fn handle_load_failure(
         &mut self,
         completion: LoadCompletion,
@@ -975,19 +1148,30 @@ impl BacklogPage {
                     section_id,
                     keys,
                     source_order,
+                    section_moves_available,
                 } => {
                     if self.move_locked.get() {
                         self.report_move_locked();
                         continue;
                     }
-                    let (status, assignee) = quick_menu_labels(self.snapshot.as_ref(), &keys);
+                    let (status, assignee, epic, release) =
+                        quick_menu_labels(self.snapshot.as_ref(), &keys);
+                    let story_points = selected_story_points_label(self.snapshot.as_ref(), &keys);
+                    self.view.base_mut().layer_mut().set_current_release_names(
+                        selected_release_names(self.snapshot.as_ref(), &keys),
+                    );
                     if !self.view.base_mut().layer_mut().open(
                         section_id.clone(),
                         keys,
                         source_order,
                         status,
                         assignee,
-                        transfer_destinations(self.snapshot.as_ref(), &section_id),
+                        story_points,
+                        epic,
+                        release,
+                        section_moves_available
+                            .then(|| transfer_destinations(self.snapshot.as_ref(), &section_id))
+                            .unwrap_or_default(),
                         ctx,
                     ) {
                         self.report_move_locked();
@@ -1027,6 +1211,58 @@ impl BacklogPage {
                     }
                     self.view.base_mut().set_active_with_context(true, ctx);
                 }
+                BacklogSectionEvent::OpenStoryPointsMenu {
+                    section_id,
+                    keys,
+                    source_order,
+                } => {
+                    if !self.view.base_mut().layer_mut().open_story_points_menu(
+                        section_id,
+                        keys,
+                        source_order,
+                        ctx,
+                    ) {
+                        self.report_move_locked();
+                        continue;
+                    }
+                    self.view.base_mut().set_active_with_context(true, ctx);
+                }
+                BacklogSectionEvent::OpenEpicMenu {
+                    section_id,
+                    keys,
+                    source_order,
+                } => {
+                    if !self.view.base_mut().layer_mut().open_epic_menu(
+                        section_id,
+                        keys,
+                        source_order,
+                        ctx,
+                    ) {
+                        self.report_move_locked();
+                        continue;
+                    }
+                    self.view.base_mut().set_active_with_context(true, ctx);
+                }
+                BacklogSectionEvent::OpenReleaseMenu {
+                    section_id,
+                    keys,
+                    source_order,
+                } => {
+                    self.view.base_mut().layer_mut().set_current_release_names(
+                        selected_release_names(self.snapshot.as_ref(), &keys),
+                    );
+                    if !self.view.base_mut().layer_mut().open_release_menu(
+                        section_id,
+                        keys,
+                        source_order,
+                        ctx,
+                    ) {
+                        self.report_move_locked();
+                        continue;
+                    }
+                    self.view.base_mut().set_active_with_context(true, ctx);
+                    self.focus_release_menu(ctx);
+                }
                 BacklogSectionEvent::ToggleCurrentUser { keys } => self.assign_current_user(keys),
                 BacklogSectionEvent::Moved {
                     section_id,
@@ -1062,9 +1298,28 @@ impl BacklogPage {
                     self.set_status(status);
                     self.view.base_mut().set_active_with_context(false, ctx);
                 }
+                BacklogQuickMenuEvent::SetStoryPoints { keys, story_points } => {
+                    self.set_story_points(keys, story_points);
+                    self.view.base_mut().set_active_with_context(false, ctx);
+                }
                 BacklogQuickMenuEvent::LoadAssignees => self.load_assignees(),
                 BacklogQuickMenuEvent::AssignUser { keys, assignee } => {
                     self.assign_users(keys, assignee);
+                    self.view.base_mut().set_active_with_context(false, ctx);
+                }
+                BacklogQuickMenuEvent::LoadEpics => self.load_epics(),
+                BacklogQuickMenuEvent::SetEpic { keys, epic } => {
+                    self.set_epic(keys, epic);
+                    self.view.base_mut().set_active_with_context(false, ctx);
+                }
+                BacklogQuickMenuEvent::LoadReleases => {
+                    self.load_releases();
+                    self.view.base_mut().set_active_with_context(true, ctx);
+                    self.focus_release_menu(ctx);
+                    self.queue_release_menu_focus();
+                }
+                BacklogQuickMenuEvent::SetReleases { keys, releases } => {
+                    self.set_releases(keys, releases);
                     self.view.base_mut().set_active_with_context(false, ctx);
                 }
                 BacklogQuickMenuEvent::MoveToTop {
@@ -1229,6 +1484,131 @@ impl BacklogPage {
             self.service
                 .report_error(format!("Could not load Jira users: {error}"));
         }
+    }
+
+    fn load_epics(&mut self) {
+        if let Some(epics) = self.epics.as_ref() {
+            self.view.base_mut().layer_mut().set_epics(epics.clone());
+            return;
+        }
+        if self.epics_loading {
+            return;
+        }
+        let generation = self.generations.start_epics_load();
+        self.epics_loading = true;
+        let service = self.service.clone();
+        let sender = self.sender.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("finery-jira-epics".into())
+            .spawn(move || {
+                let _ = sender.send(BacklogResult::EpicsLoaded {
+                    generation,
+                    result: service.jira_default_project_epics(),
+                });
+            })
+            && self.generations.complete_epics_load(generation)
+        {
+            self.epics_loading = false;
+            self.view.base_mut().set_active(false);
+            self.queue_backlog_data_focus();
+            self.service
+                .report_error(format!("Could not load Jira epics: {error}"));
+        }
+    }
+
+    fn apply_epics_result(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<JiraEpic>, String>,
+    ) -> bool {
+        if !self.generations.complete_epics_load(generation) {
+            return false;
+        }
+        self.epics_loading = false;
+        match result {
+            Ok(epics) => {
+                let epics = epics
+                    .into_iter()
+                    .map(|epic| BacklogEpic {
+                        key: epic.key,
+                        title: epic.title,
+                    })
+                    .collect::<Vec<_>>();
+                self.epics = Some(epics.clone());
+                self.view.base_mut().layer_mut().set_epics(epics);
+            }
+            Err(error) => {
+                self.view.base_mut().set_active(false);
+                self.queue_backlog_data_focus();
+                self.service
+                    .report_error(format!("Could not load Jira epics: {error}"));
+            }
+        }
+        true
+    }
+
+    fn load_releases(&mut self) {
+        if let Some(releases) = self.releases.as_ref() {
+            self.view
+                .base_mut()
+                .layer_mut()
+                .set_releases(releases.clone());
+            return;
+        }
+        if self.releases_loading {
+            return;
+        }
+        let generation = self.generations.start_releases_load();
+        self.releases_loading = true;
+        let service = self.service.clone();
+        let sender = self.sender.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("finery-jira-releases".into())
+            .spawn(move || {
+                let _ = sender.send(BacklogResult::ReleasesLoaded {
+                    generation,
+                    result: service.jira_default_project_fix_versions(),
+                });
+            })
+            && self.generations.complete_releases_load(generation)
+        {
+            self.releases_loading = false;
+            self.view.base_mut().set_active(false);
+            self.queue_backlog_data_focus();
+            self.service
+                .report_error(format!("Could not load Jira releases: {error}"));
+        }
+    }
+
+    fn apply_releases_result(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<JiraFixVersion>, String>,
+    ) -> bool {
+        if !self.generations.complete_releases_load(generation) {
+            return false;
+        }
+        self.releases_loading = false;
+        match result {
+            Ok(releases) => {
+                let releases = releases
+                    .into_iter()
+                    .map(|release| BacklogRelease {
+                        id: release.id,
+                        name: release.name,
+                    })
+                    .collect::<Vec<_>>();
+                self.releases = Some(releases.clone());
+                self.view.base_mut().layer_mut().set_releases(releases);
+            }
+            Err(error) => {
+                self.view.base_mut().set_active(false);
+                self.queue_backlog_data_focus();
+                self.service
+                    .report_error(format!("Could not load Jira releases: {error}"));
+            }
+        }
+        true
     }
 
     fn assign_current_user(&mut self, keys: Vec<String>) {
@@ -1412,6 +1792,230 @@ impl BacklogPage {
         true
     }
 
+    fn set_epic(&mut self, keys: Vec<String>, epic: BacklogEpic) {
+        if keys.is_empty() || self.tickets_are_syncing(&keys) {
+            self.report_ticket_syncing(&keys);
+            return;
+        }
+        let Some(pending_change) = self.show_optimistic_epic(&keys, &epic) else {
+            self.service
+                .report_error("Could not set epic: selected tickets are unavailable".into());
+            return;
+        };
+        let generation = self.generations.start_epic_set();
+        self.pending_epic_changes.insert(generation, pending_change);
+        self.begin_ticket_sync(&keys);
+        let sync_keys = keys.clone();
+        let service = self.service.clone();
+        let sender = self.sender.clone();
+        let result_epic = epic.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("finery-jira-set-epic".into())
+            .spawn(move || {
+                let epic_key = (!epic.key.is_empty()).then_some(epic.key.as_str());
+                let result = service.jira_set_epics(&keys, epic_key);
+                let _ = sender.send(BacklogResult::EpicsSet {
+                    generation,
+                    keys,
+                    epic,
+                    result,
+                });
+            })
+            && self.generations.complete_epic_set(generation)
+        {
+            self.restore_epic_change(generation);
+            self.finish_ticket_sync(&sync_keys);
+            self.service.report_error(format!(
+                "Could not start Jira epic update to {}: {error}",
+                result_epic.title
+            ));
+        }
+    }
+
+    fn apply_epic_result(
+        &mut self,
+        generation: u64,
+        keys: Vec<String>,
+        epic: BacklogEpic,
+        result: Result<(), String>,
+    ) -> bool {
+        if !self.generations.complete_epic_set(generation) {
+            return false;
+        }
+        self.finish_ticket_sync(&keys);
+        match result {
+            Ok(()) => {
+                self.pending_epic_changes.remove(&generation);
+                let message = match keys.as_slice() {
+                    [key] => format!("{key} set to {}", epic.title),
+                    _ => format!("{} tickets set to {}", keys.len(), epic.title),
+                };
+                self.service
+                    .report_notification(tuicore::Notification::success(
+                        "Jira epic updated",
+                        message,
+                    ));
+            }
+            Err(error) => {
+                self.restore_epic_change(generation);
+                self.service
+                    .report_error(format!("Could not set Jira epic: {error}"));
+            }
+        }
+        true
+    }
+
+    fn set_releases(&mut self, keys: Vec<String>, releases: Vec<BacklogRelease>) {
+        if keys.is_empty() || self.tickets_are_syncing(&keys) {
+            self.report_ticket_syncing(&keys);
+            return;
+        }
+        let Some(pending_change) = self.show_optimistic_releases(&keys, &releases) else {
+            self.service
+                .report_error("Could not set release: selected tickets are unavailable".into());
+            return;
+        };
+        let generation = self.generations.start_release_set();
+        self.pending_release_changes
+            .insert(generation, pending_change);
+        self.begin_ticket_sync(&keys);
+        let sync_keys = keys.clone();
+        let service = self.service.clone();
+        let sender = self.sender.clone();
+        let result_releases = releases.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("finery-jira-set-release".into())
+            .spawn(move || {
+                let release_ids = releases
+                    .iter()
+                    .map(|release| release.id.clone())
+                    .collect::<Vec<_>>();
+                let result = service.jira_set_fix_versions(&keys, &release_ids);
+                let _ = sender.send(BacklogResult::ReleasesSet {
+                    generation,
+                    keys,
+                    releases,
+                    result,
+                });
+            })
+            && self.generations.complete_release_set(generation)
+        {
+            self.restore_release_change(generation);
+            self.finish_ticket_sync(&sync_keys);
+            self.service.report_error(format!(
+                "Could not start Jira release update to {}: {error}",
+                release_names(&result_releases)
+            ));
+        }
+    }
+
+    fn apply_release_result(
+        &mut self,
+        generation: u64,
+        keys: Vec<String>,
+        releases: Vec<BacklogRelease>,
+        result: Result<(), String>,
+    ) -> bool {
+        if !self.generations.complete_release_set(generation) {
+            return false;
+        }
+        self.finish_ticket_sync(&keys);
+        match result {
+            Ok(()) => {
+                self.pending_release_changes.remove(&generation);
+                let message = match keys.as_slice() {
+                    [key] => format!("{key} set to {}", release_names(&releases)),
+                    _ => format!("{} tickets set to {}", keys.len(), release_names(&releases)),
+                };
+                self.service
+                    .report_notification(tuicore::Notification::success(
+                        "Jira release updated",
+                        message,
+                    ));
+            }
+            Err(error) => {
+                self.restore_release_change(generation);
+                self.service
+                    .report_error(format!("Could not set Jira release: {error}"));
+            }
+        }
+        true
+    }
+
+    fn set_story_points(&mut self, keys: Vec<String>, story_points: Option<f64>) {
+        if keys.is_empty() || self.tickets_are_syncing(&keys) {
+            self.report_ticket_syncing(&keys);
+            return;
+        }
+        let Some(pending_change) = self.show_optimistic_story_points(&keys, story_points) else {
+            self.service.report_error(
+                "Could not set story points: selected tickets are unavailable".into(),
+            );
+            return;
+        };
+        let generation = self.generations.start_story_points_set();
+        self.pending_story_points_changes
+            .insert(generation, pending_change);
+        self.begin_ticket_sync(&keys);
+        let sync_keys = keys.clone();
+        let service = self.service.clone();
+        let sender = self.sender.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("finery-jira-set-story-points".into())
+            .spawn(move || {
+                let result = service.jira_set_story_points(&keys, story_points);
+                let _ = sender.send(BacklogResult::StoryPointsSet {
+                    generation,
+                    keys,
+                    story_points,
+                    result,
+                });
+            })
+            && self.generations.complete_story_points_set(generation)
+        {
+            self.restore_story_points_change(generation);
+            self.finish_ticket_sync(&sync_keys);
+            self.service
+                .report_error(format!("Could not start Jira story point update: {error}"));
+        }
+    }
+
+    fn apply_story_points_result(
+        &mut self,
+        generation: u64,
+        keys: Vec<String>,
+        story_points: Option<f64>,
+        result: Result<(), String>,
+    ) -> bool {
+        if !self.generations.complete_story_points_set(generation) {
+            return false;
+        }
+        self.finish_ticket_sync(&keys);
+        match result {
+            Ok(()) => {
+                self.pending_story_points_changes.remove(&generation);
+                let story_points = story_points
+                    .map(story_points_label)
+                    .unwrap_or_else(|| "None".into());
+                let message = match keys.as_slice() {
+                    [key] => format!("{key} set to {story_points}"),
+                    _ => format!("{} tickets set to {story_points}", keys.len()),
+                };
+                self.service
+                    .report_notification(tuicore::Notification::success(
+                        "Jira story points updated",
+                        message,
+                    ));
+            }
+            Err(error) => {
+                self.restore_story_points_change(generation);
+                self.service
+                    .report_error(format!("Could not set Jira story points: {error}"));
+            }
+        }
+        true
+    }
+
     fn set_status(&mut self, status: StatusTransition) {
         let keys = status
             .issues
@@ -1550,6 +2154,78 @@ impl BacklogPage {
         self.restore_ticket_items(pending.original_items);
     }
 
+    fn show_optimistic_epic(
+        &mut self,
+        keys: &[String],
+        epic: &BacklogEpic,
+    ) -> Option<PendingEpicChange> {
+        let snapshot = self.snapshot.as_ref()?;
+        let original_items = ticket_items_by_key(snapshot, keys)?;
+        let mut optimistic = snapshot.clone();
+        if !apply_epic_to_snapshot(&mut optimistic, keys, epic) {
+            return None;
+        }
+        self.snapshot = Some(optimistic.clone());
+        self.view.base_mut().base_mut().set_snapshot(&optimistic);
+        Some(PendingEpicChange { original_items })
+    }
+
+    fn restore_epic_change(&mut self, generation: u64) {
+        let Some(pending) = self.pending_epic_changes.remove(&generation) else {
+            return;
+        };
+        self.restore_ticket_items(pending.original_items);
+    }
+
+    fn show_optimistic_releases(
+        &mut self,
+        keys: &[String],
+        releases: &[BacklogRelease],
+    ) -> Option<PendingReleaseChange> {
+        let snapshot = self.snapshot.as_ref()?;
+        let original_items = ticket_items_by_key(snapshot, keys)?;
+        let mut optimistic = snapshot.clone();
+        if !apply_releases_to_snapshot(&mut optimistic, keys, releases) {
+            return None;
+        }
+        self.snapshot = Some(optimistic.clone());
+        self.view.base_mut().base_mut().set_snapshot(&optimistic);
+        Some(PendingReleaseChange { original_items })
+    }
+
+    fn restore_release_change(&mut self, generation: u64) {
+        let Some(pending) = self.pending_release_changes.remove(&generation) else {
+            return;
+        };
+        self.restore_ticket_items(pending.original_items);
+    }
+
+    fn show_optimistic_story_points(
+        &mut self,
+        keys: &[String],
+        story_points: Option<f64>,
+    ) -> Option<PendingStoryPointsChange> {
+        let snapshot = self.snapshot.as_ref()?;
+        let original_items = ticket_items_by_key(snapshot, keys)?;
+        let mut optimistic = snapshot.clone();
+        if !apply_story_points_to_snapshot(&mut optimistic, keys, story_points) {
+            return None;
+        }
+        if let Ok(settings) = self.service.settings().read() {
+            recalculate_capacity(&mut optimistic, &settings.backlog_runway);
+        }
+        self.snapshot = Some(optimistic.clone());
+        self.view.base_mut().base_mut().set_snapshot(&optimistic);
+        Some(PendingStoryPointsChange { original_items })
+    }
+
+    fn restore_story_points_change(&mut self, generation: u64) {
+        let Some(pending) = self.pending_story_points_changes.remove(&generation) else {
+            return;
+        };
+        self.restore_ticket_items(pending.original_items);
+    }
+
     fn restore_ticket_items(&mut self, originals: HashMap<String, WorkItem>) {
         let Some(snapshot) = self.snapshot.as_mut() else {
             return;
@@ -1576,7 +2252,6 @@ impl BacklogPage {
         self.syncing_ticket_keys
             .borrow_mut()
             .extend(keys.iter().cloned());
-        self.refresh_ticket_sync_indicators();
     }
 
     fn finish_ticket_sync(&mut self, keys: &[String]) {
@@ -1585,11 +2260,6 @@ impl BacklogPage {
             syncing.remove(key);
         }
         drop(syncing);
-        self.refresh_ticket_sync_indicators();
-    }
-
-    fn refresh_ticket_sync_indicators(&mut self) {
-        self.view.base_mut().base_mut().refresh_syncing_tickets();
     }
 
     fn report_ticket_syncing(&self, keys: &[String]) {
@@ -2111,6 +2781,126 @@ pub(super) fn apply_assignee_to_snapshot(
     true
 }
 
+pub(super) fn apply_epic_to_snapshot(
+    snapshot: &mut BacklogSnapshot,
+    keys: &[String],
+    epic: &BacklogEpic,
+) -> bool {
+    let keys = keys.iter().collect::<HashSet<_>>();
+    if keys.is_empty()
+        || !keys.iter().all(|key| {
+            snapshot.work_items.iter().any(|item| &item.key == *key)
+                || snapshot
+                    .sprints
+                    .iter()
+                    .flat_map(|sprint| &sprint.work_items)
+                    .any(|item| &item.key == *key)
+        })
+    {
+        return false;
+    }
+    for item in snapshot
+        .work_items
+        .iter_mut()
+        .chain(
+            snapshot
+                .sprints
+                .iter_mut()
+                .flat_map(|sprint| &mut sprint.work_items),
+        )
+        .filter(|item| keys.contains(&item.key))
+    {
+        let epic_is_set = !epic.key.is_empty();
+        item.parent_key = epic_is_set.then_some(epic.key.clone());
+        item.parent_title = epic_is_set.then_some(epic.title.clone());
+        item.epic_name = epic_is_set.then_some(epic.title.clone());
+    }
+    true
+}
+
+pub(super) fn apply_releases_to_snapshot(
+    snapshot: &mut BacklogSnapshot,
+    keys: &[String],
+    releases: &[BacklogRelease],
+) -> bool {
+    let keys = keys.iter().collect::<HashSet<_>>();
+    if keys.is_empty()
+        || !keys.iter().all(|key| {
+            snapshot.work_items.iter().any(|item| &item.key == *key)
+                || snapshot
+                    .sprints
+                    .iter()
+                    .flat_map(|sprint| &sprint.work_items)
+                    .any(|item| &item.key == *key)
+        })
+    {
+        return false;
+    }
+    for item in snapshot
+        .work_items
+        .iter_mut()
+        .chain(
+            snapshot
+                .sprints
+                .iter_mut()
+                .flat_map(|sprint| &mut sprint.work_items),
+        )
+        .filter(|item| keys.contains(&item.key))
+    {
+        item.fix_versions = releases
+            .iter()
+            .map(|release| release.name.clone())
+            .collect();
+    }
+    true
+}
+
+pub(super) fn apply_story_points_to_snapshot(
+    snapshot: &mut BacklogSnapshot,
+    keys: &[String],
+    story_points: Option<f64>,
+) -> bool {
+    let keys = keys.iter().collect::<HashSet<_>>();
+    if keys.is_empty()
+        || !keys.iter().all(|key| {
+            snapshot.work_items.iter().any(|item| &item.key == *key)
+                || snapshot
+                    .sprints
+                    .iter()
+                    .flat_map(|sprint| &sprint.work_items)
+                    .any(|item| &item.key == *key)
+        })
+    {
+        return false;
+    }
+    for item in snapshot
+        .work_items
+        .iter_mut()
+        .chain(
+            snapshot
+                .sprints
+                .iter_mut()
+                .flat_map(|sprint| &mut sprint.work_items),
+        )
+        .filter(|item| keys.contains(&item.key))
+    {
+        item.story_points = story_points;
+    }
+    true
+}
+
+fn release_names(releases: &[BacklogRelease]) -> String {
+    if releases.is_empty() {
+        "No release version".into()
+    } else {
+        releases
+            .iter()
+            .map(|release| release.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 fn ticket_items_by_key(
     snapshot: &BacklogSnapshot,
     keys: &[String],
@@ -2280,9 +3070,14 @@ fn section_contains(snapshot: &BacklogSnapshot, section_id: &str, key: &str) -> 
 pub(super) fn quick_menu_labels(
     snapshot: Option<&BacklogSnapshot>,
     keys: &[String],
-) -> (String, String) {
+) -> (String, String, String, String) {
     let Some(key) = keys.first() else {
-        return (String::new(), "Unassigned".into());
+        return (
+            String::new(),
+            "Unassigned".into(),
+            String::new(),
+            String::new(),
+        );
     };
     let item = snapshot.and_then(|snapshot| {
         snapshot
@@ -2297,9 +3092,70 @@ pub(super) fn quick_menu_labels(
             .find(|item| item.key == *key)
     });
     item.map_or_else(
-        || (String::new(), "Unassigned".into()),
-        |item| (item.status.clone(), item.assignee.clone()),
+        || {
+            (
+                String::new(),
+                "Unassigned".into(),
+                String::new(),
+                String::new(),
+            )
+        },
+        |item| {
+            (
+                item.status.clone(),
+                item.assignee.clone(),
+                item.epic_name.clone().unwrap_or_default(),
+                item.fix_versions.join(", "),
+            )
+        },
     )
+}
+
+fn selected_release_names(snapshot: Option<&BacklogSnapshot>, keys: &[String]) -> Vec<String> {
+    let Some(key) = keys.first() else {
+        return Vec::new();
+    };
+    snapshot
+        .into_iter()
+        .flat_map(|snapshot| {
+            snapshot.work_items.iter().chain(
+                snapshot
+                    .sprints
+                    .iter()
+                    .flat_map(|sprint| &sprint.work_items),
+            )
+        })
+        .find(|item| item.key == *key)
+        .map(|item| item.fix_versions.clone())
+        .unwrap_or_default()
+}
+
+fn selected_story_points_label(snapshot: Option<&BacklogSnapshot>, keys: &[String]) -> String {
+    let Some(key) = keys.first() else {
+        return String::new();
+    };
+    snapshot
+        .into_iter()
+        .flat_map(|snapshot| {
+            snapshot.work_items.iter().chain(
+                snapshot
+                    .sprints
+                    .iter()
+                    .flat_map(|sprint| &sprint.work_items),
+            )
+        })
+        .find(|item| item.key == *key)
+        .and_then(|item| item.story_points)
+        .map(story_points_label)
+        .unwrap_or_default()
+}
+
+fn story_points_label(story_points: f64) -> String {
+    if story_points.fract() == 0.0 {
+        format!("{story_points:.0}")
+    } else {
+        story_points.to_string()
+    }
 }
 
 pub(super) fn current_user_assignment(
@@ -2307,7 +3163,7 @@ pub(super) fn current_user_assignment(
     keys: &[String],
     current_user: &JiraAssignee,
 ) -> BacklogAssignee {
-    let (_, assignee) = quick_menu_labels(snapshot, keys);
+    let (_, assignee, _, _) = quick_menu_labels(snapshot, keys);
     if assignee.eq_ignore_ascii_case(&current_user.display_name) {
         BacklogAssignee {
             account_id: String::new(),
@@ -2489,7 +3345,7 @@ fn backlog_view(
     )
     .active(false)
     .fit_content()
-    .fit_content_max(46, 10)
+    .fit_content_max(69, 18)
     .backdrop(DialogBackdrop::dim().amount(0.55));
     DialogLayer::new(
         quick_menu,
@@ -2997,6 +3853,8 @@ impl TuiNode for BacklogPage {
             self.status_loading
                 || self.assignees_loading
                 || self.current_user_loading
+                || self.epics_loading
+                || self.releases_loading
                 || !self.syncing_ticket_keys.borrow().is_empty(),
             self.issue_types_loading,
             self.rank_refresh_retry.pending(),
