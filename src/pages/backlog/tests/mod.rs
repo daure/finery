@@ -546,9 +546,15 @@ fn disabling_estimated_only_shows_unestimated_stories_and_tasks() {
 }
 
 #[test]
-fn issue_type_filter_shows_only_matching_ticket_types() {
+fn issue_type_filter_keeps_subtasks_of_matching_stories_and_tasks() {
     tuicore::init();
     let mut snapshot = snapshot();
+    let mut task_subtask = work_item("FIN-10", "Task subtask");
+    task_subtask.kind = "Sub-task".into();
+    task_subtask.parent_key = Some("FIN-9".into());
+    let mut story_subtask = work_item("FIN-12", "Story subtask");
+    story_subtask.kind = "Sub-task".into();
+    story_subtask.parent_key = Some("FIN-11".into());
     snapshot.work_items = vec![
         WorkItem {
             kind: "Bug".into(),
@@ -558,11 +564,13 @@ fn issue_type_filter_shows_only_matching_ticket_types() {
             kind: "Task".into(),
             ..work_item("FIN-9", "Task ticket")
         },
-        work_item("FIN-10", "Story ticket"),
+        task_subtask,
+        work_item("FIN-11", "Story ticket"),
+        story_subtask,
     ];
     let (sender, _) = mpsc::channel();
     let mut tree = backlog_tree(&snapshot, sender, Default::default());
-    tree.set_issue_types_filter(vec!["Bug".into(), "Task".into()]);
+    tree.set_issue_types_filter(vec!["Task".into()]);
     let area = Rect::new(0, 0, 100, 16);
     tree.layout(area, &mut LayoutCtx::new());
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
@@ -575,9 +583,25 @@ fn issue_type_filter_shows_only_matching_ticket_types() {
         .unwrap();
 
     let text = rendered_lines(&terminal, area).concat();
-    assert!(text.contains("Bug ticket"));
     assert!(text.contains("Task ticket"));
+    assert!(text.contains("Task subtask"));
+    assert!(!text.contains("Bug ticket"));
     assert!(!text.contains("Story ticket"));
+    assert!(!text.contains("Story subtask"));
+
+    tree.set_issue_types_filter(vec!["Story".into()]);
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(text.contains("Story ticket"));
+    assert!(text.contains("Story subtask"));
+    assert!(!text.contains("Task ticket"));
+    assert!(!text.contains("Task subtask"));
 
     tree.set_issue_types_filter(Vec::new());
     terminal
@@ -2231,6 +2255,43 @@ fn backlog_search_keeps_subtasks_visible_when_the_parent_matches() {
     assert!(text.contains("KAN-34 Frontend integration"));
     assert!(text.contains("KAN-35 Schema foundations"));
     assert!(!text.contains("KAN-30 Checkout"));
+}
+
+#[test]
+fn backlog_search_highlights_a_matching_subtask_instead_of_its_parent() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    let parent = work_item("KAN-22", "Catalog browsing supports discovery");
+    let mut child = work_item("KAN-34", "Frontend integration");
+    child.kind = "Sub-task".into();
+    child.parent_key = Some("KAN-22".into());
+    snapshot.work_items = vec![parent, child];
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    tree.dispatch_focus(
+        &data_focus_target(),
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('/'))),
+        &mut ctx,
+    );
+    for key in "Frontend integration".chars() {
+        tree.dispatch_event(
+            &route,
+            &TuiEvent::Key(KeyEvent::from(Key::Char(key))),
+            &mut ctx,
+        );
+    }
+
+    assert_eq!(
+        tree.highlighted_id_for_test().as_deref(),
+        Some("ticket:KAN-34")
+    );
 }
 
 #[test]

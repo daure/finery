@@ -474,10 +474,18 @@ impl BacklogTree {
             self.group_by_selection,
         ));
         self.sync_search_results();
-        let expanded = expanded
+        let mut expanded = expanded
             .into_iter()
             .filter(|id| self.is_expandable(id))
-            .collect();
+            .collect::<HashSet<_>>();
+        if !self.filters.issue_types.is_empty() {
+            expanded.extend(self.control.items().iter().filter_map(|row| {
+                row.parent_id
+                    .as_deref()
+                    .filter(|id| id.starts_with("ticket:"))
+                    .map(str::to_owned)
+            }));
+        }
         self.control
             .data_view_mut()
             .restore_tree_expansion(expanded);
@@ -1271,6 +1279,26 @@ impl BacklogTree {
             .iter()
             .map(|row| (row.id.as_str(), row.parent_id.as_deref()))
             .collect::<HashMap<_, _>>();
+        let matching_ticket_row_id = rows.iter().find_map(|row| {
+            matches!(row.content, BacklogRowContent::WorkItem(_))
+                .then(|| {
+                    tuicore::search_match(&search, &backlog_search_text(row), SearchMode::Contains)
+                        .is_some()
+                })
+                .filter(|matches| *matches)
+                .map(|_| row.id.clone())
+        });
+        let highlighted_matches = self.control.data_view().highlighted_id().is_some_and(|id| {
+            rows.iter().any(|row| {
+                row.id == id
+                    && tuicore::search_match(
+                        &search,
+                        &backlog_search_text(row),
+                        SearchMode::Contains,
+                    )
+                    .is_some()
+            })
+        });
         let mut visible_ids = std::collections::HashSet::new();
 
         for row in rows.iter().filter(|row| {
@@ -1297,6 +1325,9 @@ impl BacklogTree {
         self.control
             .data_view_mut()
             .set_visible_row_ids(visible_row_ids);
+        if !highlighted_matches && let Some(row_id) = matching_ticket_row_id {
+            self.control.data_view_mut().highlight_id(&row_id);
+        }
     }
 
     fn drain_web_menu(&mut self, was_open: bool) {
@@ -2208,6 +2239,7 @@ fn ancestors_match_filters(
 fn matches_filters(item: &WorkItem, filters: &BacklogFilters) -> bool {
     (filters.estimated || (estimation_eligible(item) && item.story_points.is_none()))
         && (filters.issue_types.is_empty()
+            || matches!(work_item_kind(&item.kind), WorkItemKind::Subtask)
             || filters
                 .issue_types
                 .iter()
