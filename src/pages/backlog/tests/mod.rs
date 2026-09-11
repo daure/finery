@@ -2266,7 +2266,7 @@ fn backlog_search_filters_tickets_and_hides_runway_bands() {
     assert!(!text.contains("┃"));
     let matching_y = rendered_lines(&terminal, area)
         .iter()
-        .position(|line| line.contains("FIN-2"))
+        .position(|line| line.contains("Ship release"))
         .unwrap() as u16;
     assert!(
         (matching_y..matching_y + 2).all(|y| {
