@@ -124,6 +124,7 @@ pub(crate) struct JiraEpic {
 pub(crate) struct JiraComposerIssue {
     pub(crate) ticket: Ticket,
     pub(crate) work_item: WorkItem,
+    pub(crate) subtasks: Vec<Ticket>,
 }
 
 pub(crate) enum SubmitBatchOutcome {
@@ -141,6 +142,11 @@ pub(crate) struct SubmitFailure {
     pub message: String,
     pub refresh: Option<Box<(Ticket, Ticket)>>,
     pub retry_blocked: bool,
+}
+
+struct CreatedIssueResult {
+    ticket: Ticket,
+    warnings: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -351,12 +357,45 @@ pub(crate) fn search_composer_issues(
         &composer_fields(story_points_field_id),
     )
     .map_err(|(_, error)| error)?;
-    Ok(response
+    let issues = response
         .issues
         .into_iter()
         .map(|issue| {
+            let subtask_keys = composer_subtask_keys(&issue);
             let (ticket, work_item) = to_ticket_and_work_item(issue, story_points_field_id);
-            JiraComposerIssue { ticket, work_item }
+            (
+                JiraComposerIssue {
+                    ticket,
+                    work_item,
+                    subtasks: Vec::new(),
+                },
+                subtask_keys,
+            )
+        })
+        .collect::<Vec<_>>();
+    let subtask_keys = issues
+        .iter()
+        .flat_map(|(_, keys)| keys)
+        .cloned()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let subtasks = bulk_fetch_tickets(
+        &client,
+        &base_url,
+        &email,
+        &token,
+        &subtask_keys,
+        story_points_field_id,
+    )?;
+    Ok(issues
+        .into_iter()
+        .map(|(mut issue, keys)| {
+            issue.subtasks = keys
+                .iter()
+                .filter_map(|key| subtasks.get(key).cloned())
+                .collect();
+            issue
         })
         .collect())
 }
@@ -385,7 +424,14 @@ pub(crate) fn fetch_composer_issues(
             let (mut ticket, work_item) = to_ticket_and_work_item(issue, story_points_field_id);
             ticket.web_links = fetch_web_links(&client, &base_url, &email, &token, &ticket.key)?;
             let key = ticket.key.clone();
-            Ok((key, JiraComposerIssue { ticket, work_item }))
+            Ok((
+                key,
+                JiraComposerIssue {
+                    ticket,
+                    work_item,
+                    subtasks: Vec::new(),
+                },
+            ))
         })
         .collect::<Result<HashMap<_, _>, _>>()?;
     let missing = keys
@@ -1261,6 +1307,28 @@ fn composer_fields(story_points_field_id: Option<&str>) -> Vec<&str> {
     fields
 }
 
+fn composer_subtask_keys(issue: &JiraIssue) -> Vec<String> {
+    let eligible_parent = issue
+        .fields
+        .get("issuetype")
+        .and_then(|value| value.get("name"))
+        .and_then(Value::as_str)
+        .map(ticket_kind)
+        .is_some_and(|kind| matches!(kind, TicketKind::Story | TicketKind::Task));
+    if !eligible_parent {
+        return Vec::new();
+    }
+    issue
+        .fields
+        .get("subtasks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|subtask| subtask.get("key").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
 fn search_jql_for_query(settings: &AppSettings, query: &str) -> String {
     if is_ticket_number_query(query) {
         let project = settings.jira_default_project.trim();
@@ -1281,6 +1349,39 @@ pub(crate) fn fetch(settings: &AppSettings, key: &str) -> Result<Ticket, String>
         key,
         story_points_field_for_load(settings, None),
     )
+}
+
+pub(crate) fn fetch_with_subtasks(
+    settings: &AppSettings,
+    key: &str,
+) -> Result<(Ticket, Vec<Ticket>), String> {
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let story_points_field_id = story_points_field_for_load(settings, None);
+    let response = client
+        .get(format!("{base_url}/rest/api/3/issue/{key}"))
+        .basic_auth(&email, Some(&token))
+        .query(&[("fields", ticket_fields(story_points_field_id).join(","))])
+        .send()
+        .map_err(|error| error.to_string())?;
+    let issue = response_json::<JiraIssue>(response)?;
+    let subtask_keys = composer_subtask_keys(&issue);
+    let mut ticket = to_ticket_with_story_points(issue, story_points_field_id);
+    ticket.web_links = fetch_web_links(&client, &base_url, &email, &token, key)?;
+    let subtasks = bulk_fetch_tickets(
+        &client,
+        &base_url,
+        &email,
+        &token,
+        &subtask_keys,
+        story_points_field_id,
+    )?;
+    Ok((
+        ticket,
+        subtask_keys
+            .into_iter()
+            .filter_map(|key| subtasks.get(&key).cloned())
+            .collect(),
+    ))
 }
 
 pub(crate) fn field_options(
@@ -1923,6 +2024,7 @@ pub(crate) fn submit_changes(
 ) -> SubmitBatchOutcome {
     let result = (|| {
         commit_order(changes)?;
+        validate_ticket_change_shapes(changes)?;
         validate_submission_descriptions(changes, allow_unsafe_description_overwrite)?;
         let (client, base_url, email, token) = configured_client(settings)?;
         let existing_keys = changes
@@ -1974,6 +2076,26 @@ pub(crate) fn submit_changes(
         .map(SubmitBatchOutcome::Completed)
     })();
     result.unwrap_or_else(SubmitBatchOutcome::PreflightError)
+}
+
+fn validate_ticket_change_shapes(changes: &[TicketChange]) -> Result<(), String> {
+    for change in changes {
+        let valid = match change.kind {
+            ChangeKind::Synced | ChangeKind::Deleted => change.original.is_some(),
+            ChangeKind::Modified => change.original.is_some() && change.updated.is_some(),
+            ChangeKind::Added => change.updated.is_some(),
+        };
+        if !valid {
+            let expected = match change.kind {
+                ChangeKind::Synced => "original state",
+                ChangeKind::Deleted => "original state",
+                ChangeKind::Modified => "original and updated state",
+                ChangeKind::Added => "updated state",
+            };
+            return Err(format!("{} is missing {expected}", change.id));
+        }
+    }
+    Ok(())
 }
 
 fn validate_submission_descriptions(
@@ -2189,13 +2311,14 @@ fn submit_change(
             Ok(SubmissionSnapshot {
                 original: Some(ticket.clone()),
                 updated: Some(ticket),
+                warnings: Vec::new(),
             })
         }
         ChangeKind::Deleted => {
             let original = change
                 .original
                 .as_ref()
-                .expect("deleted ticket has original");
+                .ok_or_else(|| submit_failure("deleted ticket is missing original state".into()))?;
             delete_issue(client, base_url, email, token, &original.key).map_err(|message| {
                 SubmitFailure {
                     message,
@@ -2206,17 +2329,20 @@ fn submit_change(
             Ok(SubmissionSnapshot {
                 original: current.get(&original.key).cloned(),
                 updated: None,
+                warnings: Vec::new(),
             })
         }
         ChangeKind::Modified => {
-            let original = change
-                .original
+            let original = change.original.as_ref().ok_or_else(|| {
+                submit_failure("modified ticket is missing original state".into())
+            })?;
+            let desired = change
+                .updated
                 .as_ref()
-                .expect("modified ticket has original");
-            let desired = change.updated.as_ref().expect("modified ticket has update");
+                .ok_or_else(|| submit_failure("modified ticket is missing updated state".into()))?;
             let current = current
                 .get(&original.key)
-                .expect("current ticket was checked");
+                .ok_or_else(|| submit_failure("Jira ticket was not found during commit".into()))?;
             match update_issue(
                 client,
                 base_url,
@@ -2230,6 +2356,7 @@ fn submit_change(
                 Ok(updated) => Ok(SubmissionSnapshot {
                     original: Some(current.clone()),
                     updated: Some(updated),
+                    warnings: Vec::new(),
                 }),
                 Err(message) => Err(failed_with_refresh(
                     client,
@@ -2244,7 +2371,10 @@ fn submit_change(
             }
         }
         ChangeKind::Added => {
-            let desired = change.updated.as_ref().expect("added ticket has update");
+            let desired = change
+                .updated
+                .as_ref()
+                .ok_or_else(|| submit_failure("added ticket is missing updated state".into()))?;
             create_issue(
                 client,
                 base_url,
@@ -2253,9 +2383,10 @@ fn submit_change(
                 desired,
                 story_points_field_id,
             )
-            .map(|updated| SubmissionSnapshot {
+            .map(|created| SubmissionSnapshot {
                 original: None,
-                updated: Some(updated),
+                updated: Some(created.ticket),
+                warnings: created.warnings,
             })
         }
     }
@@ -2354,7 +2485,7 @@ fn create_issue(
     token: &str,
     desired: &Ticket,
     story_points_field_id: Option<&str>,
-) -> Result<Ticket, SubmitFailure> {
+) -> Result<CreatedIssueResult, SubmitFailure> {
     if desired.project_key.trim().is_empty() {
         return Err(SubmitFailure {
             message: "Choose a Jira project before committing the new ticket".into(),
@@ -2415,7 +2546,9 @@ fn create_issue(
         story_points_field_id,
     )
     .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
-    if created_ticket.status != desired.status
+    let mut warnings = Vec::new();
+    if !desired.status.trim().is_empty()
+        && created_ticket.status != desired.status
         && let Err(message) = transition_issue(
             client,
             base_url,
@@ -2425,23 +2558,22 @@ fn create_issue(
             &desired.status,
         )
     {
-        return Err(failed_created_with_refresh(
-            client,
-            base_url,
-            email,
-            token,
-            &created.key,
-            &created_desired,
-            message,
-            story_points_field_id,
-        ));
+        warnings.push(created_issue_warning(&created.key, message));
     }
-    apply_attachment_changes(client, base_url, email, token, &created.key, desired)
-        .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
+    if let Err(message) =
+        apply_attachment_changes(client, base_url, email, token, &created.key, desired)
+    {
+        warnings.push(created_issue_warning(&created.key, message));
+    }
     let published_diagrams =
-        apply_mermaid_diagrams(client, base_url, email, token, &created.key, desired)
-            .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
-    apply_web_link_changes(
+        match apply_mermaid_diagrams(client, base_url, email, token, &created.key, desired) {
+            Ok(diagrams) => diagrams,
+            Err(message) => {
+                warnings.push(created_issue_warning(&created.key, message));
+                HashMap::new()
+            }
+        };
+    if let Err(message) = apply_web_link_changes(
         client,
         base_url,
         email,
@@ -2449,9 +2581,10 @@ fn create_issue(
         &created.key,
         &[],
         &desired.web_links,
-    )
-    .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
-    apply_issue_link_changes(
+    ) {
+        warnings.push(created_issue_warning(&created.key, message));
+    }
+    if let Err(message) = apply_issue_link_changes(
         client,
         base_url,
         email,
@@ -2459,18 +2592,28 @@ fn create_issue(
         &created.key,
         &[],
         &desired.issue_links,
-    )
-    .map_err(|message| created_issue_failure(message, created_desired.clone(), None))?;
-    fetch_ticket(
+    ) {
+        warnings.push(created_issue_warning(&created.key, message));
+    }
+    let ticket = match fetch_ticket(
         client,
         base_url,
         email,
         token,
         &created.key,
         story_points_field_id,
-    )
-    .map(|ticket| with_published_mermaid_attachments(ticket, desired, &published_diagrams))
-    .map_err(|message| created_issue_failure(message, created_desired, None))
+    ) {
+        Ok(ticket) => with_published_mermaid_attachments(ticket, desired, &published_diagrams),
+        Err(message) => {
+            warnings.push(created_issue_warning(&created.key, message));
+            with_published_mermaid_attachments(created_ticket, desired, &published_diagrams)
+        }
+    };
+    Ok(CreatedIssueResult { ticket, warnings })
+}
+
+fn created_issue_warning(key: &str, message: String) -> String {
+    format!("Created {key}, but a follow-up did not complete: {message}")
 }
 
 fn update_issue(
@@ -3071,23 +3214,6 @@ fn create_response_failure(status: StatusCode, message: String) -> SubmitFailure
     } else {
         submit_failure(message)
     }
-}
-
-fn failed_created_with_refresh(
-    client: &Client,
-    base_url: &str,
-    email: &str,
-    token: &str,
-    key: &str,
-    desired: &Ticket,
-    message: String,
-    story_points_field_id: Option<&str>,
-) -> SubmitFailure {
-    created_issue_failure(
-        message,
-        desired.clone(),
-        fetch_ticket(client, base_url, email, token, key, story_points_field_id).ok(),
-    )
 }
 
 fn created_issue_failure(

@@ -85,6 +85,65 @@ fn placement_builds_ordered_forest_and_keeps_external_parent_key() {
 }
 
 #[test]
+fn including_a_story_or_task_adds_its_subtasks_without_selecting_them() {
+    for kind in [TicketKind::Story, TicketKind::Task] {
+        let mut state = state();
+        state.dispatch(ComposerAction::IncludeTicketWithSubtasks {
+            ticket: ticket("FIN-1", kind),
+            subtasks: vec![ticket("FIN-2", TicketKind::Subtask)],
+            placement: PlacementTarget::Root,
+        });
+
+        assert_eq!(
+            state
+                .ordered_changes()
+                .into_iter()
+                .map(|change| change.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["FIN-1", "FIN-2"]
+        );
+        assert_eq!(
+            state
+                .active_set()
+                .unwrap()
+                .tickets
+                .iter()
+                .find(|change| change.id == "FIN-2")
+                .unwrap()
+                .updated
+                .as_ref()
+                .unwrap()
+                .parent_key
+                .as_deref(),
+            Some("FIN-1")
+        );
+        assert_eq!(
+            state.active_set().unwrap().selected_ticket_ids,
+            vec!["FIN-1".to_owned()]
+        );
+    }
+}
+
+#[test]
+fn including_an_epic_does_not_add_supplied_subtasks() {
+    let mut state = state();
+    state.dispatch(ComposerAction::IncludeTicketWithSubtasks {
+        ticket: ticket("FIN-1", TicketKind::Epic),
+        subtasks: vec![ticket("FIN-2", TicketKind::Subtask)],
+        placement: PlacementTarget::Root,
+    });
+
+    assert_eq!(
+        state
+            .ordered_changes()
+            .into_iter()
+            .map(|change| change.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["FIN-1"]
+    );
+}
+
+#[test]
 fn opening_a_change_set_selects_the_first_visible_ticket() {
     let mut child = ticket("FIN-2", TicketKind::Subtask);
     child.parent_key = Some("FIN-1".into());
@@ -354,6 +413,7 @@ fn submitted_local_parent_keeps_unsent_child_attached_by_resolved_key() {
         snapshot: super::super::SubmissionSnapshot {
             original: None,
             updated: Some(ticket("FIN-101", TicketKind::Story)),
+            warnings: Vec::new(),
         },
     });
 
@@ -398,6 +458,7 @@ fn new_child_uses_committed_parent_key_instead_of_local_alias() {
         snapshot: super::super::SubmissionSnapshot {
             original: None,
             updated: Some(ticket("FIN-101", TicketKind::Story)),
+            warnings: Vec::new(),
         },
     });
 
@@ -486,6 +547,7 @@ fn submitted_descendant_blocks_local_subtree_removal() {
         snapshot: super::super::SubmissionSnapshot {
             original: None,
             updated: Some(submitted_child),
+            warnings: Vec::new(),
         },
     });
 

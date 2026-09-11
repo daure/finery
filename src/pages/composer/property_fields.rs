@@ -31,6 +31,7 @@ type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
 type PropertyDropdown = Dropdown<JiraOption, String>;
 type FixVersionsDropdown = Dropdown<JiraFixVersion, String>;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
+const JIRA_DEFAULT_STATUS_ID: &str = "__jira_default_status";
 
 fn property_shortcut_targets(
     keys: &ComposerKeyBindings,
@@ -705,6 +706,31 @@ impl BoundPropertyDropdown {
     }
 
     #[cfg(test)]
+    pub(super) fn status_for_test(
+        state: Rc<RefCell<ComposerState>>,
+        pending: PendingActions,
+        service: AppService,
+        statuses: Vec<JiraOption>,
+    ) -> Self {
+        let shared = Rc::new(RefCell::new(SharedOptions {
+            ticket_id: None,
+            values: Some(JiraFieldOptions {
+                issue_types: Vec::new(),
+                statuses,
+                priorities: Vec::new(),
+            }),
+        }));
+        Self::new(
+            state,
+            pending,
+            shared,
+            service,
+            PropertyKind::Status,
+            ComposerKeyBindings::default().status,
+        )
+    }
+
+    #[cfg(test)]
     pub(super) fn assignee_for_test(
         state: Rc<RefCell<ComposerState>>,
         pending: PendingActions,
@@ -758,6 +784,11 @@ impl BoundPropertyDropdown {
     #[cfg(test)]
     pub(super) fn sync_for_test(&mut self) {
         self.sync();
+    }
+
+    #[cfg(test)]
+    pub(super) fn options_for_test(&self) -> Vec<JiraOption> {
+        self.options()
     }
 
     fn sync(&mut self) -> bool {
@@ -821,7 +852,7 @@ impl BoundPropertyDropdown {
                     },
                 });
             }
-            changed |= self.set_options(options, &value);
+            changed |= self.set_options(options, &self.selected_value(&value));
         } else if !self.synced_rows.is_empty() {
             changed |= self.set_options(self.synced_rows.clone(), &value);
         }
@@ -875,13 +906,14 @@ impl BoundPropertyDropdown {
         }
         let shared = self.shared.borrow();
         let Some(values) = shared.values.as_ref() else {
-            return if self.kind == PropertyKind::IssueType {
+            let options = if self.kind == PropertyKind::IssueType {
                 self.kind_options()
             } else {
                 Vec::new()
             };
+            return self.with_jira_default_status(options);
         };
-        match self.kind {
+        let options = match self.kind {
             PropertyKind::IssueType => values
                 .issue_types
                 .iter()
@@ -902,7 +934,35 @@ impl BoundPropertyDropdown {
             id: option.label.clone(),
             label: option.label,
         })
-        .collect()
+        .collect();
+        self.with_jira_default_status(options)
+    }
+
+    fn with_jira_default_status(&self, mut options: Vec<JiraOption>) -> Vec<JiraOption> {
+        if self.kind == PropertyKind::Status && self.is_unsubmitted_draft() {
+            options.insert(
+                0,
+                JiraOption {
+                    id: JIRA_DEFAULT_STATUS_ID.into(),
+                    label: "Use Jira default".into(),
+                },
+            );
+        }
+        options
+    }
+
+    fn selected_value(&self, value: &str) -> String {
+        if self.kind == PropertyKind::Status && value.is_empty() && self.is_unsubmitted_draft() {
+            JIRA_DEFAULT_STATUS_ID.into()
+        } else {
+            value.into()
+        }
+    }
+
+    fn is_unsubmitted_draft(&self) -> bool {
+        self.state.borrow().selected_change().is_some_and(|change| {
+            change.kind == crate::store::composer::ChangeKind::Added && !change.is_submitted()
+        })
     }
 
     fn kind_options(&self) -> Vec<JiraOption> {
@@ -1157,7 +1217,11 @@ impl PropertyKind {
                     _ => TicketKind::Task,
                 })
             }
-            Self::Status => ComposerAction::UpdateStatus(label),
+            Self::Status => ComposerAction::UpdateStatus(
+                (id == JIRA_DEFAULT_STATUS_ID)
+                    .then(String::new)
+                    .unwrap_or(id),
+            ),
             Self::Priority => ComposerAction::UpdatePriority(label),
             Self::Assignee => ComposerAction::UpdateAssignee {
                 name: label,

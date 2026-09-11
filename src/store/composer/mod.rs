@@ -212,6 +212,8 @@ impl std::fmt::Display for PlacementError {
 pub(crate) struct SubmissionSnapshot {
     pub original: Option<Ticket>,
     pub updated: Option<Ticket>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 impl TicketChange {
@@ -347,6 +349,11 @@ pub(crate) enum ComposerAction {
     IncludeTicket(Ticket),
     IncludeTicketAt {
         ticket: Ticket,
+        placement: PlacementTarget,
+    },
+    IncludeTicketWithSubtasks {
+        ticket: Ticket,
+        subtasks: Vec<Ticket>,
         placement: PlacementTarget,
     },
     ReparentTicket {
@@ -1126,6 +1133,11 @@ impl ComposerState {
             ComposerAction::IncludeTicketAt { ticket, placement } => {
                 self.include_ticket(ticket, placement, true)?
             }
+            ComposerAction::IncludeTicketWithSubtasks {
+                ticket,
+                subtasks,
+                placement,
+            } => self.include_ticket_with_subtasks(ticket, subtasks, placement)?,
             ComposerAction::ReparentTicket { id, placement } => {
                 self.reparent_ticket(&id, placement)?;
             }
@@ -1432,7 +1444,7 @@ impl ComposerState {
             description_safe_to_overwrite: true,
             description_overwrite_warning: None,
             kind,
-            status: "To Do".into(),
+            status: String::new(),
             priority: "Medium".into(),
             assignee: "Unassigned".into(),
             assignee_account_id: String::new(),
@@ -1558,6 +1570,33 @@ impl ComposerState {
         });
         set.selected_ticket_ids.push(id.clone());
         self.selected_ticket = Some(id);
+        Ok(())
+    }
+
+    fn include_ticket_with_subtasks(
+        &mut self,
+        ticket: Ticket,
+        subtasks: Vec<Ticket>,
+        placement: PlacementTarget,
+    ) -> Result<(), PlacementError> {
+        let parent_key = ticket.key.clone();
+        let mut selected_ticket_ids = self
+            .active_set()
+            .map(|set| set.selected_ticket_ids.clone())
+            .unwrap_or_default();
+        let include_subtasks = matches!(ticket.kind, TicketKind::Story | TicketKind::Task);
+        self.include_ticket(ticket, placement, true)?;
+        if include_subtasks {
+            for subtask in subtasks
+                .into_iter()
+                .filter(|subtask| subtask.kind == TicketKind::Subtask)
+            {
+                self.include_ticket(subtask, PlacementTarget::ChildOf(parent_key.clone()), false)?;
+            }
+        }
+        selected_ticket_ids.push(parent_key.clone());
+        self.set_selected_tickets(selected_ticket_ids);
+        self.selected_ticket = Some(parent_key);
         Ok(())
     }
 
@@ -1698,10 +1737,13 @@ impl ComposerState {
             .and_then(|set| set.tickets.iter_mut().find(|change| change.id == id))
             .ok_or(PlacementError::UnknownTicket)?;
         sources.insert((change_set_id.to_owned(), id.to_owned()), original.clone());
-        change.updated = change
-            .original
-            .as_ref()
-            .map(|prior_original| rebase_ticket(prior_original, &updated, &original));
+        change.updated = Some(
+            change
+                .original
+                .as_ref()
+                .map(|prior_original| rebase_ticket(prior_original, &updated, &original))
+                .unwrap_or(updated),
+        );
         change.original = Some(original);
         change.kind = ChangeKind::Modified;
         change.retry_blocked = false;
@@ -2480,6 +2522,7 @@ impl ComposerAction {
                 | Self::CreateTicketWithId { .. }
                 | Self::IncludeTicket(_)
                 | Self::IncludeTicketAt { .. }
+                | Self::IncludeTicketWithSubtasks { .. }
                 | Self::ReparentTicket { .. }
                 | Self::RemoveTicket(_)
                 | Self::MarkTicketDeleted(_)
@@ -2517,6 +2560,7 @@ impl ComposerAction {
                 | Self::CreateTicketWithId { .. }
                 | Self::IncludeTicket(_)
                 | Self::IncludeTicketAt { .. }
+                | Self::IncludeTicketWithSubtasks { .. }
                 | Self::ReparentTicket { .. }
                 | Self::SetSelectedTickets(_)
                 | Self::RemoveTicket(_)

@@ -246,12 +246,12 @@ fn backlog_header_orders_toolbar_focus_and_shows_desktop_labels() {
         .unwrap();
     let header = rendered_lines(&terminal, area).remove(0);
 
-    assert!(cell_position(&header, "Web") < cell_position(&header, "Velocity"));
-    assert!(cell_position(&header, "Velocity") < cell_position(&header, "Refresh"));
-    assert!(cell_position(&header, "Refresh") < cell_position(&header, "Group by"));
-    assert!(cell_position(&header, "Group by") < cell_position(&header, "User"));
+    assert!(cell_position(&header, "Web") < cell_position(&header, "Group by"));
+    assert!(cell_position(&header, "Group by") < cell_position(&header, "Estimated"));
+    assert!(cell_position(&header, "Estimated") < cell_position(&header, "User"));
     assert!(cell_position(&header, "User") < cell_position(&header, "Type"));
-    assert!(cell_position(&header, "Type") < cell_position(&header, "Estimated"));
+    assert!(cell_position(&header, "Type") < cell_position(&header, "Velocity"));
+    assert!(cell_position(&header, "Velocity") < cell_position(&header, "Refresh"));
 
     let focus_position = |path| {
         layout
@@ -264,24 +264,20 @@ fn backlog_header_orders_toolbar_focus_and_shows_desktop_labels() {
         focus_position(TreePath::from_keys([
             ChildKey::new("web"),
             ChildKey::new("trigger")
-        ])) < focus_position(TreePath::from_keys([ChildKey::new("velocity")]))
-    );
-    assert!(
-        focus_position(TreePath::from_keys([ChildKey::new("velocity")]))
-            < focus_position(TreePath::from_keys([ChildKey::new("refresh")]))
-    );
-    assert!(
-        focus_position(TreePath::from_keys([ChildKey::new("refresh")]))
-            < focus_position(TreePath::from_keys([
-                ChildKey::new("group-by"),
-                ChildKey::new("trigger")
-            ]))
+        ])) < focus_position(TreePath::from_keys([
+            ChildKey::new("group-by"),
+            ChildKey::new("trigger")
+        ]))
     );
     assert!(
         focus_position(TreePath::from_keys([
             ChildKey::new("group-by"),
             ChildKey::new("trigger")
-        ])) < focus_position(TreePath::from_keys([ChildKey::new("users")]))
+        ])) < focus_position(TreePath::from_keys([ChildKey::new("estimated")]))
+    );
+    assert!(
+        focus_position(TreePath::from_keys([ChildKey::new("estimated")]))
+            < focus_position(TreePath::from_keys([ChildKey::new("users")]))
     );
     assert!(
         focus_position(TreePath::from_keys([ChildKey::new("users")]))
@@ -289,10 +285,14 @@ fn backlog_header_orders_toolbar_focus_and_shows_desktop_labels() {
     );
     assert!(
         focus_position(TreePath::from_keys([ChildKey::new("issue-types")]))
-            < focus_position(TreePath::from_keys([ChildKey::new("estimated")]))
+            < focus_position(TreePath::from_keys([ChildKey::new("velocity")]))
     );
     assert!(
-        focus_position(TreePath::from_keys([ChildKey::new("estimated")]))
+        focus_position(TreePath::from_keys([ChildKey::new("velocity")]))
+            < focus_position(TreePath::from_keys([ChildKey::new("refresh")]))
+    );
+    assert!(
+        focus_position(TreePath::from_keys([ChildKey::new("refresh")]))
             < focus_position(TreePath::from_keys([ChildKey::new("data")]))
     );
 
@@ -328,10 +328,11 @@ fn backlog_header_uses_two_rows_for_compact_widths() {
     assert!(lines[0].contains("󰖟"));
     assert!(lines[0].contains("|W|"));
     assert!(!lines[0].contains("Web"));
+    assert!(lines[0].contains(""));
     assert!(lines[0].contains(" V"));
     assert!(lines[0].contains(" R"));
-    assert!(lines[1].contains(""));
-    assert!(!lines[1].contains(" G"));
+    assert!(!lines[0].contains(" G"));
+    assert!(lines[1].contains("Search..."));
     assert!(lines[1].contains("User"));
     assert!(lines[1].contains("Type"));
     assert!(lines[1].contains("󰑭"));
@@ -344,9 +345,47 @@ fn backlog_header_uses_two_rows_for_compact_widths() {
                 == TreePath::from_keys([ChildKey::new("group-by"), ChildKey::new("trigger")])
         })
         .unwrap();
-    assert_eq!(group_by.area.x, 0);
+    assert!(group_by.area.x > cell_position(&lines[0], "󰖟").unwrap() as u16);
+    assert!(cell_position(&lines[1], "󰑭") < cell_position(&lines[1], "User"));
     assert!(cell_position(&lines[1], "User") < cell_position(&lines[1], "Type"));
-    assert!(cell_position(&lines[1], "Type") < cell_position(&lines[1], "󰑭"));
+    let focus_position = |path| {
+        layout
+            .focus_targets()
+            .iter()
+            .position(|target| target.path == path)
+            .unwrap_or_else(|| panic!("missing focus path: {path:?}"))
+    };
+    assert!(
+        focus_position(TreePath::from_keys([
+            ChildKey::new("web"),
+            ChildKey::new("trigger")
+        ])) < focus_position(TreePath::from_keys([
+            ChildKey::new("group-by"),
+            ChildKey::new("trigger")
+        ]))
+    );
+    assert!(
+        focus_position(TreePath::from_keys([
+            ChildKey::new("group-by"),
+            ChildKey::new("trigger")
+        ])) < focus_position(TreePath::from_keys([ChildKey::new("velocity")]))
+    );
+    assert!(
+        focus_position(TreePath::from_keys([ChildKey::new("velocity")]))
+            < focus_position(TreePath::from_keys([ChildKey::new("refresh")]))
+    );
+    assert!(
+        focus_position(TreePath::from_keys([ChildKey::new("refresh")]))
+            < focus_position(TreePath::from_keys([ChildKey::new("estimated")]))
+    );
+    assert!(
+        focus_position(TreePath::from_keys([ChildKey::new("estimated")]))
+            < focus_position(TreePath::from_keys([ChildKey::new("users")]))
+    );
+    assert!(
+        focus_position(TreePath::from_keys([ChildKey::new("users")]))
+            < focus_position(TreePath::from_keys([ChildKey::new("issue-types")]))
+    );
 }
 
 #[test]
@@ -1078,6 +1117,46 @@ fn unified_backlog_tree_shows_collapsed_sprints_and_expanded_backlog() {
     assert!(text.contains("Plan next sprint"));
     assert!(text.contains("FIN-8 Plan next sprint"));
     assert!(text.contains("- • @-- • To Do"));
+}
+
+#[test]
+fn home_reset_restores_the_default_backlog_view() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let mut snapshot = snapshot();
+    let mut child = work_item("FIN-9", "Hidden child");
+    child.kind = "Sub-task".into();
+    child.parent_key = Some("FIN-8".into());
+    snapshot.work_items.push(child);
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    tree.set_estimated(false);
+    tree.set_issue_types_filter(vec!["Task".into()]);
+    tree.set_users_filter(vec!["Maya".into()]);
+    tree.group_by_release_for_test();
+    tree.highlight("ticket:FIN-8");
+
+    tree.reset_to_home();
+
+    assert_eq!(
+        tree.highlighted_id_for_test().as_deref(),
+        Some("section:backlog")
+    );
+    assert!(tree.runway_markers_visible_for_test());
+    let area = Rect::new(0, 0, 100, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let text = rendered_lines(&terminal, area).concat();
+
+    assert!(text.contains("Plan next sprint"));
+    assert!(!text.contains("Ship sprint work"));
+    assert!(!text.contains("Hidden child"));
 }
 
 #[test]

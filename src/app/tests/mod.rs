@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
-use tuicore::{AnimationSettings, RenderCtx, TuiNode};
+use tuicore::{
+    AnimationSettings, EventCtx, Key, KeyEvent, KeyModifiers, Propagation, RenderCtx, TuiEvent,
+    TuiNode,
+};
 
 use crate::service::AppService;
 
@@ -71,4 +74,27 @@ fn background_copy_schedules_ticks_and_a_direct_copy_supersedes_it() {
     assert!(!service.clipboard_pending());
     release.send(()).unwrap();
     assert_eq!(app.take_pending_clipboard_request(), None);
+}
+
+#[test]
+fn home_shortcut_closes_global_dialogs() {
+    tuicore::init();
+    let mut app = root(AppService::for_tests(), Vec::new());
+    app.view.set_active(true);
+    app.view.base_mut().set_active(true);
+    app.view.base_mut().base_mut().set_active(true);
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+
+    assert!(app.go_home(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('h'),
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut ctx,
+    ));
+
+    assert!(!app.view.is_active());
+    assert!(!app.view.base().is_active());
+    assert!(!app.view.base().base().is_active());
+    assert_eq!(ctx.propagation(), Propagation::Stopped);
 }

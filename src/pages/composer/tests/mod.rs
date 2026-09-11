@@ -2847,6 +2847,94 @@ fn property_dropdown_navigation_survives_tick_before_commit() {
 }
 
 #[test]
+fn draft_status_dropdown_can_use_the_jira_default() {
+    tuicore::init();
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    state.dispatch(ComposerAction::CreateTicket {
+        title: "New local ticket".into(),
+        project_key: "FIN".into(),
+    });
+    let state = Rc::new(RefCell::new(state));
+    let pending = Rc::new(RefCell::new(Vec::new()));
+    let mut dropdown = BoundPropertyDropdown::status_for_test(
+        Rc::clone(&state),
+        Rc::clone(&pending),
+        AppService::for_tests(),
+        vec![
+            JiraOption {
+                id: "progress".into(),
+                label: "In Progress".into(),
+            },
+            JiraOption {
+                id: "done".into(),
+                label: "Done".into(),
+            },
+        ],
+    );
+    assert_eq!(dropdown.options_for_test()[0].label, "Use Jira default");
+    let area = Rect::new(0, 0, TEST_WIDTH, 3);
+    let mut layout = LayoutCtx::new();
+    dropdown.layout(area, &mut layout);
+    assert_eq!(
+        dropdown.selected_for_test().as_deref(),
+        Some("__jira_default_status")
+    );
+    assert!(render_property_dropdown(&mut dropdown).contains("Use Jira default"));
+    let target = layout.focus_targets().first().unwrap().clone();
+    dropdown.dispatch_focus(&target, true, &mut FocusCtx::default());
+    state
+        .borrow_mut()
+        .dispatch(ComposerAction::UpdateStatus("In Progress".into()));
+    dropdown.tick(Duration::ZERO, AnimationSettings::default());
+    dropdown.dispatch_event(
+        &EventRoute::new(target.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::default(),
+    );
+    dropdown.dispatch_event(
+        &EventRoute::new(target.path.clone()),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('k'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+    dropdown.dispatch_event(
+        &EventRoute::new(target.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::default(),
+    );
+
+    assert_eq!(
+        pending.borrow().as_slice(),
+        [ComposerAction::UpdateStatus(String::new())]
+    );
+}
+
+#[test]
+fn synced_ticket_status_dropdown_excludes_the_jira_default() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
+    let dropdown = BoundPropertyDropdown::status_for_test(
+        Rc::new(RefCell::new(state)),
+        Rc::new(RefCell::new(Vec::new())),
+        AppService::for_tests(),
+        vec![JiraOption {
+            id: "progress".into(),
+            label: "In Progress".into(),
+        }],
+    );
+
+    assert!(
+        dropdown
+            .options_for_test()
+            .iter()
+            .all(|option| option.label != "Use Jira default")
+    );
+}
+
+#[test]
 fn assignee_dropdown_selects_the_ticket_account_id() {
     tuicore::init();
     let mut state = ComposerState::demo();
@@ -3575,11 +3663,12 @@ fn added_subtask_uses_project_temporary_key_until_submission() {
 
     assert!(text.contains("FIN-TMP-1"));
     assert!(text.contains("FIN-TMP-2"));
-    assert!(text.contains("A • @-- • To Do"));
+    assert!(text.contains("A • @--"));
     assert!(!text.contains("Root -> NEW-1"));
 
     let mut submitted = state.selected_changes().unwrap().clone();
     submitted.key = "FIN-200".into();
+    submitted.status = "Backlog".into();
     state
         .dispatch(ComposerAction::CompleteSubmission {
             change_set_id: "CS-2".into(),
@@ -3587,6 +3676,7 @@ fn added_subtask_uses_project_temporary_key_until_submission() {
             snapshot: SubmissionSnapshot {
                 original: None,
                 updated: Some(submitted),
+                warnings: Vec::new(),
             },
         })
         .unwrap();
@@ -3605,7 +3695,7 @@ fn added_subtask_uses_project_temporary_key_until_submission() {
     }
 
     assert!(text.contains("FIN-200"));
-    assert!(text.contains("A • @-- • To Do"));
+    assert!(text.contains("A • @-- • Backlog"));
     assert_eq!(
         state.selected_existing_ticket_key().as_deref(),
         Some("FIN-200")
@@ -3706,6 +3796,7 @@ fn submitted_diagram_hides_its_generated_attachment_and_locks_artifact_rows() {
     change.submitted = Some(SubmissionSnapshot {
         original: None,
         updated: change.updated.clone(),
+        warnings: Vec::new(),
     });
     let mut state = ComposerState::from_change_sets(vec![share_set(vec![change])]);
     state.dispatch(ComposerAction::OpenChangeSet("CS-12".into()));

@@ -138,6 +138,16 @@ impl SubmissionController {
                             .unwrap_or("Jira did not return a failure message"),
                     );
                 }
+                for ticket in tickets
+                    .iter()
+                    .filter(|ticket| ticket.submitted && ticket.message.is_some())
+                {
+                    self.service
+                        .report_notification(tuicore::Notification::warning(
+                            format!("{} committed with warnings", ticket.ticket_id),
+                            ticket.message.as_deref().unwrap_or_default(),
+                        ));
+                }
                 let submitted = tickets.iter().filter(|ticket| ticket.submitted).count();
                 if submitted == 1 {
                     self.service

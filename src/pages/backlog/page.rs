@@ -1005,6 +1005,27 @@ impl BacklogPage {
         });
     }
 
+    fn home_matches(&self, event: &TuiEvent) -> bool {
+        let TuiEvent::Key(key) = event else {
+            return false;
+        };
+        self.service
+            .settings()
+            .read()
+            .is_ok_and(|settings| settings.backlog_keys.home.matches(*key))
+    }
+
+    fn reset_to_home(&mut self, ctx: &mut EventCtx<()>) {
+        self.velocity_dialog_close_requested.set(false);
+        self.description_dialog_close_requested.set(false);
+        self.view.set_active_with_context(false, ctx);
+        self.view.base_mut().set_active_with_context(false, ctx);
+        self.view.base_mut().base_mut().reset_to_home();
+        self.focus_backlog_data(ctx);
+        ctx.request_layout();
+        ctx.request_redraw();
+    }
+
     pub(super) fn focus_release_menu(&self, ctx: &mut EventCtx<()>) {
         ctx.focus(self.release_menu_focus_request());
     }
@@ -3919,6 +3940,11 @@ impl TuiNode for BacklogPage {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        if !self.shows_initial_loading() && self.home_matches(event) {
+            self.reset_to_home(ctx);
+            ctx.stop_propagation();
+            return EventOutcome::Handled;
+        }
         if self.shows_initial_loading() {
             return self.loading_view.event(event, ctx);
         }
@@ -3937,6 +3963,11 @@ impl TuiNode for BacklogPage {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
+        if !self.shows_initial_loading() && self.home_matches(event) {
+            self.reset_to_home(ctx);
+            ctx.stop_propagation();
+            return EventOutcome::Handled;
+        }
         if self.shows_initial_loading() {
             return self.loading_view.dispatch_event(route, event, ctx);
         }

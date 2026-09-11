@@ -1465,6 +1465,7 @@ impl TicketEditor {
             story_points_configured: ticket.story_points_configured,
             assumed_story_points: ticket.assumed_story_points,
         };
+        let subtasks = ticket.subtasks;
         let ticket = ticket.ticket;
         let existing = {
             let state = self.state.borrow();
@@ -1491,8 +1492,9 @@ impl TicketEditor {
         } else {
             self.pending
                 .borrow_mut()
-                .push(ComposerAction::IncludeTicketAt {
+                .push(ComposerAction::IncludeTicketWithSubtasks {
                     ticket: ticket.clone(),
+                    subtasks,
                     placement,
                 });
         }

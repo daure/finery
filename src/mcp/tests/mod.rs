@@ -12,8 +12,9 @@ use serde_json::json;
 use crate::{
     mcp::{
         CHANGE_SET_GUIDANCE, GetChangeSetAttachments, JiraPosition, JiraSection, PatchChangeSet,
-        attachment_contents, final_order, issue_sections, placement_rank_plan, run_composer,
-        section_order, validate_issue_keys, workspace_capacity_guidance_view, workspace_view,
+        StdioHandshakeBuffer, attachment_contents, final_order, issue_sections,
+        placement_rank_plan, run_composer, section_order, validate_issue_keys,
+        workspace_capacity_guidance_view, workspace_view,
     },
     service::{
         AppService,
@@ -35,6 +36,32 @@ use crate::{
         },
     },
 };
+
+#[test]
+fn stdio_handshake_defers_early_requests_until_initialized() {
+    let early: rmcp::model::ClientJsonRpcMessage = serde_json::from_value(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list",
+        "params": {}
+    }))
+    .unwrap();
+    let initialized: rmcp::model::ClientJsonRpcMessage = serde_json::from_value(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {}
+    }))
+    .unwrap();
+    let mut buffer = StdioHandshakeBuffer::default();
+
+    assert!(buffer.receive(early.clone()).is_some());
+    assert!(buffer.receive(early).is_none());
+    assert!(buffer.receive(initialized).is_some());
+    assert!(matches!(
+        buffer.take_deferred(),
+        Some(rmcp::model::ClientJsonRpcMessage::Request(_))
+    ));
+}
 
 #[test]
 fn composer_calls_complete_from_async_runtime() {

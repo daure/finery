@@ -13,14 +13,15 @@ use super::{
     JiraIssue, JiraSprint, MAX_VELOCITY_GOAL_LOOKUPS, SubmitBatchOutcome, ambiguous_create_failure,
     apply_attachment_changes, apply_web_link_changes, assign_users, backlog_page_complete,
     board_backlog, board_backlog_query, board_sprints, commit_order, common_status_transitions,
-    composer_fields, create_available_statuses_from_value, create_issue_fields, create_issue_type,
-    create_issue_types_from_value, create_response_failure, created_issue_failure, current_user,
-    discover_story_points, epics, fetch_composer_issues, fix_versions, hydrate_sprint_subtasks,
-    is_ticket_number_query, issue_fields, issue_key_jql, labels, move_payload, options_from_values,
-    rank_payload, same_jira_content, search_composer_issues, search_jql, select_backlog_board,
-    set_epics, set_fix_versions, set_status, set_story_points, should_discover_story_points,
-    sprint_issues, story_points_field_for_load, story_points_field_id, story_points_warning,
-    submit_failure, submit_ordered_changes, to_ticket, to_ticket_and_work_item, to_work_item,
+    composer_fields, composer_subtask_keys, create_available_statuses_from_value,
+    create_issue_fields, create_issue_type, create_issue_types_from_value, create_response_failure,
+    created_issue_failure, current_user, discover_story_points, epics, fetch_composer_issues,
+    fix_versions, hydrate_sprint_subtasks, is_ticket_number_query, issue_fields, issue_key_jql,
+    labels, move_payload, options_from_values, rank_payload, same_jira_content,
+    search_composer_issues, search_jql, select_backlog_board, set_epics, set_fix_versions,
+    set_status, set_story_points, should_discover_story_points, sprint_issues,
+    story_points_field_for_load, story_points_field_id, story_points_warning, submit_failure,
+    submit_ordered_changes, to_ticket, to_ticket_and_work_item, to_work_item,
     to_work_item_with_subtasks, update_payload, velocity_average, velocity_report,
     velocity_sprint_goals, web_link_payload, web_links, with_published_mermaid_attachments,
 };
@@ -299,6 +300,21 @@ fn composer_fetch_fields_combine_ticket_and_presentation_fields() {
     assert!(fields.contains(&"customfield_10016"));
     assert!(is_ticket_number_query("42"));
     assert!(!is_ticket_number_query("KAN-42"));
+}
+
+#[test]
+fn composer_subtasks_are_loaded_for_stories_and_tasks_only() {
+    let issue = |kind| JiraIssue {
+        key: "FIN-1".into(),
+        fields: json!({
+            "issuetype": { "name": kind },
+            "subtasks": [{ "key": "FIN-2" }]
+        }),
+    };
+
+    assert_eq!(composer_subtask_keys(&issue("Story")), ["FIN-2"]);
+    assert_eq!(composer_subtask_keys(&issue("Task")), ["FIN-2"]);
+    assert!(composer_subtask_keys(&issue("Epic")).is_empty());
 }
 
 #[test]
@@ -1080,6 +1096,26 @@ fn ambiguous_create_failure_blocks_retry() {
 }
 
 #[test]
+fn malformed_modified_change_returns_a_preflight_error() {
+    let malformed = TicketChange {
+        id: "FIN-2".into(),
+        original: Some(ticket("FIN-2", TicketKind::Task, None)),
+        updated: None,
+        kind: ChangeKind::Modified,
+        submitted: None,
+        retry_blocked: false,
+        create_attempt: false,
+        sibling_order: 0,
+    };
+
+    let result = submit_changes(&AppSettings::default(), &[malformed], false);
+
+    assert!(
+        matches!(result, SubmitBatchOutcome::PreflightError(message) if message.contains("FIN-2 is missing original and updated state"))
+    );
+}
+
+#[test]
 fn jira_create_server_errors_block_retry_but_validation_errors_do_not() {
     assert!(
         create_response_failure(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "down".into())
@@ -1177,12 +1213,14 @@ fn failed_parent_skips_descendant_and_created_key_replaces_local_parent_referenc
             Ok(crate::store::composer::SubmissionSnapshot {
                 original: None,
                 updated: Some(ticket("FIN-101", TicketKind::Story, None)),
+                warnings: Vec::new(),
             })
         } else {
             resolved_parent = change.updated.as_ref().unwrap().parent_key.clone();
             Ok(crate::store::composer::SubmissionSnapshot {
                 original: None,
                 updated: Some(ticket("FIN-102", TicketKind::Subtask, Some("FIN-101"))),
+                warnings: Vec::new(),
             })
         }
     })
@@ -1210,6 +1248,7 @@ fn created_parent_with_failed_follow_up_still_submits_descendants() {
             Ok(crate::store::composer::SubmissionSnapshot {
                 original: None,
                 updated: Some(ticket("FIN-102", TicketKind::Subtask, Some("FIN-101"))),
+                warnings: Vec::new(),
             })
         }
     })
@@ -1251,6 +1290,7 @@ fn deleted_descendants_commit_before_parents_even_when_parent_delete_fails() {
             Ok(crate::store::composer::SubmissionSnapshot {
                 original: change.original.clone(),
                 updated: None,
+                warnings: Vec::new(),
             })
         } else {
             Err(submit_failure("parent delete failed".into()))

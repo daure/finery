@@ -2,10 +2,10 @@ use std::{cell::Cell, rc::Rc, time::Duration};
 
 use ratatui::{Frame, layout::Rect};
 use tuicore::{
-    AnimationSettings, Dialog, DialogAction, DialogBackdrop, DialogHost, DialogLayer, EventCtx,
-    EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusTarget, Key, KeyModifiers,
-    KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, Tab,
-    Tabs, TabsVariant, TickResult, ToastRack, TuiEvent, TuiNode,
+    AnimationSettings, ChildKey, Dialog, DialogAction, DialogBackdrop, DialogHost, DialogLayer,
+    EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusTarget, Key,
+    KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
+    RenderCtx, Tab, Tabs, TabsVariant, TickResult, ToastRack, TreePath, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -26,8 +26,97 @@ type SettingsLayer = DialogLayer<Flex<()>, SettingsHost>;
 type RecentTicketsLayer = DialogLayer<SettingsLayer, RecentTicketsMenu>;
 type AppView = DialogLayer<RecentTicketsLayer, JiraSearchMenu>;
 
+struct AppPages {
+    tabs: Tabs<()>,
+    selected: Rc<Cell<Option<usize>>>,
+}
+
+impl AppPages {
+    fn new(tabs: Tabs<()>, selected: Rc<Cell<Option<usize>>>) -> Self {
+        Self { tabs, selected }
+    }
+
+    fn apply_pending_selection(&mut self) {
+        if let Some(selected) = self.selected.take() {
+            self.tabs.select_index(selected);
+        }
+    }
+}
+
+impl TuiNode for AppPages {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        self.tabs.measure(proposal)
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.apply_pending_selection();
+        self.tabs.layout(area, ctx)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        self.tabs.render(frame, area, ctx);
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        self.apply_pending_selection();
+        self.tabs.event(event, ctx)
+    }
+
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> EventOutcome {
+        self.apply_pending_selection();
+        self.tabs.dispatch_event(route, event, ctx)
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.apply_pending_selection();
+        self.tabs.tick(dt, settings)
+    }
+
+    fn take_pending_focus_request(&mut self) -> Option<tuicore::FocusRequest> {
+        self.tabs.take_pending_focus_request()
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.tabs.dispatch_focus(target, focused, ctx);
+    }
+
+    fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.tabs.focus(target, focused, ctx);
+    }
+
+    fn focus_reveal_area(&self, target: &FocusTarget) -> Option<Rect> {
+        self.tabs.focus_reveal_area(target)
+    }
+
+    fn focus_reveal_centered(&self, target: &FocusTarget) -> bool {
+        self.tabs.focus_reveal_centered(target)
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.tabs.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.tabs.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.tabs.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.tabs.destroy(ctx);
+    }
+}
+
 pub(crate) struct App {
     view: AppView,
+    selected_page: Rc<Cell<Option<usize>>>,
     open_settings: Rc<Cell<bool>>,
     close_dialog: Rc<Cell<bool>>,
     service: AppService,
@@ -38,6 +127,7 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
     let settings = service.settings();
     let open_settings = Rc::new(Cell::new(false));
     let close_dialog = Rc::new(Cell::new(false));
+    let selected_page = Rc::new(Cell::new(None));
     let pages = Tabs::new(vec![
         Tab::new("Backlog", pages::backlog::page(service.clone())),
         Tab::new(
@@ -47,7 +137,11 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
     ])
     .variant(TabsVariant::OneRow);
     let base = Flex::column()
-        .child("pages", pages, FlexItem::fill(1))
+        .child(
+            "pages",
+            AppPages::new(pages, Rc::clone(&selected_page)),
+            FlexItem::fill(1),
+        )
         .child(
             "status",
             components::status_bar::status_bar(Rc::clone(&open_settings)),
@@ -83,6 +177,7 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
         .backdrop(DialogBackdrop::dim().amount(0.55));
     App {
         view,
+        selected_page,
         open_settings,
         close_dialog,
         service,
@@ -162,6 +257,40 @@ impl App {
         true
     }
 
+    fn go_home(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        let TuiEvent::Key(key) = event else {
+            return false;
+        };
+        if !self
+            .service
+            .settings()
+            .read()
+            .is_ok_and(|settings| settings.backlog_keys.home.matches(*key))
+        {
+            return false;
+        }
+
+        self.open_settings.set(false);
+        self.close_dialog.set(false);
+        self.view.set_active_with_context(false, ctx);
+        self.view.base_mut().set_active_with_context(false, ctx);
+        self.view
+            .base_mut()
+            .base_mut()
+            .set_active_with_context(false, ctx);
+        self.selected_page.set(Some(0));
+        let backlog_route = EventRoute::new(TreePath::from_keys([
+            ChildKey::first(),
+            ChildKey::first(),
+            ChildKey::first(),
+            ChildKey::new("pages"),
+            ChildKey::new("tab-0"),
+        ]));
+        self.view.dispatch_event(&backlog_route, event, ctx);
+        ctx.stop_propagation();
+        true
+    }
+
     fn drain_service_notifications(&mut self) -> bool {
         let errors = self.service.take_errors();
         let notifications = self.service.take_notifications();
@@ -195,7 +324,10 @@ impl TuiNode for App {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        if self.open_jira_search(event, ctx) || self.open_recent_tickets(event, ctx) {
+        if self.go_home(event, ctx)
+            || self.open_jira_search(event, ctx)
+            || self.open_recent_tickets(event, ctx)
+        {
             return EventOutcome::Handled;
         }
         let outcome = self.view.event(event, ctx);
@@ -209,7 +341,10 @@ impl TuiNode for App {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        if self.open_jira_search(event, ctx) || self.open_recent_tickets(event, ctx) {
+        if self.go_home(event, ctx)
+            || self.open_jira_search(event, ctx)
+            || self.open_recent_tickets(event, ctx)
+        {
             return EventOutcome::Handled;
         }
         let outcome = self.view.dispatch_event(route, event, ctx);

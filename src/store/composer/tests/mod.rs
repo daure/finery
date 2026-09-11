@@ -136,6 +136,7 @@ fn submission_results_update_the_originating_change_set_after_navigation() {
                 key: "FIN-200".into(),
                 ..super::demo_jira_tickets()[1].clone()
             }),
+            warnings: Vec::new(),
         },
     });
 
@@ -180,6 +181,19 @@ fn post_create_refresh_failure_converts_added_ticket_to_update() {
         .tickets[0];
     assert_eq!(change.kind, ChangeKind::Modified);
     assert_eq!(change.original.as_ref().unwrap().key, "FIN-201");
+    assert_eq!(change.updated.as_ref().unwrap().key, "FIN-201");
+}
+
+#[test]
+fn draft_status_is_assigned_by_jira_on_create() {
+    let mut state = ComposerState::demo();
+    state.dispatch(ComposerAction::OpenChangeSet("CS-2".into()));
+    state.dispatch(ComposerAction::CreateTicket {
+        title: "New local ticket".into(),
+        project_key: "FIN".into(),
+    });
+
+    assert!(state.selected_changes().unwrap().status.is_empty());
 }
 
 #[test]
@@ -358,6 +372,7 @@ fn submission_result_with_a_missing_target_is_rejected() {
                 snapshot: SubmissionSnapshot {
                     original: None,
                     updated: None,
+                    warnings: Vec::new(),
                 },
             })
             .is_err()
@@ -438,6 +453,7 @@ fn closed_change_sets_use_submission_snapshots_and_forbid_remote_queries() {
     change.submitted = Some(SubmissionSnapshot {
         original: Some(snapshot_source.clone()),
         updated: Some(snapshot_changes),
+        warnings: Vec::new(),
     });
     state.change_sets[0].closed = true;
     state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
@@ -483,7 +499,11 @@ fn submitted_tickets_keep_snapshots_and_stay_in_change_set_when_all_are_done() {
         state.dispatch(ComposerAction::CompleteSubmission {
             change_set_id: "CS-1".into(),
             id: change.id,
-            snapshot: SubmissionSnapshot { original, updated },
+            snapshot: SubmissionSnapshot {
+                original,
+                updated,
+                warnings: Vec::new(),
+            },
         });
     }
 

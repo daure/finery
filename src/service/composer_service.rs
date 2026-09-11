@@ -448,6 +448,10 @@ impl std::error::Error for ServiceError {}
 
 pub(crate) trait JiraTicketLookup: Send + Sync {
     fn fetch_ticket(&self, jira_key: &str) -> Result<Ticket, String>;
+
+    fn fetch_ticket_with_subtasks(&self, jira_key: &str) -> Result<(Ticket, Vec<Ticket>), String> {
+        Ok((self.fetch_ticket(jira_key)?, Vec::new()))
+    }
 }
 
 pub(crate) trait JiraTicketSubmit: Send + Sync {
@@ -889,6 +893,7 @@ impl ComposerService {
                                 .expect("validated recovered create"),
                         )?,
                     ),
+                    warnings: Vec::new(),
                 },
                 ChangeKind::Deleted => {
                     let key = change
@@ -905,6 +910,7 @@ impl ComposerService {
                     SubmissionSnapshot {
                         original: change.original,
                         updated: None,
+                        warnings: Vec::new(),
                     }
                 }
                 ChangeKind::Modified | ChangeKind::Synced => {
@@ -923,6 +929,7 @@ impl ComposerService {
                     SubmissionSnapshot {
                         original: change.original,
                         updated: Some(remote),
+                        warnings: Vec::new(),
                     }
                 }
             };
@@ -1125,6 +1132,8 @@ impl ComposerService {
                     let ticket_id = outcome.id;
                     let result = match outcome.result {
                         Ok(snapshot) => {
+                            let message = (!snapshot.warnings.is_empty())
+                                .then(|| snapshot.warnings.join("\n"));
                             dispatch(
                                 &mut state,
                                 ComposerAction::CompleteSubmission {
@@ -1137,7 +1146,7 @@ impl ComposerService {
                                 ticket_id,
                                 submitted: true,
                                 retry_blocked: false,
-                                message: None,
+                                message,
                             }
                         }
                         Err(failure) => {
@@ -1249,19 +1258,24 @@ impl ComposerService {
                 if jira_key.is_empty() {
                     return Err(invalid("Jira ticket key must not be empty"));
                 }
-                let ticket = self.fetch_jira(&jira_key)?;
+                let (ticket, subtasks) = self.fetch_jira_with_subtasks(&jira_key)?;
                 if has_ticket_identity(state, &ticket.key) {
                     return Err(invalid("Jira ticket is already included"));
                 }
                 let id = ticket.key.clone();
+                let subtask_ids = subtasks
+                    .iter()
+                    .map(|ticket| ticket.key.clone())
+                    .collect::<Vec<_>>();
                 dispatch(
                     state,
-                    ComposerAction::IncludeTicketAt {
+                    ComposerAction::IncludeTicketWithSubtasks {
                         ticket,
+                        subtasks,
                         placement: explicit_placement(state, parent_ticket_id)?,
                     },
                 )?;
-                Ok(vec![id])
+                Ok(std::iter::once(id).chain(subtask_ids).collect())
             }
             ChangeSetPatchOperation::SyncJiraTicket { ticket_id } => {
                 let jira_key = editable_change(state, &ticket_id)?
@@ -1566,6 +1580,18 @@ impl ComposerService {
     fn fetch_jira(&self, jira_key: &str) -> Result<Ticket, ServiceError> {
         self.jira
             .fetch_ticket(jira_key)
+            .map_err(|message| ServiceError::JiraLookup {
+                jira_key: jira_key.into(),
+                message,
+            })
+    }
+
+    fn fetch_jira_with_subtasks(
+        &self,
+        jira_key: &str,
+    ) -> Result<(Ticket, Vec<Ticket>), ServiceError> {
+        self.jira
+            .fetch_ticket_with_subtasks(jira_key)
             .map_err(|message| ServiceError::JiraLookup {
                 jira_key: jira_key.into(),
                 message,

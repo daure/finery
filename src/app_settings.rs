@@ -28,6 +28,7 @@ pub(crate) const BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING: &str =
 pub(crate) const BACKLOG_MOVE_TO_TOP_KEY_SETTING: &str = "backlog.move_to_top_key";
 pub(crate) const BACKLOG_MOVE_TO_BOTTOM_KEY_SETTING: &str = "backlog.move_to_bottom_key";
 pub(crate) const BACKLOG_VIEW_DESCRIPTION_KEY_SETTING: &str = "backlog.view_description_key";
+pub(crate) const BACKLOG_HOME_KEY_SETTING: &str = "backlog.home_key";
 pub(crate) const SPEED_READER_WPM_SETTING: &str = "reader.wpm";
 pub(crate) const SPEED_READER_BLOCK_DELAY_SETTING: &str = "reader.markdown_block_pause_ms";
 pub(crate) const RECENT_TICKETS_LIMIT_SETTING: &str = "recent_tickets.limit";
@@ -292,6 +293,7 @@ pub(crate) struct BacklogKeyBindings {
     pub(crate) move_to_top: ComposerKeyBinding,
     pub(crate) move_to_bottom: ComposerKeyBinding,
     pub(crate) view_description: ComposerKeyBinding,
+    pub(crate) home: ComposerKeyBinding,
 }
 
 impl Default for BacklogKeyBindings {
@@ -315,11 +317,13 @@ impl BacklogKeyBindings {
             move_to_top: binding(BACKLOG_MOVE_TO_TOP_KEY_SETTING, "t")?,
             move_to_bottom: binding(BACKLOG_MOVE_TO_BOTTOM_KEY_SETTING, "b")?,
             view_description: binding(BACKLOG_VIEW_DESCRIPTION_KEY_SETTING, "v")?,
+            home: binding(BACKLOG_HOME_KEY_SETTING, "shift+h")?,
         };
         ensure_unambiguous(&[
             bindings.move_to_top.sequence(),
             bindings.move_to_bottom.sequence(),
             bindings.view_description.sequence(),
+            bindings.home.sequence(),
         ])?;
         Ok(bindings)
     }
@@ -562,6 +566,10 @@ impl AppSettings {
             (
                 BACKLOG_VIEW_DESCRIPTION_KEY_SETTING,
                 self.backlog_keys.view_description.sequence.clone(),
+            ),
+            (
+                BACKLOG_HOME_KEY_SETTING,
+                self.backlog_keys.home.sequence.clone(),
             ),
             (SPEED_READER_WPM_SETTING, self.speed_reader.wpm.to_string()),
             (

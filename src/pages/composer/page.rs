@@ -269,7 +269,11 @@ impl ComposerPage {
             crate::store::composer::ComposerAction::CompleteSubmission {
                 change_set_id,
                 id: change.id,
-                snapshot: crate::store::composer::SubmissionSnapshot { original, updated },
+                snapshot: crate::store::composer::SubmissionSnapshot {
+                    original,
+                    updated,
+                    warnings: Vec::new(),
+                },
             },
         );
         self.editor.sync();

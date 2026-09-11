@@ -193,6 +193,7 @@ fn search_ticket(ticket: Ticket) -> ComposerSearchTicket {
             status_changed_at: None,
         },
         ticket,
+        subtasks: Vec::new(),
         story_points_configured: false,
         assumed_story_points: 3.0,
     }

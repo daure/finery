@@ -539,6 +539,35 @@ impl BacklogTree {
         self.set_snapshot(&snapshot);
     }
 
+    pub(in crate::pages::backlog) fn reset_to_home(&mut self) {
+        self.filters = BacklogFilters::default();
+        self.estimated.set_value(true);
+        self.issue_types.close();
+        self.issue_types.clear_selection();
+        self.users.close();
+        self.users.clear_selection();
+        self.group_by_selection = None;
+        self.group_by.set_disabled(true);
+        self.group_by.set_disabled(false);
+        self.group_by
+            .set_label(grouping_label(None, self.compact_toolbar));
+        self.web.set_disabled(true);
+        self.web.set_disabled(false);
+        self.number_jump.borrow_mut().clear();
+
+        let snapshot = self.snapshot.clone();
+        self.set_snapshot(&snapshot);
+        self.control.data_view_mut().clear_search();
+        self.sync_search_results();
+        self.control
+            .data_view_mut()
+            .restore_tree_expansion(HashSet::from([section_row_id("backlog")]));
+        self.control.clear_transient_selection();
+        self.highlight(&section_row_id("backlog"));
+        self.control.data_view_mut().reveal_highlighted_centered();
+        self.runway_markers_visible.set(true);
+    }
+
     pub(in crate::pages::backlog) fn set_issue_types(&mut self, issue_types: Vec<JiraOption>) {
         let issue_types = selectable_issue_types(issue_types);
         *self.issue_type_labels.borrow_mut() = issue_type_labels(&issue_types);
@@ -1407,13 +1436,7 @@ impl TuiNode for BacklogTree {
     fn layout(&mut self, area: ratatui::layout::Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         let compact_toolbar = area.width < 100;
         self.configure_toolbar(compact_toolbar);
-        let header_height = if area.is_empty() {
-            0
-        } else if compact_toolbar {
-            2.min(area.height)
-        } else {
-            1
-        };
+        let header_height = if area.is_empty() { 0 } else { 1 };
         let button_width = |button: &Button<()>| {
             button
                 .measure(LayoutProposal::at_most(area.width, 1))
@@ -1446,25 +1469,29 @@ impl TuiNode for BacklogTree {
         };
 
         if compact_toolbar {
-            let refresh_width = button_width(&self.refresh).min(area.width);
-            let velocity_width = button_width(&self.velocity).min(
-                area.width
-                    .saturating_sub(refresh_width)
-                    .saturating_sub(u16::from(refresh_width > 0)),
-            );
+            let mut remaining_width = area.width;
+            let refresh_width = button_width(&self.refresh).min(remaining_width);
+            remaining_width = remaining_width.saturating_sub(refresh_width + 1);
+            let velocity_width = button_width(&self.velocity).min(remaining_width);
+            remaining_width = remaining_width.saturating_sub(velocity_width + 1);
+            let group_by_width = menu_width(remaining_width, &self.group_by);
+            remaining_width = remaining_width.saturating_sub(group_by_width + 1);
             let web_width = self
                 .web
-                .measure(LayoutProposal::at_most(
-                    area.width
-                        .saturating_sub(refresh_width)
-                        .saturating_sub(velocity_width)
-                        .saturating_sub(u16::from(refresh_width > 0))
-                        .saturating_sub(u16::from(velocity_width > 0)),
-                    1,
-                ))
+                .measure(LayoutProposal::at_most(remaining_width, 1))
                 .preferred
-                .width;
+                .width
+                .min(remaining_width);
             self.web_area = ratatui::layout::Rect::new(area.x, area.y, web_width, 1);
+            self.group_by_area = ratatui::layout::Rect::new(
+                self.web_area
+                    .x
+                    .saturating_add(web_width)
+                    .saturating_add(u16::from(web_width > 0)),
+                area.y,
+                group_by_width,
+                1,
+            );
             self.refresh_area = ratatui::layout::Rect::new(
                 area.x
                     .saturating_add(area.width.saturating_sub(refresh_width)),
@@ -1482,57 +1509,75 @@ impl TuiNode for BacklogTree {
                 1,
             );
 
-            let row_y = area.y.saturating_add(1);
-            let estimated_width = <Toggle<()> as TuiNode<()>>::measure(
-                &self.estimated,
-                LayoutProposal::at_most(area.width, 1),
-            )
-            .preferred
-            .width
-            .min(area.width);
-            let issue_types_width = dropdown_width(
-                area.width
-                    .saturating_sub(estimated_width)
-                    .saturating_sub(u16::from(estimated_width > 0)),
-                &self.issue_types,
-            );
+            let row_y = area.y.saturating_add(header_height);
+            let issue_types_width = dropdown_width(area.width, &self.issue_types);
             let users_width = users_width(
                 area.width
-                    .saturating_sub(estimated_width)
                     .saturating_sub(issue_types_width)
-                    .saturating_sub(u16::from(estimated_width > 0))
                     .saturating_sub(u16::from(issue_types_width > 0)),
                 &self.users,
             );
-            let group_by_width = menu_width(area.width, &self.group_by);
+            let estimated_width = <Toggle<()> as TuiNode<()>>::measure(
+                &self.estimated,
+                LayoutProposal::at_most(
+                    area.width
+                        .saturating_sub(issue_types_width)
+                        .saturating_sub(users_width)
+                        .saturating_sub(u16::from(issue_types_width > 0))
+                        .saturating_sub(u16::from(users_width > 0)),
+                    1,
+                ),
+            )
+            .preferred
+            .width
+            .min(
+                area.width
+                    .saturating_sub(issue_types_width)
+                    .saturating_sub(users_width)
+                    .saturating_sub(u16::from(issue_types_width > 0))
+                    .saturating_sub(u16::from(users_width > 0)),
+            );
             self.estimated_area = ratatui::layout::Rect::new(
-                area.x
-                    .saturating_add(area.width.saturating_sub(estimated_width)),
+                area.x.saturating_add(
+                    area.width
+                        .saturating_sub(estimated_width)
+                        .saturating_sub(users_width)
+                        .saturating_sub(issue_types_width)
+                        .saturating_sub(u16::from(users_width > 0))
+                        .saturating_sub(u16::from(issue_types_width > 0)),
+                ),
                 row_y,
                 estimated_width,
                 1,
             );
-            self.issue_types_area = ratatui::layout::Rect::new(
+            self.users_area = ratatui::layout::Rect::new(
                 self.estimated_area
                     .x
-                    .saturating_sub(issue_types_width)
-                    .saturating_sub(u16::from(issue_types_width > 0)),
-                row_y,
-                issue_types_width,
-                1,
-            );
-            self.users_area = ratatui::layout::Rect::new(
-                self.issue_types_area
-                    .x
-                    .saturating_sub(users_width)
-                    .saturating_sub(u16::from(users_width > 0)),
+                    .saturating_add(estimated_width)
+                    .saturating_add(u16::from(estimated_width > 0)),
                 row_y,
                 users_width,
                 1,
             );
-            self.group_by_area = ratatui::layout::Rect::new(area.x, row_y, group_by_width, 1);
+            self.issue_types_area = ratatui::layout::Rect::new(
+                self.users_area
+                    .x
+                    .saturating_add(users_width)
+                    .saturating_add(u16::from(users_width > 0)),
+                row_y,
+                issue_types_width,
+                1,
+            );
         } else {
             let mut remaining_width = area.width;
+            let refresh_width = button_width(&self.refresh).min(remaining_width);
+            remaining_width = remaining_width.saturating_sub(refresh_width + 1);
+            let velocity_width = button_width(&self.velocity).min(remaining_width);
+            remaining_width = remaining_width.saturating_sub(velocity_width + 1);
+            let issue_types_width = dropdown_width(remaining_width, &self.issue_types);
+            remaining_width = remaining_width.saturating_sub(issue_types_width + 1);
+            let users_width = users_width(remaining_width, &self.users);
+            remaining_width = remaining_width.saturating_sub(users_width + 1);
             let estimated_width = <Toggle<()> as TuiNode<()>>::measure(
                 &self.estimated,
                 LayoutProposal::at_most(remaining_width, 1),
@@ -1541,16 +1586,8 @@ impl TuiNode for BacklogTree {
             .width
             .min(remaining_width);
             remaining_width = remaining_width.saturating_sub(estimated_width + 1);
-            let issue_types_width = dropdown_width(remaining_width, &self.issue_types);
-            remaining_width = remaining_width.saturating_sub(issue_types_width + 1);
-            let users_width = users_width(remaining_width, &self.users);
-            remaining_width = remaining_width.saturating_sub(users_width + 1);
             let group_by_width = menu_width(remaining_width, &self.group_by);
             remaining_width = remaining_width.saturating_sub(group_by_width + 1);
-            let refresh_width = button_width(&self.refresh).min(remaining_width);
-            remaining_width = remaining_width.saturating_sub(refresh_width + 1);
-            let velocity_width = button_width(&self.velocity).min(remaining_width);
-            remaining_width = remaining_width.saturating_sub(velocity_width + 1);
             let web_width = self
                 .web
                 .measure(LayoutProposal::at_most(remaining_width, 1))
@@ -1558,41 +1595,56 @@ impl TuiNode for BacklogTree {
                 .width
                 .min(remaining_width);
             self.web_area = ratatui::layout::Rect::new(area.x, area.y, web_width, 1);
-            self.estimated_area = ratatui::layout::Rect::new(
-                area.x
-                    .saturating_add(area.width.saturating_sub(estimated_width)),
-                area.y,
-                estimated_width,
-                1,
-            );
-            self.issue_types_area = ratatui::layout::Rect::new(
-                self.estimated_area.x.saturating_sub(issue_types_width + 1),
-                area.y,
-                issue_types_width,
-                1,
-            );
-            self.users_area = ratatui::layout::Rect::new(
-                self.issue_types_area.x.saturating_sub(users_width + 1),
-                area.y,
-                users_width,
-                1,
-            );
-            self.group_by_area = ratatui::layout::Rect::new(
-                self.users_area.x.saturating_sub(group_by_width + 1),
-                area.y,
-                group_by_width,
-                1,
-            );
             self.refresh_area = ratatui::layout::Rect::new(
-                self.group_by_area.x.saturating_sub(refresh_width + 1),
+                area.x
+                    .saturating_add(area.width.saturating_sub(refresh_width)),
                 area.y,
                 refresh_width,
                 1,
             );
             self.velocity_area = ratatui::layout::Rect::new(
-                self.refresh_area.x.saturating_sub(velocity_width + 1),
+                self.refresh_area
+                    .x
+                    .saturating_sub(velocity_width)
+                    .saturating_sub(u16::from(velocity_width > 0)),
                 area.y,
                 velocity_width,
+                1,
+            );
+            self.issue_types_area = ratatui::layout::Rect::new(
+                self.velocity_area
+                    .x
+                    .saturating_sub(issue_types_width)
+                    .saturating_sub(u16::from(issue_types_width > 0)),
+                area.y,
+                issue_types_width,
+                1,
+            );
+            self.users_area = ratatui::layout::Rect::new(
+                self.issue_types_area
+                    .x
+                    .saturating_sub(users_width)
+                    .saturating_sub(u16::from(users_width > 0)),
+                area.y,
+                users_width,
+                1,
+            );
+            self.estimated_area = ratatui::layout::Rect::new(
+                self.users_area
+                    .x
+                    .saturating_sub(estimated_width)
+                    .saturating_sub(u16::from(estimated_width > 0)),
+                area.y,
+                estimated_width,
+                1,
+            );
+            self.group_by_area = ratatui::layout::Rect::new(
+                self.web_area
+                    .x
+                    .saturating_add(web_width)
+                    .saturating_add(u16::from(web_width > 0)),
+                area.y,
+                group_by_width,
                 1,
             );
         }
@@ -1605,14 +1657,19 @@ impl TuiNode for BacklogTree {
         ctx.push_slot(ChildKey::new("web"), self.web_area, |ctx| {
             self.web.layout(self.web_area, ctx)
         });
-        ctx.push_slot(ChildKey::new("velocity"), self.velocity_area, |ctx| {
-            self.velocity.layout(self.velocity_area, ctx)
-        });
-        ctx.push_slot(ChildKey::new("refresh"), self.refresh_area, |ctx| {
-            self.refresh.layout(self.refresh_area, ctx)
-        });
         ctx.push_slot(ChildKey::new("group-by"), self.group_by_area, |ctx| {
             self.group_by.layout(self.group_by_area, ctx)
+        });
+        if compact_toolbar {
+            ctx.push_slot(ChildKey::new("velocity"), self.velocity_area, |ctx| {
+                self.velocity.layout(self.velocity_area, ctx)
+            });
+            ctx.push_slot(ChildKey::new("refresh"), self.refresh_area, |ctx| {
+                self.refresh.layout(self.refresh_area, ctx)
+            });
+        }
+        ctx.push_slot(ChildKey::new("estimated"), self.estimated_area, |ctx| {
+            <Toggle<()> as TuiNode<()>>::layout(&mut self.estimated, self.estimated_area, ctx)
         });
         ctx.push_slot(ChildKey::new("users"), self.users_area, |ctx| {
             <Dropdown<String, String> as TuiNode<()>>::layout(&mut self.users, self.users_area, ctx)
@@ -1624,9 +1681,14 @@ impl TuiNode for BacklogTree {
                 ctx,
             )
         });
-        ctx.push_slot(ChildKey::new("estimated"), self.estimated_area, |ctx| {
-            <Toggle<()> as TuiNode<()>>::layout(&mut self.estimated, self.estimated_area, ctx)
-        });
+        if !compact_toolbar {
+            ctx.push_slot(ChildKey::new("velocity"), self.velocity_area, |ctx| {
+                self.velocity.layout(self.velocity_area, ctx)
+            });
+            ctx.push_slot(ChildKey::new("refresh"), self.refresh_area, |ctx| {
+                self.refresh.layout(self.refresh_area, ctx)
+            });
+        }
         let (result, _) = ctx.with_focus_fallback_hotkey_sequences_status(
             FocusId::new("data-view"),
             self.control_area,
@@ -1647,14 +1709,14 @@ impl TuiNode for BacklogTree {
         _area: ratatui::layout::Rect,
         ctx: &mut RenderCtx<'a>,
     ) {
-        self.refresh.render(frame, self.refresh_area);
-        self.velocity.render(frame, self.velocity_area);
-        self.estimated.render(frame, self.estimated_area);
-        self.issue_types.render(frame, self.issue_types_area, ctx);
-        self.users.render(frame, self.users_area, ctx);
-        self.group_by.render(frame, self.group_by_area, ctx);
-        self.web.render(frame, self.web_area, ctx);
         self.control.render(frame, self.control_area, ctx);
+        self.web.render(frame, self.web_area, ctx);
+        self.group_by.render(frame, self.group_by_area, ctx);
+        self.estimated.render(frame, self.estimated_area);
+        self.users.render(frame, self.users_area, ctx);
+        self.issue_types.render(frame, self.issue_types_area, ctx);
+        self.velocity.render(frame, self.velocity_area);
+        self.refresh.render(frame, self.refresh_area);
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
         let web_was_open = self.web.is_open();

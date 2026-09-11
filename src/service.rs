@@ -63,6 +63,7 @@ pub(crate) struct RecentTickets {
 #[derive(Clone)]
 pub(crate) struct ComposerSearchTicket {
     pub ticket: Ticket,
+    pub subtasks: Vec<Ticket>,
     pub work_item: WorkItem,
     pub story_points_configured: bool,
     pub assumed_story_points: f64,
@@ -71,6 +72,30 @@ pub(crate) struct ComposerSearchTicket {
 pub(crate) struct ComposerSourceTicket {
     pub ticket: Ticket,
     pub presentation: TicketPresentation,
+}
+
+struct AppJiraTicketLookup {
+    settings: Arc<RwLock<AppSettings>>,
+}
+
+impl composer_service::JiraTicketLookup for AppJiraTicketLookup {
+    fn fetch_ticket(&self, jira_key: &str) -> Result<Ticket, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::fetch(&settings, jira_key)
+    }
+
+    fn fetch_ticket_with_subtasks(&self, jira_key: &str) -> Result<(Ticket, Vec<Ticket>), String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::fetch_with_subtasks(&settings, jira_key)
+    }
 }
 
 pub(crate) struct ClipboardImage {
@@ -346,13 +371,8 @@ impl AppService {
     }
 
     pub(crate) fn composer_service(&self) -> composer_service::ComposerService {
-        let lookup_settings = Arc::clone(&self.settings);
-        let jira_lookup = Arc::new(move |key: &str| {
-            let settings = lookup_settings
-                .read()
-                .map_err(|_| "settings lock is unavailable".to_string())?
-                .clone();
-            jira::fetch(&settings, key)
+        let jira_lookup = Arc::new(AppJiraTicketLookup {
+            settings: Arc::clone(&self.settings),
         });
         let submit_settings = Arc::clone(&self.settings);
         #[cfg(test)]
@@ -625,6 +645,7 @@ impl AppService {
             .into_iter()
             .map(|issue| ComposerSearchTicket {
                 ticket: issue.ticket,
+                subtasks: issue.subtasks,
                 work_item: issue.work_item,
                 story_points_configured,
                 assumed_story_points,

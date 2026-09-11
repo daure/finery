@@ -25,8 +25,8 @@ use crate::{
         },
         composer_service::{
             AssigneeInput, AttachmentSourceInput, ChangeSetPatchOperation, ComposerService,
-            DraftTicketInput, ServiceError, SubmitChangeSetOutcome, TicketKindView, TicketView,
-            test_service, test_service_with_submit,
+            DraftTicketInput, JiraTicketLookup, ServiceError, SubmitChangeSetOutcome,
+            TicketKindView, TicketView, test_service, test_service_with_submit,
         },
     },
     storage::Storage,
@@ -228,6 +228,63 @@ fn service() -> ComposerService {
         .unwrap();
     let lookup = Arc::new(|key: &str| -> Result<Ticket, String> { Ok(ticket(key)) });
     test_service(storage, runtime, lookup)
+}
+
+struct StoryWithSubtaskLookup;
+
+impl JiraTicketLookup for StoryWithSubtaskLookup {
+    fn fetch_ticket(&self, jira_key: &str) -> Result<Ticket, String> {
+        Ok(ticket(jira_key))
+    }
+
+    fn fetch_ticket_with_subtasks(&self, jira_key: &str) -> Result<(Ticket, Vec<Ticket>), String> {
+        let mut story = ticket(jira_key);
+        story.kind = TicketKind::Story;
+        let mut subtask = ticket("FIN-3");
+        subtask.kind = TicketKind::Subtask;
+        subtask.parent_key = Some(story.key.clone());
+        subtask.parent_kind = Some(TicketKind::Story);
+        Ok((story, vec![subtask]))
+    }
+}
+
+#[test]
+fn including_a_story_patch_adds_its_subtasks() {
+    let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    let storage = runtime.block_on(Storage::connect_for_tests()).unwrap();
+    runtime
+        .block_on(storage.save_change_set(&change_set()))
+        .unwrap();
+    let service = test_service(storage, runtime, Arc::new(StoryWithSubtaskLookup));
+
+    let response = service
+        .apply_change_set_patch(
+            "CS-1",
+            1,
+            vec![ChangeSetPatchOperation::IncludeJiraTicket {
+                jira_key: "FIN-2".into(),
+                parent_ticket_id: None,
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(response.applied[0].ticket_ids, ["FIN-2", "FIN-3"]);
+    assert_eq!(response.change_set.value.selected_ticket_ids, ["FIN-2"]);
+    assert_eq!(
+        response
+            .change_set
+            .value
+            .tickets
+            .iter()
+            .find(|ticket| ticket.id == "FIN-3")
+            .unwrap()
+            .original
+            .as_ref()
+            .unwrap()
+            .parent_key
+            .as_deref(),
+        Some("FIN-2")
+    );
 }
 
 #[test]
@@ -1068,6 +1125,7 @@ fn patch_rejects_a_submitted_draft_jira_key_alias() {
         submitted: Some(SubmissionSnapshot {
             original: None,
             updated: Some(ticket("FIN-9")),
+            warnings: Vec::new(),
         }),
         retry_blocked: false,
         create_attempt: false,
@@ -1257,6 +1315,7 @@ fn submit_persists_create_marker_before_jira_and_reconciles_once() {
                     result: Ok(SubmissionSnapshot {
                         original: None,
                         updated: change.updated.clone(),
+                        warnings: vec!["Created FIN-2, but a follow-up did not complete".into()],
                     }),
                 })
                 .collect(),
@@ -1297,8 +1356,11 @@ fn submit_persists_create_marker_before_jira_and_reconciles_once() {
     assert!(marker_seen.load(Ordering::SeqCst));
     assert_eq!(response.change_set.revision, 6);
     assert!(matches!(
-        response.outcome,
-        SubmitChangeSetOutcome::Completed { .. }
+        &response.outcome,
+        SubmitChangeSetOutcome::Completed { tickets }
+            if tickets[0].submitted
+                && tickets[0].message.as_deref()
+                    == Some("Created FIN-2, but a follow-up did not complete")
     ));
     assert_eq!(response.change_set.value.name, "Submitted plan");
     assert!(response.change_set.value.tickets[1].submitted);
@@ -1331,6 +1393,7 @@ fn submission_claim_blocks_patch_and_refresh_until_jira_reconciliation() {
                             result: Ok(SubmissionSnapshot {
                                 original: change.original.clone(),
                                 updated: change.updated.clone(),
+                                warnings: Vec::new(),
                             }),
                         })
                         .collect(),

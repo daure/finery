@@ -1,15 +1,20 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rmcp::{
-    ErrorData, Json, ServerHandler, ServiceExt,
+    ErrorData, Json, RoleServer, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, Content, ResourceContents, ServerCapabilities, ServerInfo},
+    model::{
+        CallToolResult, ClientJsonRpcMessage, Content, ResourceContents, ServerCapabilities,
+        ServerInfo,
+    },
     tool, tool_handler, tool_router,
-    transport::{StreamableHttpServerConfig, StreamableHttpService, stdio},
+    transport::{
+        StreamableHttpServerConfig, StreamableHttpService, Transport, async_rw::AsyncRwTransport,
+    },
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::Error as _};
@@ -42,6 +47,88 @@ const ATTACHMENT_BATCH_BYTES_LIMIT: usize = 20 * 1024 * 1024;
 struct McpServer {
     service: AppService,
     tool_router: ToolRouter<Self>,
+}
+
+#[derive(Default)]
+struct StdioHandshakeBuffer {
+    phase: StdioHandshakePhase,
+    deferred: VecDeque<ClientJsonRpcMessage>,
+}
+
+#[derive(Default, PartialEq, Eq)]
+enum StdioHandshakePhase {
+    #[default]
+    AwaitInitialize,
+    AwaitInitialized,
+    Active,
+}
+
+impl StdioHandshakeBuffer {
+    fn receive(&mut self, message: ClientJsonRpcMessage) -> Option<ClientJsonRpcMessage> {
+        match self.phase {
+            StdioHandshakePhase::AwaitInitialize => {
+                self.phase = StdioHandshakePhase::AwaitInitialized;
+                Some(message)
+            }
+            StdioHandshakePhase::AwaitInitialized => {
+                if matches!(message, ClientJsonRpcMessage::Request(_)) {
+                    self.deferred.push_back(message);
+                    None
+                } else {
+                    self.phase = StdioHandshakePhase::Active;
+                    Some(message)
+                }
+            }
+            StdioHandshakePhase::Active => Some(message),
+        }
+    }
+
+    fn take_deferred(&mut self) -> Option<ClientJsonRpcMessage> {
+        (self.phase == StdioHandshakePhase::Active)
+            .then(|| self.deferred.pop_front())
+            .flatten()
+    }
+}
+
+struct TolerantStdioTransport {
+    inner: AsyncRwTransport<RoleServer, tokio::io::Stdin, tokio::io::Stdout>,
+    handshake: StdioHandshakeBuffer,
+}
+
+impl TolerantStdioTransport {
+    fn new() -> Self {
+        Self {
+            inner: AsyncRwTransport::new_server(tokio::io::stdin(), tokio::io::stdout()),
+            handshake: StdioHandshakeBuffer::default(),
+        }
+    }
+}
+
+impl Transport<RoleServer> for TolerantStdioTransport {
+    type Error = std::io::Error;
+
+    fn send(
+        &mut self,
+        message: rmcp::service::TxJsonRpcMessage<RoleServer>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.inner.send(message)
+    }
+
+    async fn receive(&mut self) -> Option<ClientJsonRpcMessage> {
+        if let Some(message) = self.handshake.take_deferred() {
+            return Some(message);
+        }
+        loop {
+            let message = self.inner.receive().await?;
+            if let Some(message) = self.handshake.receive(message) {
+                return Some(message);
+            }
+        }
+    }
+
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        self.inner.close().await
+    }
 }
 
 impl McpServer {
@@ -1248,7 +1335,7 @@ impl ServerHandler for McpServer {
 
 pub(crate) async fn run_stdio(service: AppService) -> Result<(), Box<dyn std::error::Error>> {
     McpServer::new(service)
-        .serve(stdio())
+        .serve(TolerantStdioTransport::new())
         .await?
         .waiting()
         .await?;

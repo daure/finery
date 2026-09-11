@@ -52,6 +52,7 @@ fn change_sets_ticket_snapshots_and_settings_survive_round_trip() {
                 submitted: Some(SubmissionSnapshot {
                     original: Some(ticket("OPS-1", "Original")),
                     updated: Some(ticket("OPS-1", "Updated")),
+                    warnings: Vec::new(),
                 }),
                 retry_blocked: false,
                 create_attempt: true,
