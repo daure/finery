@@ -254,6 +254,8 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
     backlog_keys: BacklogKeyBindings,
 ) -> BacklogTree {
     let number_jump = Rc::new(RefCell::new(TicketNumberJump::default()));
+    #[cfg(test)]
+    let renderer_calls = Rc::new(Cell::new(0));
     let filters = BacklogFilters::default();
     let issue_types = selectable_issue_types(issue_types);
     let mut control = ListControl::new(
@@ -262,7 +264,11 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         |_, _| unreachable!("backlog does not add rows"),
     )
     .headers(false)
-    .columns(vec![backlog_column(Rc::clone(&number_jump))])
+    .columns(vec![backlog_column(
+        Rc::clone(&number_jump),
+        #[cfg(test)]
+        Rc::clone(&renderer_calls),
+    )])
     .tree(TreeAdapter::mutable_parent_id(
         |row: &BacklogRow| row.parent_id.clone(),
         |row, parent_id| row.parent_id = parent_id,
@@ -281,6 +287,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
             .remove([]),
     )
     .empty_message("No stories");
+    control.data_view_mut().set_wrap_geometry_epoch(0);
     let runway_markers_visible = Rc::new(Cell::new(!filters.is_active()));
     let row_marker_visible = Rc::clone(&runway_markers_visible);
     control.data_view_mut().set_row_height_by(|row| {
@@ -423,6 +430,9 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         issue_type_labels,
         snapshot: snapshot.clone(),
         number_jump,
+        wrap_geometry_epoch: 0,
+        #[cfg(test)]
+        renderer_calls,
         backlog_keys,
     }
 }
@@ -455,6 +465,9 @@ pub(in crate::pages::backlog) struct BacklogTree {
     issue_type_labels: Rc<RefCell<HashMap<String, String>>>,
     snapshot: BacklogSnapshot,
     number_jump: Rc<RefCell<TicketNumberJump>>,
+    wrap_geometry_epoch: u64,
+    #[cfg(test)]
+    renderer_calls: Rc<Cell<usize>>,
     backlog_keys: BacklogKeyBindings,
 }
 
@@ -484,6 +497,7 @@ impl BacklogTree {
             self.group_by_selection,
             search_active,
         ));
+        self.advance_wrap_geometry_epoch();
         self.sync_search_results();
         let mut expanded = expanded
             .into_iter()
@@ -565,6 +579,7 @@ impl BacklogTree {
         self.web.set_disabled(true);
         self.web.set_disabled(false);
         self.number_jump.borrow_mut().clear();
+        self.advance_wrap_geometry_epoch();
 
         let snapshot = self.snapshot.clone();
         self.set_snapshot(&snapshot);
@@ -624,6 +639,11 @@ impl BacklogTree {
     #[cfg(test)]
     pub(in crate::pages::backlog) fn highlighted_id_for_test(&self) -> Option<String> {
         self.control.data_view().highlighted_id()
+    }
+
+    #[cfg(test)]
+    pub(in crate::pages::backlog) fn take_renderer_calls_for_test(&self) -> usize {
+        self.renderer_calls.replace(0)
     }
 
     #[cfg(test)]
@@ -1064,6 +1084,7 @@ impl BacklogTree {
         }
         if self.number_jump.borrow().cancels(*key) {
             self.number_jump.borrow_mut().clear();
+            self.advance_wrap_geometry_epoch();
             ctx.request_redraw();
             ctx.stop_propagation();
             return true;
@@ -1077,6 +1098,7 @@ impl BacklogTree {
                 .to_owned();
             let row_id = self.exact_ticket_row_id(&number);
             self.number_jump.borrow_mut().clear();
+            self.advance_wrap_geometry_epoch();
             if let Some(row_id) = row_id {
                 self.jump_to_ticket(&row_id);
             }
@@ -1087,6 +1109,7 @@ impl BacklogTree {
         if !self.number_jump.borrow_mut().push(*key) {
             return false;
         }
+        self.advance_wrap_geometry_epoch();
         let number = self
             .number_jump
             .borrow()
@@ -1103,6 +1126,7 @@ impl BacklogTree {
         if matching_count == 1 {
             if let Some(row_id) = self.exact_ticket_row_id(&number) {
                 self.number_jump.borrow_mut().clear();
+                self.advance_wrap_geometry_epoch();
                 self.jump_to_ticket(&row_id);
             }
         }
@@ -1130,6 +1154,13 @@ impl BacklogTree {
         let view = self.control.data_view_mut();
         view.highlight_id(&row_id.to_owned());
         view.reveal_highlighted_centered();
+    }
+
+    fn advance_wrap_geometry_epoch(&mut self) {
+        self.wrap_geometry_epoch = self.wrap_geometry_epoch.wrapping_add(1);
+        self.control
+            .data_view_mut()
+            .set_wrap_geometry_epoch(self.wrap_geometry_epoch);
     }
 
     fn drain_events(&mut self, source_parents: HashMap<String, String>) {
@@ -1859,15 +1890,21 @@ impl TuiNode for BacklogTree {
         }
     }
     fn tick(&mut self, dt: Duration, settings: tuicore::AnimationSettings) -> TickResult {
-        let number_jump = {
+        let (number_jump, number_jump_changed) = {
             let mut jump = self.number_jump.borrow_mut();
             if jump.advance(dt) {
-                TickResult::CHANGED
+                (TickResult::CHANGED, true)
             } else {
-                jump.remaining()
-                    .map_or(TickResult::IDLE, TickResult::scheduled_after)
+                (
+                    jump.remaining()
+                        .map_or(TickResult::IDLE, TickResult::scheduled_after),
+                    false,
+                )
             }
         };
+        if number_jump_changed {
+            self.advance_wrap_geometry_epoch();
+        }
         self.control
             .tick(dt, settings)
             .merge(<Button<()> as TuiNode<()>>::tick(
@@ -2660,17 +2697,23 @@ fn ticket_row_id(key: &str, row_namespace: Option<&str>) -> String {
         .map(|namespace| format!("ticket:{namespace}:{key}"))
         .unwrap_or_else(|| format!("ticket:{key}"))
 }
-fn backlog_column(number_jump: Rc<RefCell<TicketNumberJump>>) -> Column<BacklogRow, String> {
+fn backlog_column(
+    number_jump: Rc<RefCell<TicketNumberJump>>,
+    #[cfg(test)] renderer_calls: Rc<Cell<usize>>,
+) -> Column<BacklogRow, String> {
     Column::multiline(
         "backlog",
         "",
         Constraint::Percentage(100),
-        move |row: &BacklogRow, _: &CellContext<String>| match &row.content {
-            BacklogRowContent::Section { title, .. } | BacklogRowContent::Group { title, .. } => {
-                title.clone()
-            }
-            BacklogRowContent::WorkItem(item) => {
-                backlog_work_item_text(item, number_jump.borrow().query())
+        move |row: &BacklogRow, _: &CellContext<String>| {
+            #[cfg(test)]
+            renderer_calls.set(renderer_calls.get().saturating_add(1));
+            match &row.content {
+                BacklogRowContent::Section { title, .. }
+                | BacklogRowContent::Group { title, .. } => title.clone(),
+                BacklogRowContent::WorkItem(item) => {
+                    backlog_work_item_text(item, number_jump.borrow().query())
+                }
             }
         },
     )

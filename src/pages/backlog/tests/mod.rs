@@ -14,8 +14,8 @@ use tuicore::{
 
 use super::{
     components::{
-        BacklogQuickMenu, BacklogQuickMenuEvent, backlog_tree, backlog_tree_with_issue_types,
-        selectable_issue_types,
+        BacklogQuickMenu, BacklogQuickMenuEvent, BacklogTree, backlog_tree,
+        backlog_tree_with_issue_types, selectable_issue_types,
     },
     page::{
         BacklogPage, MAX_UNCONFIRMED_TRANSFER_REFRESHES, PendingRank, PendingRankReconciliation,
@@ -1929,6 +1929,69 @@ fn long_backlog_titles_wrap_to_the_available_viewport_width() {
         continuation.chars().position(|character| character != ' '),
         Some(title_start),
     );
+}
+
+#[test]
+fn wrapped_backlog_cache_reuses_renderer_work_and_refreshes_after_renderer_changes() {
+    fn render_backlog(tree: &BacklogTree, terminal: &mut Terminal<TestBackend>, area: Rect) {
+        terminal
+            .draw(|frame| {
+                let mut render = RenderCtx::new();
+                tree.render(frame, area, &mut render);
+                render.flush(frame);
+            })
+            .unwrap();
+    }
+
+    tuicore::init();
+    let mut snapshot = snapshot();
+    snapshot.sprints.clear();
+    snapshot.work_items = (1..=32)
+        .map(|number| {
+            let title = if number == 1 {
+                "A backlog title that wraps across this narrow viewport ".repeat(8)
+            } else {
+                "Short title".into()
+            };
+            work_item(&format!("FIN-{number}"), &title)
+        })
+        .collect();
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    let area = Rect::new(0, 0, 32, 8);
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+
+    tree.layout(area, &mut LayoutCtx::new());
+    render_backlog(&tree, &mut terminal, area);
+    assert!(!rendered_lines(&terminal, area).concat().contains("FIN-2"));
+    let initial_calls = tree.take_renderer_calls_for_test();
+    assert!(initial_calls > 32);
+    tree.layout(area, &mut LayoutCtx::new());
+    render_backlog(&tree, &mut terminal, area);
+    let cached_calls = tree.take_renderer_calls_for_test();
+    assert!(cached_calls < initial_calls);
+
+    snapshot.work_items[0].title = "Short title".into();
+    tree.set_snapshot(&snapshot);
+    tree.layout(area, &mut LayoutCtx::new());
+    render_backlog(&tree, &mut terminal, area);
+    assert!(rendered_lines(&terminal, area).concat().contains("FIN-2"));
+    assert!(tree.take_renderer_calls_for_test() > cached_calls);
+
+    let mut ctx = EventCtx::new(AnimationSettings::default());
+    for key in [
+        Key::Char('0'),
+        Key::Char('0'),
+        Key::Esc,
+        Key::Char('0'),
+        Key::Enter,
+    ] {
+        tree.dispatch_event(&route, &TuiEvent::Key(KeyEvent::from(key)), &mut ctx);
+        tree.layout(area, &mut LayoutCtx::new());
+        render_backlog(&tree, &mut terminal, area);
+        assert!(tree.take_renderer_calls_for_test() > cached_calls);
+    }
 }
 
 #[test]
