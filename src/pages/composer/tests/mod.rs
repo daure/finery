@@ -2064,7 +2064,7 @@ fn ticket_navigation_activates_and_marks_selected_row_when_unfocused() {
         })
         .unwrap();
 
-    let selected_background = tuicore::theme().selected_bg();
+    let selected_background = tuicore::theme().inactive_selected_bg();
     assert!(
         (tickets.area.y..tickets.area.bottom()).any(|y| {
             (tickets.area.x..tickets.area.right()).any(|x| {

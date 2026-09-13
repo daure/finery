@@ -172,24 +172,15 @@ pub(crate) fn attachment_summary_text(
     filename: &str,
     created: &str,
     size: u64,
-    highlighted: bool,
     submitted: bool,
 ) -> Text<'static> {
     let theme = tuicore::theme();
     let text_style = Style::default().fg(if submitted {
         theme.muted_fg()
-    } else if highlighted {
-        theme.selected_fg()
     } else {
         theme.text_fg()
     });
-    let muted_style = Style::default().fg(if submitted {
-        theme.muted_fg()
-    } else if highlighted {
-        theme.selected_fg()
-    } else {
-        theme.muted_fg()
-    });
+    let muted_style = Style::default().fg(theme.muted_fg());
     Text::from(Line::from(vec![
         Span::styled(attachment_change_badge(change), text_style),
         Span::styled(" ", text_style),
@@ -205,25 +196,16 @@ pub(crate) fn attachment_summary_text(
 pub(crate) fn mermaid_diagram_summary_text(
     title: &str,
     diagram_type: &str,
-    highlighted: bool,
     submitted: bool,
     published: bool,
 ) -> Text<'static> {
     let theme = tuicore::theme();
     let text_style = Style::default().fg(if submitted {
         theme.muted_fg()
-    } else if highlighted {
-        theme.selected_fg()
     } else {
         theme.text_fg()
     });
-    let muted_style = Style::default().fg(if submitted {
-        theme.muted_fg()
-    } else if highlighted {
-        theme.selected_fg()
-    } else {
-        theme.muted_fg()
-    });
+    let muted_style = Style::default().fg(theme.muted_fg());
     let mut spans = vec![
         Span::styled("A", text_style),
         Span::styled(" ", text_style),

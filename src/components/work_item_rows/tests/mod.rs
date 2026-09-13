@@ -15,7 +15,7 @@ fn ticket_menu_height_cap_uses_sixty_percent_of_the_viewport() {
 fn mermaid_rows_capitalize_the_diagram_type() {
     tuicore::init();
 
-    let text = mermaid_diagram_summary_text("Lifecycle", "state", false, false, false);
+    let text = mermaid_diagram_summary_text("Lifecycle", "state", false, false);
 
     assert_eq!(text.lines[0].spans[2].content, " ");
     assert_eq!(text.lines[0].spans.last().unwrap().content, "State");
@@ -25,7 +25,7 @@ fn mermaid_rows_capitalize_the_diagram_type() {
 fn published_mermaid_rows_show_the_published_state() {
     tuicore::init();
 
-    let text = mermaid_diagram_summary_text("Lifecycle", "state", false, true, true);
+    let text = mermaid_diagram_summary_text("Lifecycle", "state", true, true);
 
     assert_eq!(text.lines[0].spans.last().unwrap().content, " • published");
     assert!(
@@ -267,7 +267,6 @@ fn attachment_rows_show_filename_date_and_size() {
         "2026-09-04T16:14:04.000+0000",
         21_504,
         false,
-        false,
     );
     let rendered = text.lines[0]
         .spans
@@ -282,7 +281,7 @@ fn attachment_rows_show_filename_date_and_size() {
 }
 
 #[test]
-fn highlighted_attachment_rows_use_the_selected_foreground() {
+fn attachment_rows_distinguish_filename_from_metadata() {
     tuicore::init();
 
     let text = attachment_summary_text(
@@ -290,14 +289,15 @@ fn highlighted_attachment_rows_use_the_selected_foreground() {
         "design.png",
         "2026-09-04T16:14:04.000+0000",
         21_504,
-        true,
         false,
     );
 
-    assert!(
-        text.lines[0]
-            .spans
-            .iter()
-            .all(|span| span.style.fg == Some(tuicore::theme().selected_fg()))
+    assert_eq!(
+        text.lines[0].spans[3].style.fg,
+        Some(tuicore::theme().text_fg())
+    );
+    assert_eq!(
+        text.lines[0].spans[5].style.fg,
+        Some(tuicore::theme().muted_fg())
     );
 }

@@ -146,7 +146,7 @@ pub(super) fn set_active_ticket_style(
             let theme = theme();
             Style::default()
                 .fg(theme.selected_fg())
-                .bg(theme.selected_bg())
+                .bg(theme.inactive_selected_bg())
         })
     });
 }
@@ -361,7 +361,6 @@ fn ticket_columns(number_jump: Rc<RefCell<TicketNumberJump>>) -> Vec<Column<Tick
                         &attachment.filename,
                         &attachment.created,
                         attachment.size,
-                        context.highlighted,
                         row.item.submitted,
                     );
                 }
@@ -369,7 +368,6 @@ fn ticket_columns(number_jump: Rc<RefCell<TicketNumberJump>>) -> Vec<Column<Tick
                     return mermaid_diagram_summary_text(
                         &diagram.title,
                         &diagram.diagram_type,
-                        context.highlighted,
                         row.item.submitted,
                         diagram.published_attachment_id.is_some(),
                     );

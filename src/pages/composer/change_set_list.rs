@@ -1,5 +1,10 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
+#[path = "change_set_summary.rs"]
+mod summary;
+
+use crate::store::composer::summary::ChangeSetSummary;
+
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
@@ -27,7 +32,7 @@ use crate::{
 struct ChangeSetRow {
     id: String,
     name: String,
-    subtitle: String,
+    summary: ChangeSetSummary,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -428,7 +433,7 @@ impl ChangeSetListView {
                 ChangeSetRow {
                     id: format!("CS-{next}"),
                     name,
-                    subtitle: "0 tickets · ready to compose".into(),
+                    summary: ChangeSetSummary::default(),
                 }
             },
         )
@@ -679,14 +684,10 @@ fn rows(state: &ComposerState, filter: ChangeSetFilter) -> Vec<ChangeSetRow> {
         .change_sets
         .iter()
         .filter(|set| filter.contains(set))
-        .map(|set| {
-            let submitted = set.submitted_count();
-            let state = if set.closed { "closed" } else { "open" };
-            ChangeSetRow {
-                id: set.id.clone(),
-                name: set.name.clone(),
-                subtitle: format!("{submitted}/{} submitted · {state}", set.tickets.len()),
-            }
+        .map(|set| ChangeSetRow {
+            id: set.id.clone(),
+            name: set.name.clone(),
+            summary: ChangeSetSummary::new(set),
         })
         .collect();
     rows.reverse();
@@ -721,7 +722,7 @@ fn change_set_column() -> Column<ChangeSetRow, String> {
                         .fg(theme.text_fg())
                         .add_modifier(Modifier::BOLD),
                 ),
-                Line::styled(row.subtitle.clone(), Style::default().fg(theme.subtle_fg())),
+                summary::summary_line(&row.summary),
             ])
         },
     )

@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::work_items::WorkItem;
 
+pub(crate) mod summary;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum TicketKind {
     Epic,
