@@ -188,6 +188,7 @@ fn search_ticket(ticket: Ticket) -> ComposerSearchTicket {
             subtask_progress: None,
             labels: Vec::new(),
             fix_versions: Vec::new(),
+            releases: Vec::new(),
             epic_name: None,
             story_points: None,
             status_changed_at: None,

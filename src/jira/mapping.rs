@@ -204,6 +204,25 @@ fn to_work_item_fields(key: &str, fields: &Value, story_points_field_id: Option<
         labels: labels(field("labels")),
         fix_versions: fix_versions(field("fixVersions")),
         epic_name: epic_name(field("parent")),
+        releases: field("fixVersions")
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|version| {
+                Some(crate::store::work_items::release::ReleaseVersion {
+                    id: version.get("id")?.as_str()?.into(),
+                    name: version.get("name")?.as_str()?.trim().into(),
+                    start_date: version
+                        .get("startDate")
+                        .and_then(Value::as_str)
+                        .and_then(crate::store::work_items::release::parse_date),
+                    end_date: version
+                        .get("releaseDate")
+                        .and_then(Value::as_str)
+                        .and_then(crate::store::work_items::release::parse_date),
+                })
+            })
+            .collect(),
         story_points: story_points_field_id.and_then(|field_id| {
             field(field_id)
                 .as_f64()

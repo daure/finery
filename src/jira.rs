@@ -23,6 +23,7 @@ use crate::{
 };
 
 mod mapping;
+mod release_dates;
 
 use mapping::*;
 
@@ -263,6 +264,10 @@ struct LabelPage {
 pub(crate) struct JiraFixVersion {
     pub(crate) id: String,
     pub(crate) name: String,
+    #[serde(default, rename = "startDate")]
+    start_date: Option<String>,
+    #[serde(default, rename = "releaseDate")]
+    release_date: Option<String>,
     #[serde(default)]
     archived: bool,
 }
@@ -640,6 +645,7 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         runway: None,
         velocity: velocity.as_ref().ok().cloned(),
     };
+    release_dates::hydrate(&client, &base_url, &email, &token, &mut snapshot);
     if let Some(warning) = discovery_warning {
         snapshot.warnings.push(warning);
     }
@@ -1610,18 +1616,14 @@ pub(crate) fn fix_versions(
 ) -> Result<Vec<JiraFixVersion>, String> {
     let (client, base_url, email, token) = configured_client(settings)?;
     let search = search.trim().to_ascii_lowercase();
-    let response = client
-        .get(format!(
-            "{base_url}/rest/api/3/project/{project_key}/versions"
-        ))
-        .basic_auth(email, Some(token))
-        .send()
-        .map_err(|error| error.to_string())?;
-    let mut versions = response_json::<Vec<JiraFixVersion>>(response)?
-        .into_iter()
-        .filter(|version| !version.archived)
-        .filter(|version| search.is_empty() || version.name.to_ascii_lowercase().contains(&search))
-        .collect::<Vec<_>>();
+    let mut versions =
+        release_dates::project_versions(&client, &base_url, &email, &token, project_key)?
+            .into_iter()
+            .filter(|version| !version.archived)
+            .filter(|version| {
+                search.is_empty() || version.name.to_ascii_lowercase().contains(&search)
+            })
+            .collect::<Vec<_>>();
     versions.sort_unstable_by(|left, right| version_name_cmp(&left.name, &right.name));
     Ok(versions)
 }

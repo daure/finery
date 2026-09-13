@@ -420,6 +420,7 @@ fn work_item(index: usize) -> WorkItem {
         labels: Vec::new(),
         fix_versions: Vec::new(),
         epic_name: None,
+        releases: Vec::new(),
         story_points: Some(index as f64),
         status_changed_at: None,
     }
@@ -466,6 +467,8 @@ fn workspace_compacts_backlog_and_change_set_payloads() {
             warnings: vec!["Story points are unavailable".into()],
             runway: Some(BacklogRunway {
                 capacity: 20.5,
+                tolerance_percent: 20,
+                assumed_ticket_size: Some(3.0),
                 source: RunwayCapacitySource::JiraVelocity,
                 estimated_points: 100.0,
                 assumed_points: 12.0,
@@ -648,6 +651,8 @@ fn capacity_guidance_uses_key_references_and_points_sources() {
     let guidance = workspace_capacity_guidance_view(
         BacklogRunway {
             capacity: 20.0,
+            tolerance_percent: 20,
+            assumed_ticket_size: Some(3.0),
             source: RunwayCapacitySource::Fixed,
             estimated_points: 3.0,
             assumed_points: 0.0,

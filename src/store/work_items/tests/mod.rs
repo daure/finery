@@ -3,6 +3,8 @@ use super::{
     format_time_in_status, loaded_story_point_average,
 };
 
+mod release;
+
 fn work_item(key: &str, story_points: Option<f64>) -> WorkItem {
     WorkItem {
         key: key.into(),
@@ -19,6 +21,7 @@ fn work_item(key: &str, story_points: Option<f64>) -> WorkItem {
         subtask_progress: None,
         labels: Vec::new(),
         fix_versions: Vec::new(),
+        releases: Vec::new(),
         epic_name: None,
         story_points,
         status_changed_at: None,

@@ -2358,7 +2358,7 @@ impl BacklogPage {
         let close_requested = Rc::clone(&self.description_dialog_close_requested);
         let content = Flex::column().child(
             "description",
-            SyntaxHighlighter::new(description, Language::Markdown),
+            SyntaxHighlighter::new(description, Language::Markdown).wrap(true),
             FlexItem::fill(1),
         );
         let dialog = Dialog::new()

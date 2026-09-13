@@ -8,6 +8,8 @@ use std::{
 
 use serde_json::json;
 
+mod release_dates;
+
 use super::{
     AgileBoard, AgileIssuePage, BACKLOG_FIELDS, BACKLOG_JQL, COMPOSER_FIELDS, ISSUE_FIELDS,
     JiraIssue, JiraSprint, MAX_VELOCITY_GOAL_LOOKUPS, SubmitBatchOutcome, ambiguous_create_failure,
@@ -1373,7 +1375,7 @@ fn backlog_items_include_subtask_progress_labels_releases_and_epic_names() {
                     { "key": "FIN-3", "fields": { "status": { "statusCategory": { "key": "indeterminate" } } } }
                 ],
                 "labels": ["AB", "CD", "Refinery"],
-                "fixVersions": [{ "name": "1.2.0" }]
+                "fixVersions": [{ "id": "12", "name": "1.2.0", "startDate": "2026-09-14", "releaseDate": "2026-10-02" }]
             }),
         },
         None,
@@ -1388,6 +1390,16 @@ fn backlog_items_include_subtask_progress_labels_releases_and_epic_names() {
     assert_eq!(progress.total, 2);
     assert_eq!(work_item.labels, ["AB", "CD", "Refinery"]);
     assert_eq!(work_item.fix_versions, ["1.2.0"]);
+    assert_eq!(work_item.releases.len(), 1);
+    assert_eq!(work_item.releases[0].id, "12");
+    assert_eq!(
+        work_item.releases[0].start_date,
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 14)
+    );
+    assert_eq!(
+        work_item.releases[0].end_date,
+        chrono::NaiveDate::from_ymd_opt(2026, 10, 2)
+    );
     assert_eq!(work_item.epic_name.as_deref(), Some("Shopping cart"));
 }
 

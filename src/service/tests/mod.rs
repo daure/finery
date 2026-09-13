@@ -269,7 +269,10 @@ fn including_a_story_patch_adds_its_subtasks() {
         .unwrap();
 
     assert_eq!(response.applied[0].ticket_ids, ["FIN-2", "FIN-3"]);
-    assert_eq!(response.change_set.value.selected_ticket_ids, ["FIN-2"]);
+    assert_eq!(
+        response.change_set.value.selected_ticket_ids,
+        ["FIN-2", "FIN-3"]
+    );
     assert_eq!(
         response
             .change_set

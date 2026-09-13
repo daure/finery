@@ -85,7 +85,7 @@ fn placement_builds_ordered_forest_and_keeps_external_parent_key() {
 }
 
 #[test]
-fn including_a_story_or_task_adds_its_subtasks_without_selecting_them() {
+fn including_a_story_or_task_selects_its_subtasks_for_submission() {
     for kind in [TicketKind::Story, TicketKind::Task] {
         let mut state = state();
         state.dispatch(ComposerAction::IncludeTicketWithSubtasks {
@@ -119,7 +119,7 @@ fn including_a_story_or_task_adds_its_subtasks_without_selecting_them() {
         );
         assert_eq!(
             state.active_set().unwrap().selected_ticket_ids,
-            vec!["FIN-1".to_owned()]
+            vec!["FIN-1".to_owned(), "FIN-2".to_owned()]
         );
     }
 }

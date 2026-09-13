@@ -1,3 +1,5 @@
+pub(crate) mod release;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WorkItem {
     pub key: String,
@@ -14,6 +16,7 @@ pub(crate) struct WorkItem {
     pub subtask_progress: Option<SubtaskProgress>,
     pub labels: Vec<String>,
     pub fix_versions: Vec<String>,
+    pub releases: Vec<release::ReleaseVersion>,
     pub epic_name: Option<String>,
     pub story_points: Option<f64>,
     pub status_changed_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -103,6 +106,8 @@ pub(crate) struct VelocitySprint {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BacklogRunway {
     pub capacity: f64,
+    pub tolerance_percent: u8,
+    pub assumed_ticket_size: Option<f64>,
     pub source: RunwayCapacitySource,
     pub estimated_points: f64,
     pub assumed_points: f64,
@@ -226,6 +231,8 @@ pub(crate) fn apply_capacity(
         .collect();
     snapshot.runway = Some(BacklogRunway {
         capacity,
+        tolerance_percent,
+        assumed_ticket_size: Some(assumed_ticket_size),
         source,
         estimated_points,
         assumed_points,

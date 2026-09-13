@@ -6,6 +6,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "release_row.rs"]
+mod release_row;
+
 use ratatui::{
     Frame,
     layout::Constraint,
@@ -254,7 +257,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
     let filters = BacklogFilters::default();
     let issue_types = selectable_issue_types(issue_types);
     let mut control = ListControl::new(
-        backlog_rows(snapshot, &filters, None),
+        backlog_rows(snapshot, &filters, None, false),
         |row: &BacklogRow| row.id.clone(),
         |_, _| unreachable!("backlog does not add rows"),
     )
@@ -468,10 +471,18 @@ impl BacklogTree {
                 .find(|row| &row.id == id)
                 .and_then(|row| row.parent_id.clone())
         });
+        let search_active = !self
+            .control
+            .data_view()
+            .transform_state()
+            .search
+            .trim()
+            .is_empty();
         self.control.set_rows(backlog_rows(
             snapshot,
             &self.filters,
             self.group_by_selection,
+            search_active,
         ));
         self.sync_search_results();
         let mut expanded = expanded
@@ -1257,7 +1268,21 @@ impl BacklogTree {
         let search = self.control.data_view().transform_state().search.clone();
         let outcome = dispatch(&mut self.control, ctx);
         if self.control.data_view().transform_state().search != search {
-            self.sync_search_results();
+            let search_active = !self
+                .control
+                .data_view()
+                .transform_state()
+                .search
+                .trim()
+                .is_empty();
+            if self.group_by_selection == Some(BacklogGroupBy::Release)
+                && search_active != !search.trim().is_empty()
+            {
+                let snapshot = self.snapshot.clone();
+                self.set_snapshot(&snapshot);
+            } else {
+                self.sync_search_results();
+            }
         }
         let show_runway_bands = self.show_runway_bands();
         if self.runway_markers_visible.replace(show_runway_bands) != show_runway_bands {
@@ -2002,9 +2027,10 @@ fn backlog_rows(
     snapshot: &BacklogSnapshot,
     filters: &BacklogFilters,
     group_by: Option<BacklogGroupBy>,
+    search_active: bool,
 ) -> Vec<BacklogRow> {
     if let Some(group_by) = group_by {
-        return grouped_backlog_rows(snapshot, filters, group_by);
+        return grouped_backlog_rows(snapshot, filters, group_by, search_active);
     }
 
     let mut rows = Vec::new();
@@ -2064,6 +2090,7 @@ fn grouped_backlog_rows(
     snapshot: &BacklogSnapshot,
     filters: &BacklogFilters,
     group_by: BacklogGroupBy,
+    search_active: bool,
 ) -> Vec<BacklogRow> {
     let visible_items = snapshot
         .sprints
@@ -2081,7 +2108,13 @@ fn grouped_backlog_rows(
                 .iter()
                 .map(|item| item.key.as_str())
                 .collect::<HashSet<_>>();
-            let mut rows = vec![group_row(group_by, &group_id, &group)];
+            let mut rows = vec![group_row(
+                snapshot,
+                group_by,
+                &group_id,
+                &group,
+                filters.is_active() || search_active,
+            )];
             rows.extend(group.items.into_iter().enumerate().map(|(index, item)| {
                 let source = work_item_source(snapshot, item);
                 work_item_row(
@@ -2386,10 +2419,31 @@ fn group_row_id(group_by: BacklogGroupBy, label: &str) -> String {
     format!("group:{}:{label}", group_by.id())
 }
 
-fn group_row(group_by: BacklogGroupBy, id: &str, group: &WorkItemGroup<'_>) -> BacklogRow {
+fn group_row(
+    snapshot: &BacklogSnapshot,
+    group_by: BacklogGroupBy,
+    id: &str,
+    group: &WorkItemGroup<'_>,
+    filtered: bool,
+) -> BacklogRow {
+    if group_by == BacklogGroupBy::Release && !is_unassigned_group_label(&group.label) {
+        return BacklogRow {
+            id: id.into(),
+            parent_id: None,
+            content: BacklogRowContent::Group {
+                title: release_row::title(
+                    snapshot,
+                    group,
+                    chrono::Utc::now().date_naive(),
+                    filtered,
+                ),
+                search_text: group.label.clone(),
+            },
+        };
+    }
     let theme = tuicore::theme();
     let no_assignment = is_unassigned_group_label(&group.label);
-    let mut title = vec![Line::from(vec![
+    let mut heading = vec![
         Span::styled(
             grouping_icon(Some(group_by)),
             Style::default().fg(theme.accent_fg()),
@@ -2405,31 +2459,35 @@ fn group_row(group_by: BacklogGroupBy, id: &str, group: &WorkItemGroup<'_>) -> B
                     .add_modifier(Modifier::BOLD)
             },
         ),
-        Span::styled(" • ", Style::default().fg(theme.muted_fg())),
-        Span::styled(
-            format!("{} items", group.root_count),
-            Style::default().fg(theme.muted_fg()),
-        ),
-    ])];
+    ];
+    if no_assignment {
+        heading.extend([
+            Span::styled(" • ", Style::default().fg(theme.muted_fg())),
+            Span::styled(
+                format!("{} items", group.root_count),
+                Style::default().fg(theme.muted_fg()),
+            ),
+        ]);
+    }
+    let mut title = vec![Line::from(heading)];
     if !no_assignment {
         let (completed_points, total_points) = group_points(&group.items);
         let (coverage, coverage_style) = estimation_coverage(&group.items);
         let (completed_items, total_items) = root_item_counts_refs(&group.items);
         title.push(Line::from(vec![
+            Span::styled(format!("{coverage} est"), coverage_style),
+            Span::styled(" • ", Style::default().fg(theme.muted_fg())),
             Span::styled(
-                format!(
-                    "{}/{} pts",
-                    points_label(completed_points),
-                    points_label(total_points)
-                ),
-                Style::default().fg(theme.text_fg()),
+                format!("{} open", total_items - completed_items),
+                Style::default().fg(theme.muted_fg()),
             ),
             Span::styled(" • ", Style::default().fg(theme.muted_fg())),
-            Span::styled(coverage, coverage_style),
-            Span::styled(" • ", Style::default().fg(theme.muted_fg())),
             Span::styled(
-                format!("{completed_items}/{total_items} items"),
-                Style::default().fg(theme.muted_fg()),
+                format!(
+                    "{} pts remaining",
+                    points_label((total_points - completed_points).max(0.0))
+                ),
+                Style::default().fg(theme.text_fg()),
             ),
         ]));
     }
@@ -2468,10 +2526,7 @@ fn sprint_section_row(section: &str, sprint: &Sprint) -> BacklogRow {
         title.extend([
             Span::styled(" • ", Style::default().fg(theme.muted_fg())),
             Span::styled(
-                format!(
-                    "{} items",
-                    sprint_item_count_label(&sprint.work_items, is_active)
-                ),
+                sprint_item_summary(sprint),
                 Style::default().fg(theme.muted_fg()),
             ),
         ]);
@@ -2483,24 +2538,21 @@ fn sprint_section_row(section: &str, sprint: &Sprint) -> BacklogRow {
         Text::from(vec![
             Line::from(title),
             Line::from(vec![
+                Span::styled(format!("{coverage} est"), coverage_style),
+                Span::styled(" • ", Style::default().fg(theme.muted_fg())),
+                Span::styled(
+                    sprint_item_summary(sprint),
+                    Style::default().fg(theme.muted_fg()),
+                ),
+                Span::styled(" • ", Style::default().fg(theme.muted_fg())),
                 Span::styled(
                     sprint_capacity_icon(capacity.state),
-                    Style::default().fg(theme.accent_fg()),
+                    capacity_indicator_style(capacity.state),
                 ),
                 Span::raw(" "),
                 Span::styled(
-                    format!("{} pts", capacity_load_label(capacity, is_active)),
+                    capacity_load_label(capacity, is_active),
                     Style::default().fg(theme.text_fg()),
-                ),
-                Span::styled(" • ", Style::default().fg(theme.muted_fg())),
-                Span::styled(coverage, coverage_style),
-                Span::styled(" • ", Style::default().fg(theme.muted_fg())),
-                Span::styled(
-                    format!(
-                        "{} items",
-                        sprint_item_count_label(&sprint.work_items, is_active)
-                    ),
-                    Style::default().fg(theme.muted_fg()),
                 ),
             ]),
         ]),
@@ -2690,12 +2742,12 @@ fn sprint_title(sprint: &Sprint) -> String {
         return format!("{icon} {}{date_range}", sprint.name);
     };
     format!(
-        "{icon} {}{date_range}\n{} {} pts • {} • {} items",
+        "{icon} {}{date_range}\n{} est • {} • {} {}",
         sprint.name,
+        sprint_estimation_coverage(sprint).0,
+        sprint_item_summary(sprint),
         sprint_capacity_icon(capacity.state),
         capacity_load_label(capacity, is_active),
-        sprint_estimation_coverage(sprint).0,
-        sprint_item_count_label(&sprint.work_items, is_active),
     )
 }
 
@@ -2751,24 +2803,21 @@ fn capacity_load_label(
     let prefix = matches!(capacity.source, RunwayCapacitySource::JiraVelocity)
         .then_some("~")
         .unwrap_or("");
-    if is_active {
-        let source_suffix = match capacity.source {
-            RunwayCapacitySource::JiraVelocity => "v",
-            RunwayCapacitySource::Fixed | RunwayCapacitySource::FixedFallback => "c",
-        };
-        format!(
-            "{prefix}{}/{} ({}{source_suffix})",
-            points_label(capacity.completed_points),
-            points_label(capacity.effective_points),
-            points_label(capacity.capacity)
-        )
+    let source_suffix = match capacity.source {
+        RunwayCapacitySource::JiraVelocity => "v",
+        RunwayCapacitySource::Fixed | RunwayCapacitySource::FixedFallback => "c",
+    };
+    let (numerator, denominator) = if is_active {
+        (capacity.completed_points, capacity.effective_points)
     } else {
-        format!(
-            "{prefix}{}/{}",
-            points_label(capacity.effective_points),
-            points_label(capacity.capacity)
-        )
-    }
+        (capacity.effective_points, capacity.capacity)
+    };
+    format!(
+        "{prefix}{}/{} pts ({}{source_suffix})",
+        points_label(numerator),
+        points_label(denominator),
+        points_label(capacity.capacity)
+    )
 }
 
 fn backlog_title(snapshot: &BacklogSnapshot) -> String {
@@ -2778,12 +2827,12 @@ fn backlog_title(snapshot: &BacklogSnapshot) -> String {
     )
 }
 
-fn sprint_item_count_label(items: &[WorkItem], is_active: bool) -> String {
-    if is_active {
-        let (completed, total) = root_item_counts(items);
-        format!("{completed}/{total}")
+fn sprint_item_summary(sprint: &Sprint) -> String {
+    let (completed, total) = root_item_counts(&sprint.work_items);
+    if sprint.state == "future" {
+        format!("{total} planned")
     } else {
-        root_item_count_label(items)
+        format!("{completed}/{total} done")
     }
 }
 
@@ -2837,10 +2886,19 @@ fn sprint_icon(state: &str) -> &'static str {
 
 fn sprint_capacity_icon(state: SprintCapacityState) -> &'static str {
     match state {
-        SprintCapacityState::OnTarget => "",
-        SprintCapacityState::OverCommitted => "",
-        SprintCapacityState::UnderCommitted => "",
+        SprintCapacityState::OnTarget => "󱩿",
+        SprintCapacityState::OverCommitted => "󰸁",
+        SprintCapacityState::UnderCommitted => "󰸂",
     }
+}
+
+fn capacity_indicator_style(state: SprintCapacityState) -> Style {
+    let theme = tuicore::theme();
+    Style::default().fg(match state {
+        SprintCapacityState::UnderCommitted => theme.warning_fg(),
+        SprintCapacityState::OnTarget => theme.success_fg(),
+        SprintCapacityState::OverCommitted => theme.error_fg(),
+    })
 }
 
 fn sprint_date_range(sprint: &Sprint) -> Option<String> {

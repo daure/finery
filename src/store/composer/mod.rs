@@ -1580,10 +1580,6 @@ impl ComposerState {
         placement: PlacementTarget,
     ) -> Result<(), PlacementError> {
         let parent_key = ticket.key.clone();
-        let mut selected_ticket_ids = self
-            .active_set()
-            .map(|set| set.selected_ticket_ids.clone())
-            .unwrap_or_default();
         let include_subtasks = matches!(ticket.kind, TicketKind::Story | TicketKind::Task);
         self.include_ticket(ticket, placement, true)?;
         if include_subtasks {
@@ -1594,8 +1590,6 @@ impl ComposerState {
                 self.include_ticket(subtask, PlacementTarget::ChildOf(parent_key.clone()), false)?;
             }
         }
-        selected_ticket_ids.push(parent_key.clone());
-        self.set_selected_tickets(selected_ticket_ids);
         self.selected_ticket = Some(parent_key);
         Ok(())
     }

@@ -95,6 +95,7 @@ fn work_item(kind: &str) -> WorkItem {
         subtask_progress: None,
         labels: Vec::new(),
         fix_versions: Vec::new(),
+        releases: Vec::new(),
         epic_name: None,
         story_points: None,
         status_changed_at: None,

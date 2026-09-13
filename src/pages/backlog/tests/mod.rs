@@ -51,6 +51,7 @@ fn work_item(key: &str, title: &str) -> WorkItem {
         subtask_progress: None,
         labels: Vec::new(),
         fix_versions: Vec::new(),
+        releases: Vec::new(),
         epic_name: None,
         story_points: None,
         status_changed_at: None,
@@ -421,20 +422,16 @@ fn backlog_groups_sprint_and_backlog_tickets_by_release_with_a_missing_version_g
 
     let lines = rendered_lines(&terminal, area);
     let text = lines.concat();
-    assert!(text.contains(" v1.0 • 2 items"));
-    assert!(text.contains("v1.0 • 2 items"));
+    assert!(text.contains(" v1.0 •  Start and end date missing"));
+    assert!(text.contains("✓ 2/2 est • 2 open • 5 pts remaining"));
     assert!(text.contains("(no release version) • 1 items"));
-    assert!(text.contains("v10.0 • 1 items"));
+    assert!(text.contains("v10.0 •  Start and end date missing"));
     assert_eq!(
-        lines
-            .iter()
-            .position(|line| line.contains("v1.0 • 2 items")),
+        lines.iter().position(|line| line.contains("v1.0 •")),
         Some(2)
     );
     assert_eq!(
-        lines
-            .iter()
-            .position(|line| line.contains("v10.0 • 1 items")),
+        lines.iter().position(|line| line.contains("v10.0 •")),
         Some(4)
     );
     assert_eq!(
@@ -477,7 +474,10 @@ fn backlog_groups_sprint_and_backlog_tickets_by_epic_with_an_unassigned_group() 
     let mut snapshot = snapshot();
     let mut assigned = work_item("FIN-8", "Build the release");
     assigned.epic_name = Some("Zulu".into());
+    assigned.story_points = Some(8.0);
+    assigned.done = true;
     snapshot.sprints[0].work_items[0].epic_name = Some("Zulu".into());
+    snapshot.sprints[0].work_items[0].story_points = Some(13.0);
     let mut alpha = work_item("FIN-9", "Polish the release");
     alpha.epic_name = Some("Alpha".into());
     snapshot.work_items = vec![assigned, alpha, work_item("FIN-10", "Unassigned work")];
@@ -498,20 +498,16 @@ fn backlog_groups_sprint_and_backlog_tickets_by_epic_with_an_unassigned_group() 
 
     let lines = rendered_lines(&terminal, area);
     let text = lines.concat();
-    assert!(text.contains(" Zulu • 2 items"));
-    assert!(text.contains("Zulu • 2 items"));
-    assert!(text.contains("Alpha • 1 items"));
+    assert!(lines[4].trim_end().ends_with(" Zulu"));
+    assert!(text.contains("✓ 2/2 est • 1 open • 13 pts remaining"));
+    assert!(lines[2].trim_end().ends_with(" Alpha"));
     assert!(text.contains("(no epic assigned) • 1 items"));
     assert_eq!(
-        lines
-            .iter()
-            .position(|line| line.contains("Alpha • 1 items")),
+        lines.iter().position(|line| line.contains(" Alpha")),
         Some(2)
     );
     assert_eq!(
-        lines
-            .iter()
-            .position(|line| line.contains("Zulu • 2 items")),
+        lines.iter().position(|line| line.contains(" Zulu")),
         Some(4)
     );
     assert_eq!(
@@ -1197,7 +1193,7 @@ fn expanded_sprint_shows_subtasks_under_their_parent() {
     let text = rendered_lines(&terminal, area).concat();
     assert!(text.contains("FIN-7 Ship sprint work"));
     assert!(text.contains("FIN-9 Finish sprint work"));
-    assert!(text.contains("0/1 items"));
+    assert!(text.contains("0/1 done"));
 }
 
 #[test]
@@ -1517,8 +1513,8 @@ fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
     assert!(text.contains("3 • @AD • To Do"));
     let lines = rendered_lines(&terminal, area);
     let capacity_line = lines.iter().find(|line| line.contains("✓ 1/1")).unwrap();
-    assert!(capacity_line.contains(" 0/18 (20c) pts • ✓ 1/1 • 0/1 items"));
-    assert_eq!(cell_position(capacity_line, ""), Some(2));
+    assert!(capacity_line.contains("✓ 1/1 est • 0/1 done • 󱩿 0/18 pts (20c)"));
+    assert_eq!(cell_position(capacity_line, "✓"), Some(2));
     assert!(!text.contains("assumed"));
     let ticket_position = |key| {
         lines
@@ -1583,7 +1579,7 @@ fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
     }
     assert!(text.contains("󰓅"));
     assert!(text.contains(" Sprint 7 • 18 Jun – 2 Jul"));
-    assert!(text.contains(" ~0/5.4 (20v) pts • ✓ 1/1 • 0/1 items"));
+    assert!(text.contains("✓ 1/1 est • 0/1 done • 󰸂 ~0/5.4 pts (20v)"));
     assert!(text.contains("5.4 • @AD • To Do"));
 
     snapshot.sprints[0].work_items[0].story_points = None;
@@ -1603,7 +1599,7 @@ fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
         })
         .unwrap();
     let text = rendered_lines(&terminal, area).concat();
-    assert!(text.contains(" ~0/5.4 (20v) pts • 󰄰 0/1 • 0/1 items"));
+    assert!(text.contains("󰄰 0/1 est • 0/1 done • 󰸂 ~0/5.4 pts (20v)"));
 
     apply_capacity(
         &mut snapshot,
@@ -1621,7 +1617,7 @@ fn backlog_shows_capacity_markers_without_a_velocity_indicator() {
         })
         .unwrap();
     let text = rendered_lines(&terminal, area).concat();
-    assert!(text.contains(" 0/5.4 (20c) pts • 󰄰 0/1 • 0/1 items"));
+    assert!(text.contains("󰄰 0/1 est • 0/1 done • 󰸂 0/5.4 pts (20c)"));
     assert!(!text.contains("~0/5.4"));
 }
 
@@ -1673,7 +1669,7 @@ fn sprint_estimation_coverage_excludes_bugs_and_counts_all_sprint_items() {
         })
         .unwrap();
     let text = rendered_lines(&terminal, area).concat();
-    assert!(text.contains(" ~0/7 (20v) pts • ✓ 1/1 • 0/4 items"));
+    assert!(text.contains("✓ 1/1 est • 0/4 done • 󰸂 ~0/7 pts (20v)"));
 
     let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
     tree.dispatch_focus(
@@ -1726,7 +1722,7 @@ fn sprint_load_marks_zero_valued_average_assumptions() {
     assert!(
         rendered_lines(&terminal, area)
             .concat()
-            .contains(" ~0/0 (20v) pts • 󰄰 0/1 • 0/1 items")
+            .contains("󰄰 0/1 est • 0/1 done • 󰸂 ~0/0 pts (20v)")
     );
 }
 
@@ -1834,8 +1830,8 @@ fn active_sprint_shows_completed_points_alongside_total_and_capacity() {
         .unwrap();
 
     let text = rendered_lines(&terminal, area).concat();
-    assert!(text.contains("~30/110.2 (35v) pts • ✓ 2/2 • 1/2 items"));
-    assert!(text.contains("~15/35 pts • ✓ 1/1 • 1 items"));
+    assert!(text.contains("✓ 2/2 est • 1/2 done • 󰸁 ~30/110.2 pts (35v)"));
+    assert!(text.contains("✓ 1/1 est • 1 planned • 󰸂 ~15/35 pts (35v)"));
     assert!(text.contains(" Backlog • 3 items"));
 }
 
@@ -2744,7 +2740,10 @@ fn v_opens_a_focused_description_snackbar() {
     snapshot.work_items[0].title =
         "Here is the title and this one is too long to fit in the snackbar without truncation"
             .into();
-    snapshot.work_items[0].description = "## Details\n\nScrollable description".into();
+    snapshot.work_items[0].description = format!(
+        "## Details\n\nScrollable description {} WRAPPED-END",
+        "with enough context to require wrapping ".repeat(3)
+    );
     let mut page = BacklogPage::with_snapshot_for_test(snapshot);
     page.view_for_test()
         .base_mut()
@@ -2787,6 +2786,7 @@ fn v_opens_a_focused_description_snackbar() {
     let lines = rendered_lines(&terminal, area);
     let text = lines.concat();
     assert!(text.contains("Scrollable description"));
+    assert!(text.contains("WRAPPED-END"));
     assert!(text.contains("FIN-8 Here is the title and this one is too long"));
     assert!(text.contains("..."));
 
@@ -2802,6 +2802,22 @@ fn v_opens_a_focused_description_snackbar() {
         .cell((x as u16, y as u16))
         .unwrap();
     assert_eq!(key_cell.fg, tuicore::theme().muted_fg());
+
+    let mobile = Rect::new(0, 0, 60, 30);
+    page.layout(mobile, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(mobile.width, mobile.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            page.render(frame, mobile, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    assert!(
+        rendered_lines(&terminal, mobile)
+            .concat()
+            .contains("WRAPPED-END")
+    );
 }
 
 #[test]
@@ -3554,7 +3570,7 @@ fn status_change_updates_active_sprint_done_totals() {
     assert!(
         rendered_lines(&terminal, area)
             .concat()
-            .contains("5/5 (20c) pts • ✓ 1/1 • 1/1 items")
+            .contains("✓ 1/1 est • 1/1 done • 󰸂 5/5 pts (20c)")
     );
 }
 

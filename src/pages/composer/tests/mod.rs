@@ -2175,6 +2175,7 @@ fn composer_rows_show_current_ticket_properties_with_presentation_only_details()
                     }),
                     labels: Vec::new(),
                     fix_versions: Vec::new(),
+                    releases: Vec::new(),
                     epic_name: Some("Checkout reliability".into()),
                     story_points: None,
                     status_changed_at: None,
