@@ -126,7 +126,7 @@ pub(super) struct DiagramContent {
 
 enum DiagramImage {
     Loading(Receiver<Result<Image, String>>),
-    Ready(Image),
+    Ready(Box<Image>),
     Failed(String),
 }
 
@@ -352,7 +352,9 @@ impl TuiNode for DiagramContent {
                 DiagramImage::Loading(receiver) => match receiver.try_recv() {
                     Ok(Ok(mut rendered)) => {
                         rendered.preload(self.preview_size.0, self.preview_size.1);
-                        Some(DiagramImage::Ready(rendered.protocol(ImageProtocol::Kitty)))
+                        Some(DiagramImage::Ready(Box::new(
+                            rendered.protocol(ImageProtocol::Kitty),
+                        )))
                     }
                     Ok(Err(error)) => Some(DiagramImage::Failed(error)),
                     Err(mpsc::TryRecvError::Empty) => {
@@ -364,7 +366,7 @@ impl TuiNode for DiagramContent {
                     }
                 },
                 DiagramImage::Ready(image) => {
-                    result = result.merge(image.tick());
+                    result = result.merge(image.as_mut().tick());
                     None
                 }
                 DiagramImage::Failed(_) => None,

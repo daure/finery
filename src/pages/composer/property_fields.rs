@@ -442,10 +442,8 @@ impl BoundFixVersionsDropdown {
             self.ticket_id = ticket_id;
             self.generation = self.generation.saturating_add(1);
             self.versions.clear();
-            if remote_queries_allowed {
-                if let Some(project_key) = project_key {
-                    self.fetch_versions(project_key);
-                }
+            if remote_queries_allowed && let Some(project_key) = project_key {
+                self.fetch_versions(project_key);
             }
             changed = true;
         }

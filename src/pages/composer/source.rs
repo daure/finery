@@ -16,7 +16,12 @@ enum SourceRequest {
 }
 
 enum SourceResponse {
-    Selected(u64, String, String, Result<ComposerSourceTicket, String>),
+    Selected(
+        u64,
+        String,
+        String,
+        Box<Result<ComposerSourceTicket, String>>,
+    ),
     Refresh(
         u64,
         String,
@@ -104,7 +109,8 @@ impl SourceController {
             .name(format!("finery-jira-source-{generation}"))
             .spawn(move || {
                 let result = (|| {
-                    let mut sources = service.fetch_jira_for_composer(&[key.clone()])?;
+                    let mut sources =
+                        service.fetch_jira_for_composer(std::slice::from_ref(&key))?;
                     sources
                         .remove(&key)
                         .ok_or_else(|| format!("Jira did not return requested ticket: {key}"))
@@ -113,7 +119,7 @@ impl SourceController {
                     generation,
                     change_set_id,
                     id,
-                    result,
+                    Box::new(result),
                 ));
             })
         {
@@ -192,7 +198,7 @@ impl SourceController {
         while let Ok(response) = self.receiver.try_recv() {
             let (generation, change_set_id, responses, refreshing) = match response {
                 SourceResponse::Selected(generation, change_set_id, id, result) => {
-                    (generation, change_set_id, vec![(id, result)], false)
+                    (generation, change_set_id, vec![(id, *result)], false)
                 }
                 SourceResponse::Refresh(generation, change_set_id, responses) => {
                     (generation, change_set_id, responses, true)

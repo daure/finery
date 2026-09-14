@@ -172,7 +172,7 @@ fn attachment_calls_return_images_text_blobs_and_partial_errors() {
         ] {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0; 1024];
-            stream.read(&mut request).unwrap();
+            assert!(stream.read(&mut request).unwrap() > 0);
             stream.write_all(response.as_bytes()).unwrap();
             if response.starts_with("HTTP/1.1 200") {
                 stream.write_all(&remote_image).unwrap();

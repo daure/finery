@@ -78,12 +78,12 @@ fn clean_inline(source: &str) -> String {
     let mut output = String::new();
     let mut remaining = source;
     while !remaining.is_empty() {
-        if let Some(rest) = remaining.strip_prefix('\\') {
-            if let Some(character) = rest.chars().next() {
-                output.push(character);
-                remaining = &rest[character.len_utf8()..];
-                continue;
-            }
+        if let Some(rest) = remaining.strip_prefix('\\')
+            && let Some(character) = rest.chars().next()
+        {
+            output.push(character);
+            remaining = &rest[character.len_utf8()..];
+            continue;
         }
         if let Some((code, rest)) = inline_code(remaining) {
             output.push_str(code);

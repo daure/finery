@@ -402,7 +402,7 @@ struct FileContent {
 
 enum CachedAttachmentImage {
     Loading(Receiver<Result<Image, String>>),
-    Ready(Image),
+    Ready(Box<Image>),
     Failed(String),
 }
 
@@ -1172,9 +1172,9 @@ impl TuiNode for FileContent {
         for (key, cached) in &mut self.images {
             let next = match cached {
                 CachedAttachmentImage::Loading(receiver) => match receiver.try_recv() {
-                    Ok(Ok(image)) => Some(CachedAttachmentImage::Ready(
+                    Ok(Ok(image)) => Some(CachedAttachmentImage::Ready(Box::new(
                         image.protocol(ImageProtocol::Kitty),
-                    )),
+                    ))),
                     Ok(Err(error)) => Some(CachedAttachmentImage::Failed(error)),
                     Err(mpsc::TryRecvError::Disconnected) => Some(CachedAttachmentImage::Failed(
                         "image download stopped".into(),
@@ -1185,7 +1185,7 @@ impl TuiNode for FileContent {
                     }
                 },
                 CachedAttachmentImage::Ready(image) => {
-                    result = result.merge(image.tick());
+                    result = result.merge(image.as_mut().tick());
                     None
                 }
                 CachedAttachmentImage::Failed(_) => None,

@@ -97,12 +97,16 @@ pub(crate) fn ticket_summary_text(
         ));
     }
     if row.show_story_points {
-        let style = (row.story_points.is_some() && !row.story_points_estimated)
-            .then_some(text_style)
-            .unwrap_or(muted_style);
-        let style = (row.story_points.is_some() && row.story_points_estimated)
-            .then(|| style.add_modifier(Modifier::UNDERLINED))
-            .unwrap_or(style);
+        let style = if row.story_points.is_some() && !row.story_points_estimated {
+            text_style
+        } else {
+            muted_style
+        };
+        let style = if row.story_points.is_some() && row.story_points_estimated {
+            style.add_modifier(Modifier::UNDERLINED)
+        } else {
+            style
+        };
         append_metadata(&mut metadata, Span::styled(story_points_label(row), style));
     }
     append_metadata(
@@ -117,12 +121,13 @@ pub(crate) fn ticket_summary_text(
     }
     if !row.status.is_empty() {
         let mut status_text = row.status.clone();
-        if !row.done && row.show_time_in_status {
-            if let Some(changed_at) = row.status_changed_at {
-                let time =
-                    crate::store::work_items::format_time_in_status(chrono::Utc::now(), changed_at);
-                status_text.push_str(&format!(" ({time})"));
-            }
+        if !row.done
+            && row.show_time_in_status
+            && let Some(changed_at) = row.status_changed_at
+        {
+            let time =
+                crate::store::work_items::format_time_in_status(chrono::Utc::now(), changed_at);
+            status_text.push_str(&format!(" ({time})"));
         }
         append_metadata(&mut metadata, Span::styled(status_text, text_style));
     }
@@ -327,9 +332,11 @@ pub(crate) fn work_item_title_with_key_line_with_match(
 }
 
 fn ticket_key_style(row: &WorkItemRow, style: Style) -> Style {
-    row.done
-        .then(|| style.add_modifier(Modifier::CROSSED_OUT))
-        .unwrap_or(style)
+    if row.done {
+        style.add_modifier(Modifier::CROSSED_OUT)
+    } else {
+        style
+    }
 }
 
 fn search_match_spans(text: &str, query: Option<&str>, style: Style) -> Vec<Span<'static>> {
@@ -415,9 +422,11 @@ pub(crate) fn story_points_label(row: &WorkItemRow) -> String {
     let Some(points) = row.story_points else {
         return "-".into();
     };
-    let prefix = (row.story_points_estimated && row.story_points_from_average)
-        .then_some("~")
-        .unwrap_or("");
+    let prefix = if row.story_points_estimated && row.story_points_from_average {
+        "~"
+    } else {
+        ""
+    };
     if row.story_points_estimated && row.story_points_from_average {
         return format!("{prefix}{points:.1}");
     }
@@ -465,9 +474,11 @@ fn compact_labels_text(labels: &[String]) -> String {
             .collect::<Vec<_>>()
             .join("|");
         let hidden = labels.len().saturating_sub(index + 1);
-        let overflow = (hidden > 0)
-            .then(|| format!("|+{hidden}"))
-            .unwrap_or_default();
+        let overflow = if hidden > 0 {
+            format!("|+{hidden}")
+        } else {
+            String::new()
+        };
         if Line::from(format!("{candidate}{overflow}")).width() > LABEL_CHIP_TEXT_MAX_WIDTH {
             break;
         }
@@ -477,9 +488,11 @@ fn compact_labels_text(labels: &[String]) -> String {
     format!(
         "{}{}",
         displayed.join("|"),
-        (hidden > 0)
-            .then(|| format!("|+{hidden}"))
-            .unwrap_or_default()
+        if hidden > 0 {
+            format!("|+{hidden}")
+        } else {
+            String::new()
+        }
     )
 }
 

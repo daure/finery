@@ -686,10 +686,10 @@ impl TicketEditor {
             .filter(|id| !expanded.contains(id))
             .collect::<HashSet<_>>();
         for row in &rows {
-            if let Some(parent_id) = &row.parent_id {
-                if !collapsed.contains(parent_id) {
-                    expanded.insert(parent_id.clone());
-                }
+            if let Some(parent_id) = &row.parent_id
+                && !collapsed.contains(parent_id)
+            {
+                expanded.insert(parent_id.clone());
             }
         }
         expanded.extend(ticket_row_ancestor_ids(&rows, selected.as_deref()));
@@ -913,10 +913,8 @@ impl TicketEditor {
         if ticket_dialog_closed {
             self.pending_submission = None;
         }
-        if submit_confirmed {
-            if let Some(confirmed) = self.pending_submission.take() {
-                self.start_submit(confirmed, ctx);
-            }
+        if submit_confirmed && let Some(confirmed) = self.pending_submission.take() {
+            self.start_submit(confirmed, ctx);
         }
         if reparent_confirmed && let Some(action) = self.pending_reparent.borrow_mut().take() {
             if let Err(error) = self.state.borrow_mut().dispatch(action) {
@@ -965,7 +963,7 @@ impl TicketEditor {
                         .set_active_with_context(true, ctx);
                 }
                 AddTicketEvent::Include { ticket, placement } => {
-                    self.include_at(ticket, placement, ctx);
+                    self.include_at(*ticket, placement, ctx);
                     self.view
                         .base_mut()
                         .base_mut()
@@ -1813,11 +1811,11 @@ impl TicketEditor {
             })
             .count();
         self.table_mut().expand_all();
-        if matching_count == 1 {
-            if let Some(row_id) = self.exact_ticket_row_id(&number) {
-                self.number_jump.borrow_mut().clear();
-                self.jump_to_ticket(row_id, ctx);
-            }
+        if matching_count == 1
+            && let Some(row_id) = self.exact_ticket_row_id(&number)
+        {
+            self.number_jump.borrow_mut().clear();
+            self.jump_to_ticket(row_id, ctx);
         }
         ctx.request_redraw();
         ctx.request_tick();

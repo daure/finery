@@ -1028,19 +1028,20 @@ fn board_story_points_field(
 }
 
 fn story_points_field_id(configuration: &Value) -> String {
-    (configuration
+    if configuration
         .pointer("/estimation/type")
         .and_then(Value::as_str)
-        == Some("field"))
-    .then(|| {
+        == Some("field")
+    {
         configuration
             .pointer("/estimation/field/fieldId")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .trim()
             .to_owned()
-    })
-    .unwrap_or_default()
+    } else {
+        String::new()
+    }
 }
 
 fn should_discover_story_points(settings: &AppSettings, board_id: u64) -> bool {
@@ -2120,14 +2121,14 @@ fn validate_submission_descriptions(
         if !description_changed {
             continue;
         }
-        if let Some(original) = change.original.as_ref() {
-            if let Err(error) = ensure_description_can_be_overwritten(
+        if let Some(original) = change.original.as_ref()
+            && let Err(error) = ensure_description_can_be_overwritten(
                 original,
                 desired,
                 allow_unsafe_description_overwrite,
-            ) {
-                errors.push(format!("{}: {error}", change.id));
-            }
+            )
+        {
+            errors.push(format!("{}: {error}", change.id));
         }
         if let Err(error) =
             crate::store::composer::jira_adf::validate_markdown(&desired.description)
@@ -2292,6 +2293,10 @@ fn configured_client(settings: &AppSettings) -> Result<(Client, String, String, 
     ))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Submission keeps connection credentials and overwrite policy explicit"
+)]
 fn submit_change(
     client: &Client,
     base_url: &str,
@@ -2624,6 +2629,10 @@ fn created_issue_warning(key: &str, message: String) -> String {
     format!("Created {key}, but a follow-up did not complete: {message}")
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Update keeps connection credentials and overwrite policy explicit"
+)]
 fn update_issue(
     client: &Client,
     base_url: &str,
@@ -3408,6 +3417,10 @@ fn ensure_description_can_be_overwritten(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Recovery needs connection credentials and the desired ticket snapshot"
+)]
 fn failed_with_refresh(
     client: &Client,
     base_url: &str,

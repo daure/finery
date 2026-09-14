@@ -42,7 +42,7 @@ enum AddItemId {
 enum AddItem {
     New,
     Existing,
-    Ticket(ComposerSearchTicket),
+    Ticket(Box<ComposerSearchTicket>),
     Project(JiraProject),
 }
 
@@ -73,7 +73,7 @@ pub(super) enum AddTicketEvent {
         placement: PlacementTarget,
     },
     Include {
-        ticket: ComposerSearchTicket,
+        ticket: Box<ComposerSearchTicket>,
         placement: PlacementTarget,
     },
     Closed,
@@ -250,8 +250,11 @@ impl AddTicketMenu {
                     .filter(|ticket| self.legal_kinds.contains(&ticket.ticket.kind))
                     .collect::<Vec<_>>();
                 self.tickets = tickets.clone();
-                self.dropdown
-                    .set_rows(tickets.into_iter().map(AddItem::Ticket));
+                self.dropdown.set_rows(
+                    tickets
+                        .into_iter()
+                        .map(|ticket| AddItem::Ticket(Box::new(ticket))),
+                );
             }
             Err(error) => {
                 self.tickets.clear();
@@ -331,7 +334,7 @@ impl AddTicketMenu {
                     if let Some(ticket) = self.tickets.iter().find(|ticket| ticket.ticket.key == id)
                     {
                         self.events.push(AddTicketEvent::Include {
-                            ticket: ticket.clone(),
+                            ticket: Box::new(ticket.clone()),
                             placement: self.placement.clone(),
                         });
                     }

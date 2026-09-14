@@ -789,22 +789,19 @@ impl ChangeSetListView {
             self.view.set_active_with_context(false, ctx);
         }
         for event in self.view.base_mut().control.take_events() {
-            match event {
-                ListControlEvent::Removed { row_id } => {
-                    let deleted = {
-                        let mut state = self.state.borrow_mut();
-                        let _ = state.dispatch(ComposerAction::DeleteChangeSet(row_id.clone()));
-                        !state.change_sets.iter().any(|set| set.id == row_id)
-                    };
-                    if !deleted {
-                        self.sync();
-                        ctx.request_layout();
-                        ctx.request_redraw();
-                        continue;
-                    }
-                    self.service.delete_change_set(row_id);
+            if let ListControlEvent::Removed { row_id } = event {
+                let deleted = {
+                    let mut state = self.state.borrow_mut();
+                    let _ = state.dispatch(ComposerAction::DeleteChangeSet(row_id.clone()));
+                    !state.change_sets.iter().any(|set| set.id == row_id)
+                };
+                if !deleted {
+                    self.sync();
+                    ctx.request_layout();
+                    ctx.request_redraw();
+                    continue;
                 }
-                _ => {}
+                self.service.delete_change_set(row_id);
             }
         }
         for event in self.view.base_mut().control.data_view_mut().drain_events() {

@@ -1605,7 +1605,7 @@ impl ComposerService {
             ChangeSetPatchOperation::RemoveLocalSubtree { ticket_id } => {
                 let removed = state
                     .removal_preview(&ticket_id)
-                    .map_err(|message| invalid(message))?
+                    .map_err(invalid)?
                     .into_iter()
                     .map(|change| change.id.clone())
                     .collect::<Vec<_>>();

@@ -131,7 +131,7 @@ impl SubmissionController {
             SubmitChangeSetOutcome::Completed { tickets } => {
                 for ticket in tickets.iter().filter(|ticket| !ticket.submitted) {
                     self.notify_error(
-                        &format!("{} failed", ticket.ticket_id),
+                        format!("{} failed", ticket.ticket_id),
                         ticket
                             .message
                             .as_deref()

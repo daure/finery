@@ -58,7 +58,7 @@ enum BacklogRowContent {
         title: Text<'static>,
         search_text: String,
     },
-    WorkItem(BacklogWorkItem),
+    WorkItem(Box<BacklogWorkItem>),
 }
 
 #[derive(Clone)]
@@ -319,13 +319,16 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         .data_view_mut()
         .set_left_gutter_marker_by(move |row| match &row.content {
             BacklogRowContent::WorkItem(item) => Some(
-                (row_marker_visible.get()
+                if row_marker_visible.get()
                     && item
                         .runway
                         .as_ref()
-                        .is_some_and(|runway| runway.virtual_sprint % 2 == 1))
-                .then(|| Span::styled("┃", Style::default().fg(tuicore::theme().accent_fg())))
-                .unwrap_or_else(|| Span::raw(" ")),
+                        .is_some_and(|runway| runway.virtual_sprint % 2 == 1)
+                {
+                    Span::styled("┃", Style::default().fg(tuicore::theme().accent_fg()))
+                } else {
+                    Span::raw(" ")
+                },
             ),
             _ => None,
         });
@@ -928,15 +931,15 @@ impl BacklogTree {
         }
         if requires_move_unlocked && self.move_locked.get() {
             let _ = self.events.send(BacklogSectionEvent::MoveLocked);
-        } else if !self.control.is_reordering() {
-            if let Some((section_id, keys, source_order)) = self.selected_issue_keys() {
-                let event = if self.tickets_are_syncing(&keys) {
-                    BacklogSectionEvent::TicketsSyncing { keys }
-                } else {
-                    event_for_selection(section_id, keys, source_order)
-                };
-                let _ = self.events.send(event);
-            }
+        } else if !self.control.is_reordering()
+            && let Some((section_id, keys, source_order)) = self.selected_issue_keys()
+        {
+            let event = if self.tickets_are_syncing(&keys) {
+                BacklogSectionEvent::TicketsSyncing { keys }
+            } else {
+                event_for_selection(section_id, keys, source_order)
+            };
+            let _ = self.events.send(event);
         }
         ctx.stop_propagation();
         true
@@ -1154,12 +1157,12 @@ impl BacklogTree {
             .iter()
             .filter(|row| matches!(&row.content, BacklogRowContent::WorkItem(item) if crate::components::ticket_number_jump::ticket_number_matches(&item.item.key, &number)))
             .count();
-        if matching_count == 1 {
-            if let Some(row_id) = self.exact_ticket_row_id(&number) {
-                self.number_jump.borrow_mut().clear();
-                self.advance_wrap_geometry_epoch();
-                self.jump_to_ticket(&row_id);
-            }
+        if matching_count == 1
+            && let Some(row_id) = self.exact_ticket_row_id(&number)
+        {
+            self.number_jump.borrow_mut().clear();
+            self.advance_wrap_geometry_epoch();
+            self.jump_to_ticket(&row_id);
         }
         ctx.request_redraw();
         ctx.request_tick();
@@ -1338,7 +1341,7 @@ impl BacklogTree {
                 .trim()
                 .is_empty();
             if self.group_by_selection == Some(BacklogGroupBy::Release)
-                && search_active != !search.trim().is_empty()
+                && search_active == search.trim().is_empty()
             {
                 let snapshot = self.snapshot.clone();
                 self.set_snapshot(&snapshot);
@@ -1884,65 +1887,72 @@ impl TuiNode for BacklogTree {
             let outcome = self
                 .refresh
                 .dispatch_event(&EventRoute::new(refresh_path), event, ctx);
-            return self
-                .refocus_data_view_after_unfocus(event, ctx)
-                .then_some(EventOutcome::Handled)
-                .unwrap_or(outcome);
+            return if self.refocus_data_view_after_unfocus(event, ctx) {
+                EventOutcome::Handled
+            } else {
+                outcome
+            };
         }
         if let Some(velocity_path) = route.path.without_first_if(&ChildKey::new("velocity")) {
             let outcome = self
                 .velocity
                 .dispatch_event(&EventRoute::new(velocity_path), event, ctx);
-            return self
-                .refocus_data_view_after_unfocus(event, ctx)
-                .then_some(EventOutcome::Handled)
-                .unwrap_or(outcome);
+            return if self.refocus_data_view_after_unfocus(event, ctx) {
+                EventOutcome::Handled
+            } else {
+                outcome
+            };
         }
         if let Some(estimated_path) = route.path.without_first_if(&ChildKey::new("estimated")) {
             let outcome =
                 self.estimated
                     .dispatch_event(&EventRoute::new(estimated_path), event, ctx);
-            return self
-                .refocus_data_view_after_unfocus(event, ctx)
-                .then_some(EventOutcome::Handled)
-                .unwrap_or(outcome);
+            return if self.refocus_data_view_after_unfocus(event, ctx) {
+                EventOutcome::Handled
+            } else {
+                outcome
+            };
         }
         if let Some(issue_types_path) = route.path.without_first_if(&ChildKey::new("issue-types")) {
             let outcome =
                 self.issue_types
                     .dispatch_event(&EventRoute::new(issue_types_path), event, ctx);
-            return self
-                .refocus_data_view_after_unfocus(event, ctx)
-                .then_some(EventOutcome::Handled)
-                .unwrap_or(outcome);
+            return if self.refocus_data_view_after_unfocus(event, ctx) {
+                EventOutcome::Handled
+            } else {
+                outcome
+            };
         }
         if let Some(users_path) = route.path.without_first_if(&ChildKey::new("users")) {
             let outcome = self
                 .users
                 .dispatch_event(&EventRoute::new(users_path), event, ctx);
-            return self
-                .refocus_data_view_after_unfocus(event, ctx)
-                .then_some(EventOutcome::Handled)
-                .unwrap_or(outcome);
+            return if self.refocus_data_view_after_unfocus(event, ctx) {
+                EventOutcome::Handled
+            } else {
+                outcome
+            };
         }
         if let Some(statuses_path) = route.path.without_first_if(&ChildKey::new("statuses")) {
             let outcome = self
                 .statuses
                 .dispatch_event(&EventRoute::new(statuses_path), event, ctx);
-            return self
-                .refocus_data_view_after_unfocus(event, ctx)
-                .then_some(EventOutcome::Handled)
-                .unwrap_or(outcome);
+            return if self.refocus_data_view_after_unfocus(event, ctx) {
+                EventOutcome::Handled
+            } else {
+                outcome
+            };
         }
         if let Some(group_by_path) = route.path.without_first_if(&ChildKey::new("group-by")) {
             let outcome = self
                 .group_by
                 .dispatch_event(&EventRoute::new(group_by_path), event, ctx);
             self.drain_group_by_menu(ctx);
-            return self
-                .refocus_data_view_after_unfocus(event, ctx)
-                .then_some(EventOutcome::Handled)
-                .unwrap_or(outcome);
+            return if self.refocus_data_view_after_unfocus(event, ctx) {
+                EventOutcome::Handled
+            } else {
+                outcome
+            };
         }
         if let Some(web_path) = route.path.without_first_if(&ChildKey::new("web")) {
             let web_was_open = self.web.is_open();
@@ -1950,10 +1960,11 @@ impl TuiNode for BacklogTree {
                 .web
                 .dispatch_event(&EventRoute::new(web_path), event, ctx);
             self.drain_web_menu(web_was_open);
-            return self
-                .refocus_data_view_after_unfocus(event, ctx)
-                .then_some(EventOutcome::Handled)
-                .unwrap_or(outcome);
+            return if self.refocus_data_view_after_unfocus(event, ctx) {
+                EventOutcome::Handled
+            } else {
+                outcome
+            };
         }
         if route
             .path
@@ -2766,6 +2777,10 @@ fn backlog_section_row(snapshot: &BacklogSnapshot) -> BacklogRow {
 fn section_row_id(section: &str) -> String {
     format!("section:{section}")
 }
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Row construction combines section geometry and ticket presentation inputs"
+)]
 fn work_item_row(
     item: &WorkItem,
     section: &str,
@@ -2798,7 +2813,7 @@ fn work_item_row(
             .filter(|parent| item_keys.contains(parent))
             .map(|parent| ticket_row_id(parent, row_namespace))
             .or_else(|| Some(root_parent_id.into())),
-        content: BacklogRowContent::WorkItem(BacklogWorkItem {
+        content: BacklogRowContent::WorkItem(Box::new(BacklogWorkItem {
             item: WorkItemRow {
                 id: item.key.clone(),
                 key: item.key.clone(),
@@ -2832,7 +2847,7 @@ fn work_item_row(
             subtask_progress: item.subtask_progress.clone(),
             fix_versions: item.fix_versions.clone(),
             epic_name: item.epic_name.clone(),
-        }),
+        })),
     }
 }
 

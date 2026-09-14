@@ -352,12 +352,7 @@ fn stale_source_responses_do_not_update_another_change_set_or_retry_blocked_tick
         ticket: stale,
     });
 
-    assert!(
-        state
-            .sources
-            .get(&("CS-2".into(), "NEW-1".into()))
-            .is_none()
-    );
+    assert!(!state.sources.contains_key(&("CS-2".into(), "NEW-1".into())));
 }
 
 #[test]

@@ -147,9 +147,7 @@ impl RankRefreshRetry {
     }
 
     pub(super) fn elapse(&mut self, dt: Duration) -> Option<bool> {
-        let Some(remaining) = self.remaining else {
-            return None;
-        };
+        let remaining = self.remaining?;
         if dt >= remaining {
             self.remaining = None;
             Some(std::mem::take(&mut self.preserve_optimistic_view))
@@ -1215,9 +1213,11 @@ impl BacklogPage {
                         story_points,
                         epic,
                         release,
-                        section_moves_available
-                            .then(|| transfer_destinations(self.snapshot.as_ref(), &section_id))
-                            .unwrap_or_default(),
+                        if section_moves_available {
+                            transfer_destinations(self.snapshot.as_ref(), &section_id)
+                        } else {
+                            Vec::new()
+                        },
                         ctx,
                     ) {
                         self.report_move_locked();
@@ -2157,9 +2157,7 @@ impl BacklogPage {
     }
 
     fn show_optimistic_status(&mut self, status: &StatusTransition) -> Option<PendingStatusChange> {
-        let Some(snapshot) = self.snapshot.as_ref() else {
-            return None;
-        };
+        let snapshot = self.snapshot.as_ref()?;
         let keys = status
             .issues
             .iter()
@@ -2190,9 +2188,7 @@ impl BacklogPage {
         keys: &[String],
         assignee: &str,
     ) -> Option<PendingAssigneeChange> {
-        let Some(snapshot) = self.snapshot.as_ref() else {
-            return None;
-        };
+        let snapshot = self.snapshot.as_ref()?;
         let original_items = ticket_items_by_key(snapshot, keys)?;
         let mut optimistic = snapshot.clone();
         if !apply_assignee_to_snapshot(&mut optimistic, keys, assignee) {
@@ -2546,15 +2542,14 @@ impl BacklogPage {
                     result,
                 });
             })
+            && self.generations.complete_rank(generation)
         {
-            if self.generations.complete_rank(generation) {
-                self.ranking = false;
-                self.view.base_mut().base_mut().set_loading(false);
-                self.move_locked.set(false);
-                self.restore_transfer_snapshot();
-                self.service
-                    .report_error(format!("Could not start Jira ticket move: {error}"));
-            }
+            self.ranking = false;
+            self.view.base_mut().base_mut().set_loading(false);
+            self.move_locked.set(false);
+            self.restore_transfer_snapshot();
+            self.service
+                .report_error(format!("Could not start Jira ticket move: {error}"));
         }
     }
 
@@ -2656,9 +2651,7 @@ impl BacklogPage {
         section_id: &str,
         order: &[String],
     ) -> Option<BacklogSnapshot> {
-        let Some(snapshot) = self.snapshot.as_ref() else {
-            return None;
-        };
+        let snapshot = self.snapshot.as_ref()?;
         let rollback_snapshot = snapshot.clone();
         let mut optimistic = rollback_snapshot.clone();
         if section_id == "backlog" {
@@ -2725,16 +2718,15 @@ impl BacklogPage {
                     result: service.jira_rank(&plan),
                 });
             })
+            && self.generations.complete_rank(generation)
         {
-            if self.generations.complete_rank(generation) {
-                self.ranking = false;
-                self.view.base_mut().base_mut().set_loading(false);
-                self.active_rank_plan = None;
-                self.restore_rank_snapshot();
-                self.move_locked.set(false);
-                self.service
-                    .report_error(format!("Could not start Jira rank: {error}"));
-            }
+            self.ranking = false;
+            self.view.base_mut().base_mut().set_loading(false);
+            self.active_rank_plan = None;
+            self.restore_rank_snapshot();
+            self.move_locked.set(false);
+            self.service
+                .report_error(format!("Could not start Jira rank: {error}"));
         }
     }
 
@@ -3157,7 +3149,7 @@ pub(super) fn source_transfer_highlight_key(
         .iter()
         .enumerate()
         .filter_map(|(index, key)| moved_keys.contains(key).then_some(index))
-        .last()?;
+        .next_back()?;
     source_order[last_moved_index + 1..]
         .iter()
         .find(|key| !moved_keys.contains(key))

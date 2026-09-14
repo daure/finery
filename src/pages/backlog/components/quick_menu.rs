@@ -349,6 +349,10 @@ impl BacklogQuickMenu {
         *self.backlog_keys.borrow_mut() = backlog_keys;
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Menu opening receives the selected ticket fields and navigation context"
+    )]
     pub(in crate::pages::backlog) fn open(
         &mut self,
         section_id: String,
