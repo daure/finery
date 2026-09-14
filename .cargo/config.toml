@@ -1,4 +1,5 @@
 [alias]
+release = ["run", "--quiet", "--manifest-path", "tools/release-command/Cargo.toml", "--target-dir", "target/release-command-helper", "--", "release"]
 patch = ["run", "--quiet", "--manifest-path", "tools/release-command/Cargo.toml", "--target-dir", "target/release-command-helper", "--", "patch"]
 minor = ["run", "--quiet", "--manifest-path", "tools/release-command/Cargo.toml", "--target-dir", "target/release-command-helper", "--", "minor"]
 major = ["run", "--quiet", "--manifest-path", "tools/release-command/Cargo.toml", "--target-dir", "target/release-command-helper", "--", "major"]

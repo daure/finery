@@ -3,7 +3,13 @@ use std::path::Path;
 use std::process::{Command, ExitCode};
 
 fn usage(bump: &str) {
-    println!("Usage: cargo {bump}\n\nRun Finery {bump} release workflow.");
+    if bump == "release" {
+        println!(
+            "Usage: cargo release [patch|minor|major]\n\nPush a release for GitHub Actions (default: patch)."
+        );
+    } else {
+        println!("Usage: cargo {bump}\n\nPush a Finery {bump} release for GitHub Actions.");
+    }
 }
 
 fn main() -> ExitCode {
@@ -17,10 +23,21 @@ fn main() -> ExitCode {
         usage(&bump);
         return ExitCode::SUCCESS;
     }
-    if !remaining.is_empty() {
+    let release_bump = if bump == "release" {
+        match remaining.as_slice() {
+            [] => "patch",
+            [value] if matches!(value.as_str(), "patch" | "minor" | "major") => value,
+            _ => {
+                usage(&bump);
+                return ExitCode::from(2);
+            }
+        }
+    } else if remaining.is_empty() && matches!(bump.as_str(), "patch" | "minor" | "major") {
+        &bump
+    } else {
         usage(&bump);
         return ExitCode::from(2);
-    }
+    };
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let Some(repo_root) = manifest_dir.ancestors().nth(2) else {
         eprintln!("error: cannot locate Finery root from {manifest_dir:?}");
@@ -28,7 +45,7 @@ fn main() -> ExitCode {
     };
     let release_script = repo_root.join("scripts/release.sh");
     match Command::new(&release_script)
-        .arg(&bump)
+        .arg(release_bump)
         .current_dir(repo_root)
         .status()
     {

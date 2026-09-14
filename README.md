@@ -44,15 +44,31 @@ The change-set action shortcuts are configurable through `composer.change_set_ac
 
 ## Install
 
-On another machine:
+Prebuilt releases support **Ubuntu 24.04 or newer on x86_64**. Rust is not required. Download and run the installer from the [latest GitHub Release](https://github.com/daure/finery/releases/latest):
+
+```bash
+installer="$(mktemp)"
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/daure/finery/releases/latest/download/finery-installer.sh \
+  -o "$installer" && sh "$installer"
+rm -f "$installer"
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+finery --help
+```
+
+The installer places the binary in `$CARGO_HOME/bin` (default `~/.cargo/bin`). Add that directory to your shell's PATH permanently if needed. The Releases page also provides a `.tar.xz` archive and SHA-256 checksum for manual installation; versioned releases remain available for rollback.
+
+### Update
+
+Close running Finery sessions, then rerun the installer commands above to download the latest stable binary. If you installed the background MCP service, run `finery service stop` before updating and `finery service start` afterwards. Restart stdio MCP clients to load the updated executable. Your settings and database stay in their normal data directories; back up the database before an upgrade or rollback because older binaries may not support newer database schemas.
+
+### Install from crates.io
+
+For other platforms or source-based installation, install Rust and use:
 
 ```bash
 cargo install finery --locked
-```
-
-Update later:
-
-```bash
+# Update from source:
 cargo install finery --locked --force
 ```
 
@@ -92,4 +108,29 @@ Service lifecycle supports Linux systemd-user and macOS launchd. HTTP stays loop
 
 ## Release
 
-Requires a clean Git tree and crates.io credentials from `cargo login`. Run `cargo patch`, `cargo minor`, or `cargo major`. The release workflow checks crates.io for the latest stable Tuicore and whether the release version is available, updates the dependency and lockfile when needed, then runs tests, package validation, and publish dry-run. After validation it shows exact versions and asks once before commit, tag, and live publish. It never pushes; follow the printed push commands after successful publication.
+From a clean `main` checkout with Git push access, Python 3.11+, Rust, and an authenticated GitHub CLI (`gh auth login`):
+
+```bash
+cargo release          # patch: 0.27.0 -> 0.27.1
+cargo release minor    # minor: 0.27.0 -> 0.28.0
+cargo release major   # major: 0.27.0 -> 1.0.0
+# Equivalent command without compiling the tiny Cargo helper:
+./scripts/release.sh patch
+```
+
+The command checks the branch and published Tuicore dependency, bumps Finery, resolves the release lockfile against crates.io, commits, and atomically pushes `main` and its `vX.Y.Z` tag. It returns without waiting for compilation. Existing `cargo patch`, `cargo minor`, and `cargo major` aliases use the same release flow.
+
+The [Release workflow](https://github.com/daure/finery/actions/workflows/release.yml) checks formatting, runs Clippy with warnings denied, runs tests and package validation, then uses cargo-dist to build and smoke-test an Ubuntu x86_64 archive. After checks pass it publishes to crates.io using the repository's encrypted `CARGO_REGISTRY_TOKEN` secret, then publishes the GitHub Release and installer. All work runs in one job, with no Actions artifact uploads. Release downloads persist until deleted.
+
+Inspect runs with `gh run list --workflow release.yml` and `gh run watch RUN_ID`. Retry a transient failure with `gh run rerun RUN_ID --failed`; an already-published crate version is skipped. For a source fix, commit the fix and run a new patch release. Tags are immutable: do not move a published tag. If the local push fails, inspect the release commit/tag and use the exact retry command printed by the script.
+
+### Local Tuicore development
+
+Finery declares Tuicore as a crates.io dependency. To compile against your local working copy, put this in your personal `~/.cargo/config.toml`:
+
+```toml
+[patch.crates-io]
+tuicore = { path = "/absolute/path/to/tuicore" }
+```
+
+Local builds compile the working copy whenever it satisfies the dependency requirement and is selected by Cargo; `cargo update -p tuicore` selects the override when needed. This can modify `Cargo.lock`, which must be committed or deliberately restored before releasing. The release command resolves Tuicore from crates.io without the personal override. Publish required Tuicore changes first, update Finery's declared dependency version, and commit those changes before releasing. CI builds use the committed registry lockfile; users only download the compiled Finery binary.

@@ -1,2 +1,3 @@
 /target
 /tools/release-command/Cargo.lock
+__pycache__/
