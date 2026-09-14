@@ -37,7 +37,7 @@ use crate::{
     jira::{JiraOption, version_name_cmp},
     store::work_items::{
         BacklogSnapshot, RunwayCapacitySource, RunwayTicket, Sprint, SprintCapacityState,
-        SubtaskProgress, WorkItem,
+        SubtaskProgress, WorkItem, release,
     },
 };
 
@@ -79,6 +79,7 @@ pub(in crate::pages::backlog) enum BacklogSectionEvent {
     EstimatedChanged(bool),
     IssueTypesChanged(Vec<String>),
     UsersChanged(Vec<String>),
+    StatusesChanged(Vec<String>),
     OpenVelocity,
     OpenReports,
     OpenTimeline,
@@ -333,6 +334,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
     let estimated_events = events.clone();
     let issue_type_events = events.clone();
     let user_events = events.clone();
+    let status_events = events.clone();
     let issue_type_labels = Rc::new(RefCell::new(issue_type_labels(&issue_types)));
     let selected_issue_type_labels = Rc::clone(&issue_type_labels);
     BacklogTree {
@@ -390,6 +392,21 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         .on_select(move |selected| {
             let _ = user_events.send(BacklogSectionEvent::UsersChanged(selected));
         }),
+        statuses: Dropdown::multi(
+            selectable_statuses(snapshot),
+            |status: &String| status.clone(),
+            |status| status.clone(),
+        )
+        .label_position(DropdownLabelPosition::Inline)
+        .alt_style(true)
+        .variant(DropdownVariant::Filled)
+        .placeholder("Status")
+        .field_padding_left(1)
+        .hotkey("shift+s")
+        .max_popup_width(24)
+        .on_select(move |selected| {
+            let _ = status_events.send(BacklogSectionEvent::StatusesChanged(selected));
+        }),
         group_by: MenuButton::new(
             grouping_label(None, false),
             [
@@ -417,6 +434,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         estimated_area: ratatui::layout::Rect::default(),
         issue_types_area: ratatui::layout::Rect::default(),
         users_area: ratatui::layout::Rect::default(),
+        statuses_area: ratatui::layout::Rect::default(),
         group_by_area: ratatui::layout::Rect::default(),
         web_area: ratatui::layout::Rect::default(),
         control_area: ratatui::layout::Rect::default(),
@@ -444,6 +462,7 @@ pub(in crate::pages::backlog) struct BacklogTree {
     estimated: Toggle<()>,
     issue_types: Dropdown<JiraOption, String>,
     users: Dropdown<String, String>,
+    statuses: Dropdown<String, String>,
     group_by: MenuButton<GroupByMenuItem>,
     web: MenuButton<WebMenuItem>,
     loading: bool,
@@ -452,6 +471,7 @@ pub(in crate::pages::backlog) struct BacklogTree {
     estimated_area: ratatui::layout::Rect,
     issue_types_area: ratatui::layout::Rect,
     users_area: ratatui::layout::Rect,
+    statuses_area: ratatui::layout::Rect,
     group_by_area: ratatui::layout::Rect,
     web_area: ratatui::layout::Rect,
     control_area: ratatui::layout::Rect,
@@ -475,6 +495,7 @@ impl BacklogTree {
     pub(in crate::pages::backlog) fn set_snapshot(&mut self, snapshot: &BacklogSnapshot) {
         self.snapshot = snapshot.clone();
         self.users.set_rows(selectable_users(snapshot));
+        self.statuses.set_rows(selectable_statuses(snapshot));
         let highlighted = self.control.data_view().highlighted_id();
         let expanded = self.control.data_view().tree_expansion_snapshot();
         let highlighted_parent = highlighted.as_ref().and_then(|id| {
@@ -503,7 +524,7 @@ impl BacklogTree {
             .into_iter()
             .filter(|id| self.is_expandable(id))
             .collect::<HashSet<_>>();
-        if !self.filters.issue_types.is_empty() {
+        if !self.filters.issue_types.is_empty() || !self.filters.statuses.is_empty() {
             expanded.extend(self.control.items().iter().filter_map(|row| {
                 row.parent_id
                     .as_deref()
@@ -564,6 +585,13 @@ impl BacklogTree {
         self.set_snapshot(&snapshot);
     }
 
+    pub(in crate::pages::backlog) fn set_statuses_filter(&mut self, statuses: Vec<String>) {
+        self.filters.statuses = statuses;
+        self.runway_markers_visible.set(self.show_runway_bands());
+        let snapshot = self.snapshot.clone();
+        self.set_snapshot(&snapshot);
+    }
+
     pub(in crate::pages::backlog) fn reset_to_home(&mut self) {
         self.filters = BacklogFilters::default();
         self.estimated.set_value(true);
@@ -571,6 +599,8 @@ impl BacklogTree {
         self.issue_types.clear_selection();
         self.users.close();
         self.users.clear_selection();
+        self.statuses.close();
+        self.statuses.clear_selection();
         self.group_by_selection = None;
         self.group_by.set_disabled(true);
         self.group_by.set_disabled(false);
@@ -611,6 +641,7 @@ impl BacklogTree {
         self.estimated.set_disabled(loading);
         self.issue_types.set_disabled(loading);
         self.users.set_disabled(loading);
+        self.statuses.set_disabled(loading);
         self.group_by.set_disabled(loading);
     }
 
@@ -1467,6 +1498,12 @@ impl BacklogTree {
             .set_label(if compact { "󰑓 R" } else { "󰑓 Refresh" });
         self.estimated
             .set_label(if compact { "󰑭" } else { "󰑭 Estimated" });
+        self.users
+            .set_placeholder(if compact { "󰀄" } else { "User" });
+        self.issue_types
+            .set_placeholder(if compact { "󰡯" } else { "Type" });
+        self.statuses
+            .set_placeholder(if compact { "" } else { "Status" });
         self.group_by
             .set_label(grouping_label(self.group_by_selection, compact));
         self.web.set_label(if compact { "󰖟" } else { "Web" });
@@ -1567,10 +1604,18 @@ impl TuiNode for BacklogTree {
 
             let row_y = area.y.saturating_add(header_height);
             let issue_types_width = dropdown_width(area.width, &self.issue_types);
-            let users_width = users_width(
+            let statuses_width = users_width(
                 area.width
                     .saturating_sub(issue_types_width)
                     .saturating_sub(u16::from(issue_types_width > 0)),
+                &self.statuses,
+            );
+            let users_width = users_width(
+                area.width
+                    .saturating_sub(issue_types_width)
+                    .saturating_sub(statuses_width)
+                    .saturating_sub(u16::from(issue_types_width > 0))
+                    .saturating_sub(u16::from(statuses_width > 0)),
                 &self.users,
             );
             let estimated_width = <Toggle<()> as TuiNode<()>>::measure(
@@ -1579,8 +1624,10 @@ impl TuiNode for BacklogTree {
                     area.width
                         .saturating_sub(issue_types_width)
                         .saturating_sub(users_width)
+                        .saturating_sub(statuses_width)
                         .saturating_sub(u16::from(issue_types_width > 0))
-                        .saturating_sub(u16::from(users_width > 0)),
+                        .saturating_sub(u16::from(users_width > 0))
+                        .saturating_sub(u16::from(statuses_width > 0)),
                     1,
                 ),
             )
@@ -1590,8 +1637,10 @@ impl TuiNode for BacklogTree {
                 area.width
                     .saturating_sub(issue_types_width)
                     .saturating_sub(users_width)
+                    .saturating_sub(statuses_width)
                     .saturating_sub(u16::from(issue_types_width > 0))
-                    .saturating_sub(u16::from(users_width > 0)),
+                    .saturating_sub(u16::from(users_width > 0))
+                    .saturating_sub(u16::from(statuses_width > 0)),
             );
             self.estimated_area = ratatui::layout::Rect::new(
                 area.x.saturating_add(
@@ -1599,8 +1648,10 @@ impl TuiNode for BacklogTree {
                         .saturating_sub(estimated_width)
                         .saturating_sub(users_width)
                         .saturating_sub(issue_types_width)
+                        .saturating_sub(statuses_width)
                         .saturating_sub(u16::from(users_width > 0))
-                        .saturating_sub(u16::from(issue_types_width > 0)),
+                        .saturating_sub(u16::from(issue_types_width > 0))
+                        .saturating_sub(u16::from(statuses_width > 0)),
                 ),
                 row_y,
                 estimated_width,
@@ -1624,12 +1675,23 @@ impl TuiNode for BacklogTree {
                 issue_types_width,
                 1,
             );
+            self.statuses_area = ratatui::layout::Rect::new(
+                self.issue_types_area
+                    .x
+                    .saturating_add(issue_types_width)
+                    .saturating_add(u16::from(issue_types_width > 0)),
+                row_y,
+                statuses_width,
+                1,
+            );
         } else {
             let mut remaining_width = area.width;
             let refresh_width = button_width(&self.refresh).min(remaining_width);
             remaining_width = remaining_width.saturating_sub(refresh_width + 1);
             let velocity_width = button_width(&self.velocity).min(remaining_width);
             remaining_width = remaining_width.saturating_sub(velocity_width + 1);
+            let statuses_width = users_width(remaining_width, &self.statuses);
+            remaining_width = remaining_width.saturating_sub(statuses_width + 1);
             let issue_types_width = dropdown_width(remaining_width, &self.issue_types);
             remaining_width = remaining_width.saturating_sub(issue_types_width + 1);
             let users_width = users_width(remaining_width, &self.users);
@@ -1667,8 +1729,17 @@ impl TuiNode for BacklogTree {
                 velocity_width,
                 1,
             );
-            self.issue_types_area = ratatui::layout::Rect::new(
+            self.statuses_area = ratatui::layout::Rect::new(
                 self.velocity_area
+                    .x
+                    .saturating_sub(statuses_width)
+                    .saturating_sub(u16::from(statuses_width > 0)),
+                area.y,
+                statuses_width,
+                1,
+            );
+            self.issue_types_area = ratatui::layout::Rect::new(
+                self.statuses_area
                     .x
                     .saturating_sub(issue_types_width)
                     .saturating_sub(u16::from(issue_types_width > 0)),
@@ -1737,6 +1808,13 @@ impl TuiNode for BacklogTree {
                 ctx,
             )
         });
+        ctx.push_slot(ChildKey::new("statuses"), self.statuses_area, |ctx| {
+            <Dropdown<String, String> as TuiNode<()>>::layout(
+                &mut self.statuses,
+                self.statuses_area,
+                ctx,
+            )
+        });
         if !compact_toolbar {
             ctx.push_slot(ChildKey::new("velocity"), self.velocity_area, |ctx| {
                 self.velocity.layout(self.velocity_area, ctx)
@@ -1771,6 +1849,7 @@ impl TuiNode for BacklogTree {
         self.estimated.render(frame, self.estimated_area);
         self.users.render(frame, self.users_area, ctx);
         self.issue_types.render(frame, self.issue_types_area, ctx);
+        self.statuses.render(frame, self.statuses_area, ctx);
         self.velocity.render(frame, self.velocity_area);
         self.refresh.render(frame, self.refresh_area);
     }
@@ -1782,6 +1861,7 @@ impl TuiNode for BacklogTree {
                 || self.estimated.event(event, ctx) == EventOutcome::Handled
                 || self.issue_types.event(event, ctx) == EventOutcome::Handled
                 || self.users.event(event, ctx) == EventOutcome::Handled
+                || self.statuses.event(event, ctx) == EventOutcome::Handled
                 || self.group_by.event(event, ctx) == EventOutcome::Handled
                 || self.web.event(event, ctx) == EventOutcome::Handled)
         {
@@ -1840,6 +1920,15 @@ impl TuiNode for BacklogTree {
             let outcome = self
                 .users
                 .dispatch_event(&EventRoute::new(users_path), event, ctx);
+            return self
+                .refocus_data_view_after_unfocus(event, ctx)
+                .then_some(EventOutcome::Handled)
+                .unwrap_or(outcome);
+        }
+        if let Some(statuses_path) = route.path.without_first_if(&ChildKey::new("statuses")) {
+            let outcome = self
+                .statuses
+                .dispatch_event(&EventRoute::new(statuses_path), event, ctx);
             return self
                 .refocus_data_view_after_unfocus(event, ctx)
                 .then_some(EventOutcome::Handled)
@@ -1932,6 +2021,11 @@ impl TuiNode for BacklogTree {
                 dt,
                 settings,
             ))
+            .merge(<Dropdown<String, String> as TuiNode<()>>::tick(
+                &mut self.statuses,
+                dt,
+                settings,
+            ))
             .merge(self.group_by.tick(dt, settings))
             .merge(self.web.tick(dt, settings))
             .merge(number_jump)
@@ -1962,6 +2056,10 @@ impl TuiNode for BacklogTree {
             self.users.dispatch_focus(&users_target, focused, ctx);
             return;
         }
+        if let Some(statuses_target) = target.for_child(&ChildKey::new("statuses")) {
+            self.statuses.dispatch_focus(&statuses_target, focused, ctx);
+            return;
+        }
         if let Some(group_by_target) = target.for_child(&ChildKey::new("group-by")) {
             self.group_by.dispatch_focus(&group_by_target, focused, ctx);
             return;
@@ -1977,6 +2075,7 @@ impl TuiNode for BacklogTree {
         self.estimated.init(ctx);
         self.issue_types.init(ctx);
         self.users.init(ctx);
+        self.statuses.init(ctx);
         self.group_by.init(ctx);
     }
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
@@ -1984,6 +2083,7 @@ impl TuiNode for BacklogTree {
         self.estimated.mount(ctx);
         self.issue_types.mount(ctx);
         self.users.mount(ctx);
+        self.statuses.mount(ctx);
         self.group_by.mount(ctx);
     }
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
@@ -1991,6 +2091,7 @@ impl TuiNode for BacklogTree {
         self.estimated.unmount(ctx);
         self.issue_types.unmount(ctx);
         self.users.unmount(ctx);
+        self.statuses.unmount(ctx);
         self.group_by.unmount(ctx);
     }
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
@@ -1998,6 +2099,7 @@ impl TuiNode for BacklogTree {
         self.estimated.destroy(ctx);
         self.issue_types.destroy(ctx);
         self.users.destroy(ctx);
+        self.statuses.destroy(ctx);
         self.group_by.destroy(ctx);
     }
 }
@@ -2006,6 +2108,7 @@ struct BacklogFilters {
     estimated: bool,
     issue_types: Vec<String>,
     users: Vec<String>,
+    statuses: Vec<String>,
 }
 
 impl Default for BacklogFilters {
@@ -2014,13 +2117,17 @@ impl Default for BacklogFilters {
             estimated: true,
             issue_types: Vec::new(),
             users: Vec::new(),
+            statuses: Vec::new(),
         }
     }
 }
 
 impl BacklogFilters {
     fn is_active(&self) -> bool {
-        !self.estimated || !self.issue_types.is_empty() || !self.users.is_empty()
+        !self.estimated
+            || !self.issue_types.is_empty()
+            || !self.users.is_empty()
+            || !self.statuses.is_empty()
     }
 }
 
@@ -2058,6 +2165,21 @@ fn selectable_users(snapshot: &BacklogSnapshot) -> Vec<String> {
     users.sort_unstable_by_key(|user| user.to_ascii_lowercase());
     users.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
     users
+}
+
+fn selectable_statuses(snapshot: &BacklogSnapshot) -> Vec<String> {
+    let mut statuses = snapshot
+        .sprints
+        .iter()
+        .flat_map(|sprint| &sprint.work_items)
+        .chain(&snapshot.work_items)
+        .map(|item| item.status.trim())
+        .filter(|status| !status.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    statuses.sort_unstable_by_key(|status| status.to_ascii_lowercase());
+    statuses.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    statuses
 }
 
 fn backlog_rows(
@@ -2136,7 +2258,7 @@ fn grouped_backlog_rows(
         .chain(visible_work_items(&snapshot.work_items, filters))
         .collect::<Vec<_>>();
 
-    grouped_work_items(&visible_items, group_by)
+    grouped_work_items(snapshot, &visible_items, group_by)
         .into_iter()
         .flat_map(|group| {
             let group_id = group_row_id(group_by, &group.label);
@@ -2218,6 +2340,7 @@ struct WorkItemGroup<'a> {
 }
 
 fn grouped_work_items<'a>(
+    snapshot: &BacklogSnapshot,
     items: &[&'a WorkItem],
     group_by: BacklogGroupBy,
 ) -> Vec<WorkItemGroup<'a>> {
@@ -2253,11 +2376,18 @@ fn grouped_work_items<'a>(
             root_count: roots.len(),
         })
         .collect::<Vec<_>>();
-    groups.sort_unstable_by(|left, right| group_label_cmp(group_by, &left.label, &right.label));
+    groups.sort_unstable_by(|left, right| {
+        group_label_cmp(snapshot, group_by, &left.label, &right.label)
+    });
     groups
 }
 
-fn group_label_cmp(group_by: BacklogGroupBy, left: &str, right: &str) -> std::cmp::Ordering {
+fn group_label_cmp(
+    snapshot: &BacklogSnapshot,
+    group_by: BacklogGroupBy,
+    left: &str,
+    right: &str,
+) -> std::cmp::Ordering {
     match (
         is_unassigned_group_label(left),
         is_unassigned_group_label(right),
@@ -2265,7 +2395,16 @@ fn group_label_cmp(group_by: BacklogGroupBy, left: &str, right: &str) -> std::cm
         (true, false) => std::cmp::Ordering::Greater,
         (false, true) => std::cmp::Ordering::Less,
         _ => match group_by {
-            BacklogGroupBy::Release => version_name_cmp(left, right),
+            BacklogGroupBy::Release => match (
+                release::scheduled_dates(snapshot, left),
+                release::scheduled_dates(snapshot, right),
+            ) {
+                (Some(left_dates), Some(right_dates)) => left_dates.cmp(&right_dates),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+            .then_with(|| version_name_cmp(left, right)),
             BacklogGroupBy::Epic => left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase()),
         },
     }
@@ -2381,6 +2520,11 @@ fn matches_filters(item: &WorkItem, filters: &BacklogFilters) -> bool {
                 .users
                 .iter()
                 .any(|user| item.assignee.eq_ignore_ascii_case(user)))
+        && (filters.statuses.is_empty()
+            || filters
+                .statuses
+                .iter()
+                .any(|status| item.status.eq_ignore_ascii_case(status)))
 }
 
 fn initially_expanded_rows(
@@ -2394,7 +2538,7 @@ fn initially_expanded_rows(
             .flat_map(|sprint| &sprint.work_items)
             .chain(&snapshot.work_items)
             .collect::<Vec<_>>();
-        return grouped_work_items(&items, group_by)
+        return grouped_work_items(snapshot, &items, group_by)
             .into_iter()
             .flat_map(|group| {
                 let group_id = group_row_id(group_by, &group.label);

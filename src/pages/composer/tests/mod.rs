@@ -49,6 +49,9 @@ use super::web_links::BoundWebLinks;
 
 const TEST_WIDTH: u16 = 96;
 
+mod archive;
+mod quick_menu;
+
 fn share_ticket(key: &str, title: &str, kind: TicketKind, parent_key: Option<&str>) -> Ticket {
     Ticket {
         key: key.into(),
@@ -96,6 +99,8 @@ fn share_set(tickets: Vec<TicketChange>) -> ChangeSet {
         tickets,
         selected_ticket_ids: Vec::new(),
         closed: false,
+        archive_outcome: None,
+        closed_at: None,
         submission_attempt: None,
     }
 }
@@ -304,7 +309,7 @@ fn render_text(page: &mut ComposerPage) -> String {
 
 fn render_text_at(page: &mut ComposerPage, width: u16) -> String {
     let area = Rect::new(0, 0, width, 40);
-    page.layout(area, &mut LayoutCtx::new());
+    LayoutCtx::new().with_overlay_bounds(area, |ctx| page.layout(area, ctx));
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
     terminal
         .draw(|frame| {
@@ -1079,6 +1084,47 @@ fn change_set_list_is_borderless_and_opens_the_new_change_set_dialog() {
     );
 }
 
+#[test]
+fn home_shortcut_returns_to_the_open_change_set_overview() {
+    tuicore::init();
+    let mut change_sets = ComposerState::demo().change_sets;
+    change_sets[0].closed = true;
+    let mut page = composer_page_with_change_sets(change_sets);
+    let filter = filter_button(&mut page);
+    page.dispatch_focus(&filter, true, &mut FocusCtx::default());
+    page.dispatch_event(
+        &EventRoute::new(filter.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("shift+f".into())),
+        &mut EventCtx::default(),
+    );
+    let area = Rect::new(0, 0, TEST_WIDTH, 40);
+    let mut layout = LayoutCtx::new();
+    layout.with_overlay_bounds(area, |ctx| page.layout(area, ctx));
+    let popup = layout.overlays().last().unwrap().route_path.clone();
+    for key in "Archived".chars().map(Key::Char).chain([Key::Enter]) {
+        page.dispatch_event(
+            &EventRoute::new(popup.clone()),
+            &TuiEvent::Key(KeyEvent::from(key)),
+            &mut EventCtx::default(),
+        );
+    }
+    assert!(render_text(&mut page).contains("Archived"));
+
+    open_change_set(&mut page, 0);
+    page.event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('h'),
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut EventCtx::default(),
+    );
+
+    let overview = render_text(&mut page);
+    assert_eq!(page.active_change_set_name(), None);
+    assert!(overview.contains("Open"));
+    assert!(!overview.contains("CS-1"));
+}
+
 fn filter_button(page: &mut ComposerPage) -> tuicore::FocusTarget {
     let mut layout = LayoutCtx::new();
     page.layout(Rect::new(0, 0, TEST_WIDTH, 40), &mut layout);
@@ -1592,6 +1638,26 @@ fn yp_copies_existing_composer_tickets_and_skips_local_drafts() {
             assert_eq!(ctx.clipboard_request(), Some(expected.as_str()));
         }
     }
+}
+
+#[test]
+fn yp_copies_the_highlighted_change_set_reference() {
+    tuicore::init();
+    let mut page = composer_page_with_change_sets(vec![share_set(Vec::new())]);
+    let list = focus(&mut page, "data-view");
+    let mut ctx = EventCtx::default();
+
+    let outcome = page.dispatch_event(
+        &EventRoute::new(list.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("yp".into())),
+        &mut ctx,
+    );
+
+    assert_eq!(outcome, EventOutcome::Handled);
+    assert_eq!(
+        ctx.clipboard_request(),
+        Some("finery prepare CS-12 \"Change set name\"")
+    );
 }
 
 #[test]
@@ -2117,7 +2183,7 @@ fn ticket_title_guidance_detects_multiple_actions_and_normalizes_input() {
 }
 
 #[test]
-fn diff_mode_uses_submission_snapshots_and_submitted_rows_use_disabled_glyph() {
+fn diff_mode_uses_submission_snapshots_and_submitted_rows_show_their_state() {
     tuicore::init();
     let mut page = composer_page();
     open_change_set(&mut page, 1);
@@ -2127,6 +2193,7 @@ fn diff_mode_uses_submission_snapshots_and_submitted_rows_use_disabled_glyph() {
     let text = render_text(&mut page);
 
     assert!(text.contains("󱋭"));
+    assert!(text.contains("Submitted"));
     assert!(text.contains("Diff"));
 }
 
@@ -3426,6 +3493,38 @@ fn change_set_delete_uses_ctrl_x() {
 }
 
 #[test]
+fn change_set_delete_dialog_dismisses_with_escape_and_ctrl_bracket() {
+    tuicore::init();
+    for key in [
+        KeyEvent::from(Key::Esc),
+        KeyEvent {
+            code: Key::Char('['),
+            modifiers: KeyModifiers::CONTROL,
+        },
+    ] {
+        let mut page = composer_page();
+        let change_sets = target(&mut page, "data-view");
+        page.dispatch_event(
+            &EventRoute::new(change_sets.path),
+            &TuiEvent::Key(KeyEvent {
+                code: Key::Char('x'),
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            &mut EventCtx::default(),
+        );
+        let dialog = focus(&mut page, "dialog");
+
+        page.dispatch_event(
+            &EventRoute::new(dialog.path),
+            &TuiEvent::Key(key),
+            &mut EventCtx::default(),
+        );
+
+        assert!(!render_text(&mut page).contains("Delete change set?"));
+    }
+}
+
+#[test]
 fn change_set_delete_warns_before_discarding_submission_recovery_data() {
     tuicore::init();
     let mut change_sets = ComposerState::demo().change_sets;
@@ -3783,6 +3882,16 @@ fn submitted_diagram_hides_its_generated_attachment_and_locks_artifact_rows() {
             change: AttachmentChangeKind::Synced,
             local_data: None,
         },
+        TicketAttachment {
+            id: "source-1".into(),
+            filename: "lifecycle.mmd".into(),
+            created: String::new(),
+            size: 20,
+            mime_type: Some("text/vnd.mermaid".into()),
+            content_url: None,
+            change: AttachmentChangeKind::Synced,
+            local_data: None,
+        },
     ];
     ticket.mermaid_diagrams.push(MermaidDiagram {
         id: "diagram-1".into(),
@@ -3792,6 +3901,7 @@ fn submitted_diagram_hides_its_generated_attachment_and_locks_artifact_rows() {
         rendered_png: Vec::new(),
         rendered_theme: String::new(),
         published_attachment_id: Some("generated-1".into()),
+        published_source_attachment_id: Some("source-1".into()),
     });
     let mut change = share_change("FIN-1", ticket);
     change.submitted = Some(SubmissionSnapshot {

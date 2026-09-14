@@ -117,6 +117,14 @@ pub(crate) fn forecast(
     forecast
 }
 
+pub(crate) fn scheduled_dates(
+    snapshot: &BacklogSnapshot,
+    label: &str,
+) -> Option<(NaiveDate, NaiveDate)> {
+    let version = release_version(snapshot, label)?;
+    Some((version.start_date?, version.end_date?))
+}
+
 fn release_version<'a>(snapshot: &'a BacklogSnapshot, label: &str) -> Option<&'a ReleaseVersion> {
     let mut versions = snapshot
         .sprints

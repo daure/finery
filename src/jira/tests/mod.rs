@@ -12,16 +12,17 @@ mod release_dates;
 
 use super::{
     AgileBoard, AgileIssuePage, BACKLOG_FIELDS, BACKLOG_JQL, COMPOSER_FIELDS, ISSUE_FIELDS,
-    JiraIssue, JiraSprint, MAX_VELOCITY_GOAL_LOOKUPS, SubmitBatchOutcome, ambiguous_create_failure,
-    apply_attachment_changes, apply_web_link_changes, assign_users, backlog_page_complete,
-    board_backlog, board_backlog_query, board_sprints, commit_order, common_status_transitions,
-    composer_fields, composer_subtask_keys, create_available_statuses_from_value,
-    create_issue_fields, create_issue_type, create_issue_types_from_value, create_response_failure,
+    JiraIssue, JiraSprint, MAX_VELOCITY_GOAL_LOOKUPS, PublishedMermaidAttachments,
+    SubmitBatchOutcome, ambiguous_create_failure, apply_attachment_changes, apply_mermaid_diagrams,
+    apply_web_link_changes, assign_users, backlog_page_complete, board_backlog,
+    board_backlog_query, board_sprints, commit_order, common_status_transitions, composer_fields,
+    composer_subtask_keys, create_available_statuses_from_value, create_issue_fields,
+    create_issue_type, create_issue_types_from_value, create_response_failure,
     created_issue_failure, current_user, discover_story_points, epics, fetch_composer_issues,
-    fix_versions, hydrate_sprint_subtasks, is_ticket_number_query, issue_fields, issue_key_jql,
-    labels, move_payload, options_from_values, rank_payload, same_jira_content,
-    search_composer_issues, search_jql, select_backlog_board, set_epics, set_fix_versions,
-    set_status, set_story_points, should_discover_story_points, sprint_issues,
+    fix_versions, hydrate_mermaid_diagrams, hydrate_sprint_subtasks, is_ticket_number_query,
+    issue_fields, issue_key_jql, labels, move_payload, options_from_values, rank_payload,
+    same_jira_content, search_composer_issues, search_jql, select_backlog_board, set_epics,
+    set_fix_versions, set_status, set_story_points, should_discover_story_points, sprint_issues,
     story_points_field_for_load, story_points_field_id, story_points_warning, submit_failure,
     submit_ordered_changes, to_ticket, to_ticket_and_work_item, to_work_item,
     to_work_item_with_subtasks, update_payload, velocity_average, velocity_report,
@@ -459,12 +460,19 @@ fn submitted_mermaid_diagrams_retain_their_generated_attachment_ids() {
         rendered_png: Vec::new(),
         rendered_theme: String::new(),
         published_attachment_id: None,
+        published_source_attachment_id: None,
     });
 
     let submitted = with_published_mermaid_attachments(
         ticket("FIN-1", TicketKind::Task, None),
         &desired,
-        &HashMap::from([("diagram-1".into(), "10039".into())]),
+        &HashMap::from([(
+            "diagram-1".into(),
+            PublishedMermaidAttachments {
+                png_attachment_id: Some("10039".into()),
+                source_attachment_id: Some("10040".into()),
+            },
+        )]),
     );
 
     assert_eq!(
@@ -472,6 +480,126 @@ fn submitted_mermaid_diagrams_retain_their_generated_attachment_ids() {
             .published_attachment_id
             .as_deref(),
         Some("10039")
+    );
+    assert_eq!(
+        submitted.mermaid_diagrams[0]
+            .published_source_attachment_id
+            .as_deref(),
+        Some("10040")
+    );
+}
+
+#[test]
+fn synced_mermaid_source_and_image_attachments_hydrate_an_editable_diagram() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let source_url = format!(
+        "http://{}/attachments/10040",
+        listener.local_addr().unwrap()
+    );
+    let server = request_server(listener, vec!["flowchart LR\n  A --> B".into()]);
+    let mut synced = ticket("FIN-1", TicketKind::Task, None);
+    synced.attachments = vec![
+        TicketAttachment {
+            id: "10039".into(),
+            filename: "lifecycle.png".into(),
+            created: String::new(),
+            size: 12,
+            mime_type: Some("image/png".into()),
+            content_url: None,
+            change: AttachmentChangeKind::Synced,
+            local_data: None,
+        },
+        TicketAttachment {
+            id: "10040".into(),
+            filename: "lifecycle.mmd".into(),
+            created: String::new(),
+            size: 20,
+            mime_type: Some("text/vnd.mermaid".into()),
+            content_url: Some(source_url),
+            change: AttachmentChangeKind::Synced,
+            local_data: None,
+        },
+    ];
+
+    hydrate_mermaid_diagrams(
+        &reqwest::blocking::Client::new(),
+        "user@example.com",
+        "token",
+        &mut synced,
+    )
+    .unwrap();
+
+    assert_eq!(
+        server.join().unwrap()[0].lines().next(),
+        Some("GET /attachments/10040 HTTP/1.1")
+    );
+    assert_eq!(synced.mermaid_diagrams.len(), 1);
+    let diagram = &synced.mermaid_diagrams[0];
+    assert_eq!(diagram.id, "10040");
+    assert_eq!(diagram.title, "lifecycle");
+    assert_eq!(diagram.diagram_type, "flowchart");
+    assert_eq!(diagram.markup, "flowchart LR\n  A --> B");
+    assert_eq!(diagram.published_attachment_id.as_deref(), Some("10039"));
+    assert_eq!(
+        diagram.published_source_attachment_id.as_deref(),
+        Some("10040")
+    );
+}
+
+#[test]
+fn modifying_a_synced_mermaid_diagram_replaces_its_source_and_image_attachments() {
+    tuicore::init();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = request_server(
+        listener,
+        vec![
+            String::new(),
+            String::new(),
+            r#"[{"id":"10041"}]"#.into(),
+            r#"[{"id":"10042"}]"#.into(),
+        ],
+    );
+    let mut original = ticket("FIN-1", TicketKind::Task, None);
+    original.mermaid_diagrams.push(MermaidDiagram {
+        id: "10040".into(),
+        title: "Lifecycle".into(),
+        diagram_type: "flowchart".into(),
+        markup: "flowchart LR\n  A --> B".into(),
+        rendered_png: Vec::new(),
+        rendered_theme: String::new(),
+        published_attachment_id: Some("10039".into()),
+        published_source_attachment_id: Some("10040".into()),
+    });
+    let mut desired = original.clone();
+    desired.mermaid_diagrams[0].markup = "flowchart LR\n  A --> C".into();
+    desired.mermaid_diagrams[0].rendered_png = vec![1, 2, 3];
+    desired.mermaid_diagrams[0].rendered_theme = tuicore::theme().name().id().into();
+
+    let attachments = apply_mermaid_diagrams(
+        &reqwest::blocking::Client::new(),
+        &base_url,
+        "user@example.com",
+        "token",
+        "FIN-1",
+        Some(&original),
+        &desired,
+    )
+    .unwrap();
+
+    let requests = server.join().unwrap();
+    assert!(requests[0].starts_with("DELETE /rest/api/3/attachment/10040 HTTP/1.1"));
+    assert!(requests[1].starts_with("DELETE /rest/api/3/attachment/10039 HTTP/1.1"));
+    assert!(requests[2].contains("filename=\"Lifecycle.mmd\""));
+    assert!(requests[2].contains("flowchart LR\n  A --> C"));
+    assert!(requests[3].contains("filename=\"Lifecycle.png\""));
+    assert_eq!(
+        attachments["10040"].source_attachment_id.as_deref(),
+        Some("10041")
+    );
+    assert_eq!(
+        attachments["10040"].png_attachment_id.as_deref(),
+        Some("10042")
     );
 }
 
@@ -1085,6 +1213,24 @@ fn jira_conflict_detection_includes_description_overwrite_safety() {
     let mut remote = original.clone();
     remote.description_safe_to_overwrite = false;
     remote.description_overwrite_warning = Some("underlined text".into());
+
+    assert!(!same_jira_content(&original, &remote));
+}
+
+#[test]
+fn jira_conflict_detection_includes_mermaid_source() {
+    let original = ticket("FIN-2", TicketKind::Task, None);
+    let mut remote = original.clone();
+    remote.mermaid_diagrams.push(MermaidDiagram {
+        id: "10040".into(),
+        title: "Lifecycle".into(),
+        diagram_type: "flowchart".into(),
+        markup: "flowchart LR\n  A --> B".into(),
+        rendered_png: Vec::new(),
+        rendered_theme: String::new(),
+        published_attachment_id: Some("10039".into()),
+        published_source_attachment_id: Some("10040".into()),
+    });
 
     assert!(!same_jira_content(&original, &remote));
 }

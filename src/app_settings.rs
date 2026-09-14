@@ -36,6 +36,13 @@ pub(crate) const COMPOSER_ADD_SIBLING_KEY_SETTING: &str = "composer.add_sibling_
 pub(crate) const COMPOSER_ADD_CHILD_KEY_SETTING: &str = "composer.add_child_key";
 pub(crate) const COMPOSER_NEW_CHANGE_SET_KEY_SETTING: &str = "composer.new_change_set_key";
 pub(crate) const COMPOSER_CHANGE_SET_FILTER_KEY_SETTING: &str = "composer.change_set_filter_key";
+pub(crate) const COMPOSER_ARCHIVE_KEY_SETTING: &str = "composer.archive_key";
+pub(crate) const COMPOSER_CHANGE_SET_ACTIONS_KEY_SETTING: &str = "composer.change_set_actions_key";
+pub(crate) const COMPOSER_DELETE_CHANGE_SET_KEY_SETTING: &str = "composer.delete_change_set_key";
+pub(crate) const COMPOSER_RENAME_CHANGE_SET_KEY_SETTING: &str = "composer.rename_change_set_key";
+pub(crate) const COMPOSER_CLONE_CHANGE_SET_KEY_SETTING: &str = "composer.clone_change_set_key";
+pub(crate) const COMPOSER_ARCHIVE_DONE_KEY_SETTING: &str = "composer.archive_done_key";
+pub(crate) const COMPOSER_ARCHIVE_REJECT_KEY_SETTING: &str = "composer.archive_reject_key";
 pub(crate) const COMPOSER_COMMIT_KEY_SETTING: &str = "composer.commit_key";
 pub(crate) const COMPOSER_REFRESH_KEY_SETTING: &str = "composer.refresh_key";
 pub(crate) const COMPOSER_TITLE_KEY_SETTING: &str = "composer.title_key";
@@ -97,6 +104,10 @@ impl ComposerKeyBinding {
     pub(crate) fn spec(&self) -> KeySpec {
         self.spec
     }
+
+    pub(crate) fn event(&self) -> tuicore::KeyEvent {
+        parse_composer_key_event(&self.sequence).expect("Composer key was validated during parsing")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +151,13 @@ pub(crate) struct ComposerKeyBindings {
     pub(crate) add_child: ComposerKeyBinding,
     pub(crate) new_change_set: ComposerKeyBinding,
     pub(crate) change_set_filter: ComposerKeyBinding,
+    pub(crate) archive: ComposerKeyBinding,
+    pub(crate) change_set_actions: ComposerKeyBinding,
+    pub(crate) delete_change_set: ComposerKeyBinding,
+    pub(crate) rename_change_set: ComposerKeyBinding,
+    pub(crate) clone_change_set: ComposerKeyBinding,
+    pub(crate) archive_done: ComposerKeyBinding,
+    pub(crate) archive_reject: ComposerKeyBinding,
     pub(crate) commit: ComposerKeyBinding,
     pub(crate) refresh: ComposerKeyBinding,
     pub(crate) title: ComposerKeyBinding,
@@ -203,6 +221,13 @@ impl ComposerKeyBindings {
             add_child: binding(COMPOSER_ADD_CHILD_KEY_SETTING, "shift+c")?,
             new_change_set: binding(COMPOSER_NEW_CHANGE_SET_KEY_SETTING, "shift+n")?,
             change_set_filter: binding(COMPOSER_CHANGE_SET_FILTER_KEY_SETTING, "shift+f")?,
+            archive: binding(COMPOSER_ARCHIVE_KEY_SETTING, "ctrl+c")?,
+            change_set_actions: binding(COMPOSER_CHANGE_SET_ACTIONS_KEY_SETTING, ".")?,
+            delete_change_set: binding(COMPOSER_DELETE_CHANGE_SET_KEY_SETTING, "ctrl+x")?,
+            rename_change_set: binding(COMPOSER_RENAME_CHANGE_SET_KEY_SETTING, "ctrl+r")?,
+            clone_change_set: binding(COMPOSER_CLONE_CHANGE_SET_KEY_SETTING, "ctrl+o")?,
+            archive_done: binding(COMPOSER_ARCHIVE_DONE_KEY_SETTING, "d")?,
+            archive_reject: binding(COMPOSER_ARCHIVE_REJECT_KEY_SETTING, "r")?,
             commit: binding(COMPOSER_COMMIT_KEY_SETTING, "shift+m")?,
             refresh: binding(COMPOSER_REFRESH_KEY_SETTING, "shift+r")?,
             title: binding(COMPOSER_TITLE_KEY_SETTING, "shift+t")?,
@@ -264,6 +289,20 @@ impl ComposerKeyBindings {
         ensure_unambiguous(&[
             bindings.create_submit.sequence(),
             bindings.create_confirm.sequence(),
+            bindings.dialog_cancel.sequence(),
+        ])?;
+        ensure_unambiguous(&[
+            bindings.archive.sequence(),
+            bindings.change_set_actions.sequence(),
+            bindings.delete_change_set.sequence(),
+            bindings.rename_change_set.sequence(),
+            bindings.clone_change_set.sequence(),
+            bindings.new_change_set.sequence(),
+            bindings.change_set_filter.sequence(),
+        ])?;
+        ensure_unambiguous(&[
+            bindings.archive_done.sequence(),
+            bindings.archive_reject.sequence(),
             bindings.dialog_cancel.sequence(),
         ])?;
         ensure_unambiguous(&[
@@ -600,6 +639,34 @@ impl AppSettings {
                 self.composer_keys.change_set_filter.sequence.clone(),
             ),
             (
+                COMPOSER_ARCHIVE_KEY_SETTING,
+                self.composer_keys.archive.sequence.clone(),
+            ),
+            (
+                COMPOSER_CHANGE_SET_ACTIONS_KEY_SETTING,
+                self.composer_keys.change_set_actions.sequence.clone(),
+            ),
+            (
+                COMPOSER_DELETE_CHANGE_SET_KEY_SETTING,
+                self.composer_keys.delete_change_set.sequence.clone(),
+            ),
+            (
+                COMPOSER_RENAME_CHANGE_SET_KEY_SETTING,
+                self.composer_keys.rename_change_set.sequence.clone(),
+            ),
+            (
+                COMPOSER_CLONE_CHANGE_SET_KEY_SETTING,
+                self.composer_keys.clone_change_set.sequence.clone(),
+            ),
+            (
+                COMPOSER_ARCHIVE_DONE_KEY_SETTING,
+                self.composer_keys.archive_done.sequence.clone(),
+            ),
+            (
+                COMPOSER_ARCHIVE_REJECT_KEY_SETTING,
+                self.composer_keys.archive_reject.sequence.clone(),
+            ),
+            (
                 COMPOSER_COMMIT_KEY_SETTING,
                 self.composer_keys.commit.sequence.clone(),
             ),
@@ -836,6 +903,10 @@ fn sprint_name_fragments(value: Option<&String>) -> Vec<String> {
 }
 
 fn parse_composer_key(value: &str) -> Option<KeySpec> {
+    parse_composer_key_event(value).map(KeySpec::from)
+}
+
+fn parse_composer_key_event(value: &str) -> Option<tuicore::KeyEvent> {
     let (modifier, key) = if let Some(key) = value.strip_prefix("ctrl+") {
         (KeyModifiers::CONTROL, key)
     } else if let Some(key) = value.strip_prefix("alt+") {
@@ -850,7 +921,10 @@ fn parse_composer_key(value: &str) -> Option<KeySpec> {
         key if key.chars().count() == 1 => Key::Char(key.chars().next()?),
         _ => return None,
     };
-    Some(KeySpec::key_with_modifiers(code, modifier))
+    Some(tuicore::KeyEvent {
+        code,
+        modifiers: modifier,
+    })
 }
 
 #[cfg(test)]

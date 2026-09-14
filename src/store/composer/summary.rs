@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::{AttachmentChangeKind, ChangeKind, ChangeSet, Ticket, TicketChange};
+use super::{ArchiveOutcome, AttachmentChangeKind, ChangeKind, ChangeSet, Ticket, TicketChange};
 
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub(crate) struct ChangeSetSummary {
@@ -13,6 +13,8 @@ pub(crate) struct ChangeSetSummary {
     pub web_links: usize,
     pub external_links: usize,
     pub submitted: usize,
+    pub cancelled: usize,
+    pub concluded: usize,
 }
 
 impl ChangeSetSummary {
@@ -23,6 +25,11 @@ impl ChangeSetSummary {
             ..Self::default()
         };
         for change in &set.tickets {
+            match set.unsubmitted_outcome(change) {
+                Some(ArchiveOutcome::Cancelled) => summary.cancelled += 1,
+                Some(ArchiveOutcome::Concluded) => summary.concluded += 1,
+                None => {}
+            }
             match change.kind {
                 ChangeKind::Added => summary.created += 1,
                 ChangeKind::Modified => summary.edited += 1,
@@ -66,6 +73,8 @@ impl ChangeSetSummary {
                 attachment.change != AttachmentChangeKind::Deleted
                     && !updated.mermaid_diagrams.iter().any(|diagram| {
                         diagram.published_attachment_id.as_deref() == Some(attachment.id.as_str())
+                            || diagram.published_source_attachment_id.as_deref()
+                                == Some(attachment.id.as_str())
                     })
                     && (matches!(
                         attachment.change,

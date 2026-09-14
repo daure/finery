@@ -159,7 +159,7 @@ impl Storage {
             SqlDialect::Postgres => "closed",
         };
         let query = format!(
-            "SELECT public_id, name, selected_ticket_ids, submission_attempt, {closed_column}, revision FROM change_sets WHERE public_id = {}",
+            "SELECT public_id, name, selected_ticket_ids, submission_attempt, archive_outcome, closed_at, {closed_column}, revision FROM change_sets WHERE public_id = {}",
             self.dialect.placeholder(1)
         );
         let Some(row) = sqlx::query(AssertSqlSafe(query.as_str()))
@@ -192,7 +192,7 @@ impl Storage {
             SqlDialect::Postgres => "closed",
         };
         let query = format!(
-            "SELECT public_id, name, selected_ticket_ids, submission_attempt, {closed_column}, revision FROM change_sets ORDER BY created_at, public_id"
+            "SELECT public_id, name, selected_ticket_ids, submission_attempt, archive_outcome, closed_at, {closed_column}, revision FROM change_sets ORDER BY created_at, public_id"
         );
         let rows = sqlx::query(AssertSqlSafe(query.as_str()))
             .fetch_all(&mut *transaction)
@@ -233,12 +233,14 @@ impl Storage {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut transaction = self.pool.begin().await?;
         let upsert = format!(
-            "INSERT INTO change_sets (public_id, name, selected_ticket_ids, submission_attempt, closed) VALUES ({}, {}, {}, {}, {}) ON CONFLICT (public_id) DO UPDATE SET name = excluded.name, selected_ticket_ids = excluded.selected_ticket_ids, submission_attempt = excluded.submission_attempt, closed = excluded.closed, revision = change_sets.revision + 1, updated_at = CURRENT_TIMESTAMP",
+            "INSERT INTO change_sets (public_id, name, selected_ticket_ids, submission_attempt, closed, archive_outcome, closed_at) VALUES ({}, {}, {}, {}, {}, {}, {}) ON CONFLICT (public_id) DO UPDATE SET name = excluded.name, selected_ticket_ids = excluded.selected_ticket_ids, submission_attempt = excluded.submission_attempt, closed = excluded.closed, archive_outcome = excluded.archive_outcome, closed_at = excluded.closed_at, revision = change_sets.revision + 1, updated_at = CURRENT_TIMESTAMP",
             self.dialect.placeholder(1),
             self.dialect.placeholder(2),
             self.dialect.placeholder(3),
             self.dialect.placeholder(4),
-            self.dialect.placeholder(5)
+            self.dialect.placeholder(5),
+            self.dialect.placeholder(6),
+            self.dialect.placeholder(7)
         );
         sqlx::query(AssertSqlSafe(upsert.as_str()))
             .bind(&set.id)
@@ -246,6 +248,8 @@ impl Storage {
             .bind(serde_json::to_string(&set.selected_ticket_ids)?)
             .bind(serde_json::to_string(&set.submission_attempt)?)
             .bind(set.closed)
+            .bind(serde_json::to_string(&set.archive_outcome)?)
+            .bind(set.closed_at.map(|date| date.to_rfc3339()))
             .execute(&mut *transaction)
             .await?;
         self.replace_ticket_changes(&mut transaction, set).await?;
@@ -267,7 +271,7 @@ impl Storage {
                     SqlDialect::Postgres => "closed",
                 };
                 let query = format!(
-                    "SELECT public_id, name, selected_ticket_ids, submission_attempt, {closed_column}, revision FROM change_sets WHERE public_id = {}",
+                    "SELECT public_id, name, selected_ticket_ids, submission_attempt, archive_outcome, closed_at, {closed_column}, revision FROM change_sets WHERE public_id = {}",
                     self.dialect.placeholder(1)
                 );
                 let Some(row) = sqlx::query(AssertSqlSafe(query.as_str()))
@@ -296,19 +300,23 @@ impl Storage {
                     });
                 }
                 let update = format!(
-                    "UPDATE change_sets SET name = {}, selected_ticket_ids = {}, submission_attempt = {}, closed = {}, revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE public_id = {} AND revision = {}",
+                    "UPDATE change_sets SET name = {}, selected_ticket_ids = {}, submission_attempt = {}, closed = {}, archive_outcome = {}, closed_at = {}, revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE public_id = {} AND revision = {}",
                     self.dialect.placeholder(1),
                     self.dialect.placeholder(2),
                     self.dialect.placeholder(3),
                     self.dialect.placeholder(4),
                     self.dialect.placeholder(5),
-                    self.dialect.placeholder(6)
+                    self.dialect.placeholder(6),
+                    self.dialect.placeholder(7),
+                    self.dialect.placeholder(8)
                 );
                 let result = sqlx::query(AssertSqlSafe(update.as_str()))
                     .bind(&set.name)
                     .bind(serde_json::to_string(&set.selected_ticket_ids)?)
                     .bind(serde_json::to_string(&set.submission_attempt)?)
                     .bind(set.closed)
+                    .bind(serde_json::to_string(&set.archive_outcome)?)
+                    .bind(set.closed_at.map(|date| date.to_rfc3339()))
                     .bind(&set.id)
                     .bind(revision)
                     .execute(&mut *transaction)
@@ -320,12 +328,14 @@ impl Storage {
             }
             None => {
                 let insert = format!(
-                    "INSERT INTO change_sets (public_id, name, selected_ticket_ids, submission_attempt, closed) VALUES ({}, {}, {}, {}, {}) ON CONFLICT (public_id) DO NOTHING",
+                    "INSERT INTO change_sets (public_id, name, selected_ticket_ids, submission_attempt, closed, archive_outcome, closed_at) VALUES ({}, {}, {}, {}, {}, {}, {}) ON CONFLICT (public_id) DO NOTHING",
                     self.dialect.placeholder(1),
                     self.dialect.placeholder(2),
                     self.dialect.placeholder(3),
                     self.dialect.placeholder(4),
-                    self.dialect.placeholder(5)
+                    self.dialect.placeholder(5),
+                    self.dialect.placeholder(6),
+                    self.dialect.placeholder(7)
                 );
                 let result = sqlx::query(AssertSqlSafe(insert.as_str()))
                     .bind(&set.id)
@@ -333,6 +343,8 @@ impl Storage {
                     .bind(serde_json::to_string(&set.selected_ticket_ids)?)
                     .bind(serde_json::to_string(&set.submission_attempt)?)
                     .bind(set.closed)
+                    .bind(serde_json::to_string(&set.archive_outcome)?)
+                    .bind(set.closed_at.map(|date| date.to_rfc3339()))
                     .execute(&mut *transaction)
                     .await?;
                 if result.rows_affected() == 0 {
@@ -390,6 +402,15 @@ impl Storage {
                     .transpose()?
                     .flatten(),
                 closed,
+                closed_at: row
+                    .try_get::<Option<String>, _>("closed_at")?
+                    .map(|value| value.parse())
+                    .transpose()?,
+                archive_outcome: row
+                    .try_get::<Option<String>, _>("archive_outcome")?
+                    .map(|value| serde_json::from_str(&value))
+                    .transpose()?
+                    .flatten(),
             },
             revision: row.try_get("revision")?,
         })

@@ -1604,6 +1604,8 @@ mod file_content_tests {
             }],
             selected_ticket_ids: Vec::new(),
             closed: false,
+            archive_outcome: None,
+            closed_at: None,
             submission_attempt: None,
         }]);
         state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
@@ -1669,6 +1671,8 @@ mod file_content_tests {
             }],
             selected_ticket_ids: Vec::new(),
             closed: false,
+            archive_outcome: None,
+            closed_at: None,
             submission_attempt: None,
         }]);
         state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));
@@ -1788,6 +1792,8 @@ mod file_content_tests {
             }],
             selected_ticket_ids: Vec::new(),
             closed: false,
+            archive_outcome: None,
+            closed_at: None,
             submission_attempt: None,
         }]);
         state.dispatch(ComposerAction::OpenChangeSet("CS-1".into()));

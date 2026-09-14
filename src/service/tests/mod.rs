@@ -205,6 +205,8 @@ fn change_set() -> ChangeSet {
         id: "CS-1".into(),
         name: "Plan".into(),
         closed: false,
+        archive_outcome: None,
+        closed_at: None,
         selected_ticket_ids: Vec::new(),
         submission_attempt: None,
         tickets: vec![TicketChange {
@@ -311,6 +313,98 @@ fn create_change_set_persists_an_empty_open_set() {
             .id,
         "CS-3"
     );
+}
+
+#[test]
+fn cloning_an_archived_change_set_resyncs_each_jira_ticket() {
+    let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    let storage = runtime.block_on(Storage::connect_for_tests()).unwrap();
+    let mut archived = change_set();
+    archived.closed = true;
+    archived.name = "Completed plan".into();
+    archived.tickets[0].updated = Some(Ticket {
+        title: "Stale title".into(),
+        ..ticket("FIN-1")
+    });
+    archived.tickets[0].kind = ChangeKind::Modified;
+    archived.tickets.push(TicketChange {
+        id: "FIN-2".into(),
+        original: Some(ticket("FIN-2")),
+        updated: None,
+        kind: ChangeKind::Synced,
+        submitted: None,
+        retry_blocked: false,
+        create_attempt: false,
+        sibling_order: 1,
+    });
+    runtime
+        .block_on(storage.save_change_set(&archived))
+        .unwrap();
+    let lookup = Arc::new(|key: &str| -> Result<Ticket, String> {
+        let mut synced = ticket(key);
+        if key == "FIN-1" {
+            synced
+                .mermaid_diagrams
+                .push(crate::store::composer::MermaidDiagram {
+                    id: "10040".into(),
+                    title: "Lifecycle".into(),
+                    diagram_type: "flowchart".into(),
+                    markup: "flowchart LR\n  A --> B".into(),
+                    rendered_png: Vec::new(),
+                    rendered_theme: String::new(),
+                    published_attachment_id: Some("10039".into()),
+                    published_source_attachment_id: Some("10040".into()),
+                });
+        }
+        Ok(synced)
+    });
+    let service = test_service(storage, runtime, lookup);
+
+    let cloned = service
+        .clone_change_set("CS-1", "Clone of Completed plan".into())
+        .unwrap();
+
+    assert_eq!(cloned.change_set.id, "CS-2");
+    assert_eq!(cloned.change_set.name, "Clone of Completed plan");
+    assert!(!cloned.change_set.closed);
+    assert_eq!(
+        cloned.change_set.selected_ticket_ids,
+        vec!["FIN-1", "FIN-2"]
+    );
+    assert_eq!(cloned.change_set.tickets.len(), 2);
+    assert_eq!(cloned.change_set.tickets[0].id, "FIN-1");
+    assert_eq!(cloned.change_set.tickets[0].kind, ChangeKind::Synced);
+    assert_eq!(cloned.change_set.tickets[0].updated, None);
+    assert_eq!(
+        cloned.change_set.tickets[0]
+            .original
+            .as_ref()
+            .unwrap()
+            .mermaid_diagrams[0]
+            .markup,
+        "flowchart LR\n  A --> B"
+    );
+    assert_eq!(
+        cloned.change_set.tickets[0]
+            .original
+            .as_ref()
+            .unwrap()
+            .title,
+        "Original"
+    );
+    assert_eq!(
+        service.change_set("CS-2").unwrap().value.name,
+        "Clone of Completed plan"
+    );
+}
+
+#[test]
+fn cloning_an_open_change_set_is_rejected() {
+    let error = service()
+        .clone_change_set("CS-1", "Clone of Plan".into())
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), "only archived change sets can be cloned");
 }
 
 #[test]

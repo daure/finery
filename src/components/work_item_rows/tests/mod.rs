@@ -27,11 +27,16 @@ fn published_mermaid_rows_show_the_published_state() {
 
     let text = mermaid_diagram_summary_text("Lifecycle", "state", true, true);
 
+    assert_eq!(
+        text.lines[0].spans[0].style.fg,
+        Some(tuicore::theme().success_fg())
+    );
     assert_eq!(text.lines[0].spans.last().unwrap().content, " • published");
     assert!(
         text.lines[0]
             .spans
             .iter()
+            .skip(1)
             .all(|span| span.style.fg == Some(tuicore::theme().muted_fg()))
     );
 }
@@ -204,8 +209,23 @@ fn ticket_annotations_extend_composer_metadata_without_hiding_change_state() {
     assert!(metadata.contains("AB|CD|Refinery"));
     assert!(metadata.find("In Progress") < metadata.find("AB|CD|Refinery"));
     assert!(metadata.find("Ticket metadata") < metadata.find("v0.5"));
-    assert!(metadata.contains("submitted"));
+    assert!(metadata.contains("Submitted"));
     assert!(metadata.contains("FIN-100 → FIN-200"));
+
+    let title = &text.lines[0].spans;
+    assert_eq!(title[0].style.fg, Some(tuicore::theme().accent_fg()));
+    assert_eq!(title[1].style.fg, Some(tuicore::theme().warning_fg()));
+    assert_eq!(
+        title.last().unwrap().style.fg,
+        Some(tuicore::theme().text_fg())
+    );
+
+    let submitted = text.lines[1]
+        .spans
+        .iter()
+        .find(|span| span.content == "Submitted")
+        .expect("submitted tickets show their submission state");
+    assert_eq!(submitted.style.fg, Some(tuicore::theme().muted_fg()));
 }
 
 #[test]

@@ -433,6 +433,25 @@ impl AppService {
         self.send(PersistenceCommand::SaveChangeSet(set, expected));
     }
 
+    pub(crate) fn record_cloned_change_set(
+        &self,
+        cloned: &composer_service::CloneChangeSetResponse,
+    ) -> Result<(), String> {
+        let mut sync = self
+            .composer_sync
+            .lock()
+            .map_err(|_| "Composer synchronization state is unavailable".to_string())?;
+        if cloned.catalog_revision < sync.catalog_revision {
+            return Err("Composer changed while the clone was being created".into());
+        }
+        sync.revisions
+            .insert(cloned.change_set.id.clone(), cloned.revision);
+        sync.queued_revisions
+            .insert(cloned.change_set.id.clone(), cloned.revision);
+        sync.catalog_revision = cloned.catalog_revision;
+        Ok(())
+    }
+
     pub(crate) fn save_change_set_durably(
         &self,
         set: ChangeSet,

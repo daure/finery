@@ -86,24 +86,14 @@ pub(crate) fn ticket_summary_text(
     details: TicketRowDetails<'_>,
 ) -> Text<'static> {
     let theme = tuicore::theme();
-    let text_style = Style::default().fg(if row.submitted {
-        theme.muted_fg()
-    } else {
-        theme.text_fg()
-    });
+    let text_style = Style::default().fg(theme.text_fg());
     let muted_style = Style::default().fg(theme.muted_fg());
     let mut metadata = Vec::new();
     if let Some(change) = row.change_badge {
         let (badge, color) = change_badge(change);
         metadata.push(Span::styled(
             badge,
-            Style::default()
-                .fg(if row.submitted {
-                    theme.muted_fg()
-                } else {
-                    color
-                })
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
     }
     if row.show_story_points {
@@ -150,10 +140,10 @@ pub(crate) fn ticket_summary_text(
     }
     append_release_text(&mut metadata, details.fix_versions);
     if row.submitted {
-        metadata.push(Span::styled(
-            " · submitted",
-            Style::default().fg(theme.muted_fg()),
-        ));
+        append_metadata(
+            &mut metadata,
+            Span::styled("Submitted", Style::default().fg(theme.muted_fg())),
+        );
     }
     if let Some(annotation) = details.annotation {
         append_metadata(
@@ -181,8 +171,9 @@ pub(crate) fn attachment_summary_text(
         theme.text_fg()
     });
     let muted_style = Style::default().fg(theme.muted_fg());
+    let (badge, color) = change_badge(attachment_change_badge(change));
     Text::from(Line::from(vec![
-        Span::styled(attachment_change_badge(change), text_style),
+        Span::styled(badge, Style::default().fg(color)),
         Span::styled(" ", text_style),
         Span::styled(" ", text_style),
         Span::styled(filename.to_owned(), text_style.add_modifier(Modifier::BOLD)),
@@ -206,8 +197,9 @@ pub(crate) fn mermaid_diagram_summary_text(
         theme.text_fg()
     });
     let muted_style = Style::default().fg(theme.muted_fg());
+    let (badge, color) = change_badge(ChangeBadge::Added);
     let mut spans = vec![
-        Span::styled("A", text_style),
+        Span::styled(badge, Style::default().fg(color)),
         Span::styled(" ", text_style),
         Span::styled(" ", text_style),
         Span::styled(title.to_owned(), text_style.add_modifier(Modifier::BOLD)),
@@ -239,12 +231,12 @@ fn diagram_type_label(diagram_type: &str) -> String {
         .join(" ")
 }
 
-fn attachment_change_badge(change: crate::store::composer::AttachmentChangeKind) -> &'static str {
+fn attachment_change_badge(change: crate::store::composer::AttachmentChangeKind) -> ChangeBadge {
     match change {
-        crate::store::composer::AttachmentChangeKind::Synced => "S",
-        crate::store::composer::AttachmentChangeKind::Added => "A",
-        crate::store::composer::AttachmentChangeKind::Modified => "M",
-        crate::store::composer::AttachmentChangeKind::Deleted => "D",
+        crate::store::composer::AttachmentChangeKind::Synced => ChangeBadge::Synced,
+        crate::store::composer::AttachmentChangeKind::Added => ChangeBadge::Added,
+        crate::store::composer::AttachmentChangeKind::Modified => ChangeBadge::Modified,
+        crate::store::composer::AttachmentChangeKind::Deleted => ChangeBadge::Deleted,
     }
 }
 
@@ -303,15 +295,8 @@ pub(crate) fn work_item_title_with_key_line_with_match(
     text_query: Option<&str>,
 ) -> Line<'static> {
     let theme = tuicore::theme();
-    let (kind_icon, mut kind_color) = ticket_icon(row.kind);
-    let (priority_icon, mut priority_color) = priority_icon(&row.priority);
-    let text_color = if row.submitted {
-        kind_color = theme.muted_fg();
-        priority_color = theme.muted_fg();
-        theme.muted_fg()
-    } else {
-        theme.text_fg()
-    };
+    let (kind_icon, kind_color) = ticket_icon(row.kind);
+    let (priority_icon, priority_color) = priority_icon(&row.priority);
     let mut spans = vec![
         Span::styled(format!("{kind_icon} "), Style::default().fg(kind_color)),
         Span::styled(
@@ -334,7 +319,9 @@ pub(crate) fn work_item_title_with_key_line_with_match(
     spans.extend(search_match_spans(
         &row.title,
         text_query,
-        Style::default().fg(text_color).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme.text_fg())
+            .add_modifier(Modifier::BOLD),
     ));
     Line::from(spans)
 }
@@ -541,13 +528,13 @@ fn priority_icon(priority: &str) -> (&'static str, ratatui::style::Color) {
     }
 }
 
-fn change_badge(change: ChangeBadge) -> (&'static str, ratatui::style::Color) {
+pub(crate) fn change_badge(change: ChangeBadge) -> (&'static str, ratatui::style::Color) {
     let theme = tuicore::theme();
     match change {
         ChangeBadge::Added => ("A", theme.success_fg()),
         ChangeBadge::Modified => ("M", theme.warning_fg()),
         ChangeBadge::Deleted => ("D", theme.error_fg()),
-        ChangeBadge::Synced => ("S", theme.text_fg()),
+        ChangeBadge::Synced => ("S", theme.info_fg()),
     }
 }
 

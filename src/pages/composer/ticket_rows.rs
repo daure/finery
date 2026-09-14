@@ -15,7 +15,7 @@ use crate::{
         },
     },
     store::{
-        composer::{ChangeKind, ComposerState, TicketChange, TicketKind},
+        composer::{ArchiveOutcome, ChangeKind, ComposerState, TicketChange, TicketKind},
         work_items::is_done_status,
     },
 };
@@ -34,6 +34,8 @@ pub(super) struct TicketRow {
     mermaid_diagrams: Vec<crate::store::composer::MermaidDiagram>,
     mermaid_diagram: Option<crate::store::composer::MermaidDiagram>,
     selected_descendant_count: usize,
+    archived: bool,
+    archive_outcome: Option<ArchiveOutcome>,
 }
 
 pub(super) fn selected_prepare_reference(
@@ -79,7 +81,10 @@ pub(super) fn ticket_data_view_with_number_jump(
         .selection_trigger(SelectionTrigger::OnActivate)
         .selection_glyphs(SelectionGlyphs::NERD_FONT)
         .selection_disabled_by(|row| {
-            row.item.submitted || row.attachment.is_some() || row.mermaid_diagram.is_some()
+            row.archived
+                || row.item.submitted
+                || row.attachment.is_some()
+                || row.mermaid_diagram.is_some()
         })
         .selection_glyph_hidden_by(|row| row.attachment.is_some() || row.mermaid_diagram.is_some())
         .selection_disabled_glyph("󱋭")
@@ -182,6 +187,8 @@ pub(super) fn ticket_rows(state: &ComposerState) -> Vec<TicketRow> {
                         !row.mermaid_diagrams.iter().any(|diagram| {
                             diagram.published_attachment_id.as_deref()
                                 == Some(attachment.id.as_str())
+                                || diagram.published_source_attachment_id.as_deref()
+                                    == Some(attachment.id.as_str())
                         })
                     })
                     .map(|(index, attachment)| TicketRow::attachment_child(&row, attachment, index))
@@ -345,6 +352,8 @@ fn ticket_row(
             .unwrap_or_default(),
         mermaid_diagram: None,
         selected_descendant_count: 0,
+        archived: state.active_set()?.closed,
+        archive_outcome: state.active_set()?.unsubmitted_outcome(change),
     })
 }
 
@@ -373,6 +382,9 @@ fn ticket_columns(number_jump: Rc<RefCell<TicketNumberJump>>) -> Vec<Column<Tick
                     );
                 }
                 let mut annotations = row.parent_delta.iter().cloned().collect::<Vec<_>>();
+                if let Some(outcome) = row.archive_outcome {
+                    annotations.push(outcome.label().to_owned());
+                }
                 if !context.expanded && row.selected_descendant_count > 0 {
                     annotations.push(format!("{} selected below", row.selected_descendant_count));
                 }
@@ -439,6 +451,8 @@ impl TicketRow {
             mermaid_diagrams: Vec::new(),
             mermaid_diagram: None,
             selected_descendant_count: 0,
+            archived: parent.archived,
+            archive_outcome: parent.archive_outcome,
         }
     }
 
@@ -478,6 +492,8 @@ impl TicketRow {
             mermaid_diagrams: Vec::new(),
             mermaid_diagram: Some(diagram),
             selected_descendant_count: 0,
+            archived: parent.archived,
+            archive_outcome: parent.archive_outcome,
         }
     }
 

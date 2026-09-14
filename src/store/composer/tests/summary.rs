@@ -35,6 +35,8 @@ fn set(tickets: Vec<TicketChange>) -> ChangeSet {
         tickets,
         selected_ticket_ids: Vec::new(),
         closed: false,
+        archive_outcome: None,
+        closed_at: None,
         submission_attempt: None,
     }
 }

@@ -29,14 +29,26 @@ type AppView = DialogLayer<RecentTicketsLayer, JiraSearchMenu>;
 struct AppPages {
     tabs: Tabs<()>,
     selected: Rc<Cell<Option<usize>>>,
+    reset_composer_focus: Rc<Cell<bool>>,
 }
 
 impl AppPages {
-    fn new(tabs: Tabs<()>, selected: Rc<Cell<Option<usize>>>) -> Self {
-        Self { tabs, selected }
+    fn new(
+        tabs: Tabs<()>,
+        selected: Rc<Cell<Option<usize>>>,
+        reset_composer_focus: Rc<Cell<bool>>,
+    ) -> Self {
+        Self {
+            tabs,
+            selected,
+            reset_composer_focus,
+        }
     }
 
     fn apply_pending_selection(&mut self) {
+        if self.reset_composer_focus.replace(false) {
+            self.tabs.clear_last_focused_target(1);
+        }
         if let Some(selected) = self.selected.take() {
             self.tabs.select_index(selected);
         }
@@ -117,6 +129,7 @@ impl TuiNode for AppPages {
 pub(crate) struct App {
     view: AppView,
     selected_page: Rc<Cell<Option<usize>>>,
+    reset_composer_focus: Rc<Cell<bool>>,
     open_settings: Rc<Cell<bool>>,
     close_dialog: Rc<Cell<bool>>,
     service: AppService,
@@ -128,6 +141,7 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
     let open_settings = Rc::new(Cell::new(false));
     let close_dialog = Rc::new(Cell::new(false));
     let selected_page = Rc::new(Cell::new(None));
+    let reset_composer_focus = Rc::new(Cell::new(false));
     let pages = Tabs::new(vec![
         Tab::new("Backlog", pages::backlog::page(service.clone())),
         Tab::new(
@@ -139,7 +153,11 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
     let base = Flex::column()
         .child(
             "pages",
-            AppPages::new(pages, Rc::clone(&selected_page)),
+            AppPages::new(
+                pages,
+                Rc::clone(&selected_page),
+                Rc::clone(&reset_composer_focus),
+            ),
             FlexItem::fill(1),
         )
         .child(
@@ -178,6 +196,7 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
     App {
         view,
         selected_page,
+        reset_composer_focus,
         open_settings,
         close_dialog,
         service,
@@ -278,6 +297,15 @@ impl App {
             .base_mut()
             .base_mut()
             .set_active_with_context(false, ctx);
+        let composer_route = EventRoute::new(TreePath::from_keys([
+            ChildKey::first(),
+            ChildKey::first(),
+            ChildKey::first(),
+            ChildKey::new("pages"),
+            ChildKey::new("tab-1"),
+        ]));
+        self.view.dispatch_event(&composer_route, event, ctx);
+        self.reset_composer_focus.set(true);
         self.selected_page.set(Some(0));
         let backlog_route = EventRoute::new(TreePath::from_keys([
             ChildKey::first(),

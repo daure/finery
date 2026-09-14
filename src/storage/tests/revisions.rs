@@ -17,6 +17,8 @@ fn conditional_saves_increment_changed_revisions_and_reject_stale_versions() {
             tickets: Vec::new(),
             selected_ticket_ids: Vec::new(),
             closed: false,
+            archive_outcome: None,
+            closed_at: None,
             submission_attempt: None,
         };
 
@@ -197,6 +199,8 @@ fn snapshot_set(name: &str) -> ChangeSet {
         }],
         selected_ticket_ids: Vec::new(),
         closed: false,
+        archive_outcome: None,
+        closed_at: None,
         submission_attempt: None,
     }
 }

@@ -30,6 +30,18 @@ Jira credentials and defaults are configured in the TUI settings and stored in F
 
 Jira description conversion support and its safety contract are documented in [docs/jira-description-support.md](docs/jira-description-support.md).
 
+## Composer archives
+
+In the Composer overview, highlight a change set and press `Ctrl+C` to choose **Done**, **Reject**, or **Cancel**. Done archives the set with every unsubmitted item marked **Concluded**; Reject archives it with every unsubmitted item marked **Cancelled**. Cancel dismisses the dialog. Submitted items retain their submission snapshots, and archiving only changes local Composer state.
+
+Press `.` for searchable change-set actions. **Rename** (`Ctrl+R`), **Delete** (`Ctrl+X`), and **Archive** (`Ctrl+C`) open their dialogs; archived sets also offer **Clone** (`Ctrl+O`).
+
+The **Archived** filter includes fully submitted sets and sets archived through Done or Reject. Archived ticket content is read-only, while their change sets can be renamed or cloned. An active or unresolved Jira submission must be resolved before archiving.
+
+The overview lists open sets first, then archived sets by closure time, newest first. The Archived filter uses the same closure-time order. Sets without a recorded closure time appear last among archives.
+
+The change-set action shortcuts are configurable through `composer.change_set_actions_key`, `composer.rename_change_set_key`, `composer.clone_change_set_key`, `composer.delete_change_set_key`, and `composer.archive_key` (defaults: `.`, `ctrl+r`, `ctrl+o`, `ctrl+x`, and `ctrl+c`). MCP change-set reads expose `archive_outcome` (`cancelled`, `concluded`, or null); it applies to tickets whose `submitted` flag is false.
+
 ## Install
 
 On another machine:

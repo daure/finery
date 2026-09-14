@@ -1,5 +1,7 @@
 mod add_ticket_menu;
 mod change_set_list;
+mod change_set_overview;
+mod change_set_quick_menu;
 mod detail;
 mod fields;
 mod issue_links;

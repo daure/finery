@@ -22,9 +22,9 @@ use crate::{
         VersionedChangeSet,
     },
     store::composer::{
-        ChangeKind, ChangeSet, ComposerAction, ComposerState, PlacementError, PlacementTarget,
-        SubmissionAttemptPhase, SubmissionSnapshot, Ticket, TicketChange, TicketKind,
-        TicketWebLink, rebase_ticket, submission_attempt_owner,
+        ArchiveOutcome, ChangeKind, ChangeSet, ComposerAction, ComposerState, PlacementError,
+        PlacementTarget, SubmissionAttemptPhase, SubmissionSnapshot, Ticket, TicketChange,
+        TicketKind, TicketWebLink, rebase_ticket, submission_attempt_owner,
     },
 };
 
@@ -44,6 +44,8 @@ pub struct ChangeSetCatalogChangeSetView {
     pub id: String,
     pub name: String,
     pub closed: bool,
+    pub closed_at: Option<String>,
+    pub archive_outcome: Option<ArchiveOutcomeView>,
     /// Persisted explicit TUI intent. MCP submit requests never inherit this list.
     pub selected_ticket_ids: Vec<String>,
     pub tickets: Vec<CatalogTicketChangeView>,
@@ -95,6 +97,8 @@ pub struct ChangeSetView {
     pub id: String,
     pub name: String,
     pub closed: bool,
+    pub closed_at: Option<String>,
+    pub archive_outcome: Option<ArchiveOutcomeView>,
     /// Persisted explicit TUI intent. MCP submit requests never inherit this list.
     pub selected_ticket_ids: Vec<String>,
     pub tickets: Vec<TicketChangeView>,
@@ -113,6 +117,22 @@ pub struct TicketChangeView {
     pub retry_blocked: bool,
     pub create_attempt: bool,
     pub submission_claimed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveOutcomeView {
+    Cancelled,
+    Concluded,
+}
+
+impl From<ArchiveOutcome> for ArchiveOutcomeView {
+    fn from(value: ArchiveOutcome) -> Self {
+        match value {
+            ArchiveOutcome::Cancelled => Self::Cancelled,
+            ArchiveOutcome::Concluded => Self::Concluded,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -150,6 +170,7 @@ pub struct MermaidDiagramView {
     pub rendered: bool,
     pub rendered_theme: String,
     pub published_attachment_id: Option<String>,
+    pub published_source_attachment_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -359,6 +380,13 @@ pub struct ChangeSetMutationResponse {
     pub catalog_revision: i64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CloneChangeSetResponse {
+    pub change_set: ChangeSet,
+    pub revision: i64,
+    pub catalog_revision: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DeleteChangeSetResponse {
     pub change_set_id: String,
@@ -565,6 +593,8 @@ impl ComposerService {
             tickets: Vec::new(),
             selected_ticket_ids: Vec::new(),
             closed: false,
+            archive_outcome: None,
+            closed_at: None,
             submission_attempt: None,
         };
         match self
@@ -580,6 +610,91 @@ impl ComposerService {
                     revision: change_set_revision,
                     value: change_set_view(change_set),
                 },
+                catalog_revision,
+            }),
+            ConditionalSaveChangeSetOutcome::Conflict => Err(ServiceError::AlreadyExists {
+                resource: "change set".into(),
+                id: change_set_id,
+            }),
+        }
+    }
+
+    pub(crate) fn clone_change_set(
+        &self,
+        source_change_set_id: &str,
+        name: String,
+    ) -> Result<CloneChangeSetResponse, ServiceError> {
+        if name.trim().is_empty() {
+            return Err(invalid("change set name must not be empty"));
+        }
+        let source = self.load_change_set(source_change_set_id)?;
+        if !source.change_set.closed {
+            return Err(invalid("only archived change sets can be cloned"));
+        }
+        if let Some(ticket_id) = source.change_set.submission_attempt_ticket_id() {
+            return Err(ServiceError::SubmissionClaimed {
+                ticket_id: ticket_id.into(),
+            });
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let keys = source
+            .change_set
+            .tickets
+            .iter()
+            .map(|change| {
+                clone_source_ticket_key(change)
+                    .ok_or_else(|| invalid("change set contains a local ticket that cannot resync"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !keys.iter().all(|key| seen.insert(key.clone())) {
+            return Err(invalid(
+                "change set contains the same Jira ticket more than once",
+            ));
+        }
+        let tickets = keys
+            .into_iter()
+            .enumerate()
+            .map(|(sibling_order, key)| {
+                self.fetch_jira(&key).map(|ticket| TicketChange {
+                    id: ticket.key.clone(),
+                    original: Some(ticket),
+                    updated: None,
+                    kind: ChangeKind::Synced,
+                    submitted: None,
+                    retry_blocked: false,
+                    create_attempt: false,
+                    sibling_order,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if tickets.is_empty() {
+            return Err(invalid("change set has no Jira tickets to clone"));
+        }
+
+        let change_set_id = self.next_change_set_id()?;
+        let selected_ticket_ids = tickets.iter().map(|ticket| ticket.id.clone()).collect();
+        let change_set = ChangeSet {
+            id: change_set_id.clone(),
+            name,
+            tickets,
+            selected_ticket_ids,
+            closed: false,
+            archive_outcome: None,
+            closed_at: None,
+            submission_attempt: None,
+        };
+        match self
+            .runtime
+            .block_on(self.storage.save_change_set_if_revision(&change_set, None))
+            .map_err(storage_error)?
+        {
+            ConditionalSaveChangeSetOutcome::Saved {
+                change_set_revision,
+                catalog_revision,
+            } => Ok(CloneChangeSetResponse {
+                change_set,
+                revision: change_set_revision,
                 catalog_revision,
             }),
             ConditionalSaveChangeSetOutcome::Conflict => Err(ServiceError::AlreadyExists {
@@ -2394,6 +2509,8 @@ fn change_set_catalog_view(change_set: ChangeSet) -> ChangeSetCatalogChangeSetVi
         id: change_set.id,
         name: change_set.name,
         closed: change_set.closed,
+        archive_outcome: change_set.archive_outcome.map(Into::into),
+        closed_at: change_set.closed_at.map(|date| date.to_rfc3339()),
         selected_ticket_ids: selected,
         tickets,
         has_attachments,
@@ -2406,6 +2523,8 @@ fn change_set_view(change_set: ChangeSet) -> ChangeSetView {
         id: change_set.id,
         name: change_set.name,
         closed: change_set.closed,
+        archive_outcome: change_set.archive_outcome.map(Into::into),
+        closed_at: change_set.closed_at.map(|date| date.to_rfc3339()),
         selected_ticket_ids: selected.clone(),
         tickets: change_set
             .tickets
@@ -2424,6 +2543,18 @@ fn change_set_view(change_set: ChangeSet) -> ChangeSetView {
             .collect(),
     }
 }
+
+fn clone_source_ticket_key(change: &TicketChange) -> Option<String> {
+    change
+        .submitted
+        .as_ref()
+        .and_then(|snapshot| snapshot.updated.as_ref().or(snapshot.original.as_ref()))
+        .or(change.updated.as_ref())
+        .or(change.original.as_ref())
+        .map(|ticket| ticket.key.clone())
+        .filter(|key| !key.starts_with("NEW-"))
+}
+
 impl From<TicketKindView> for TicketKind {
     fn from(value: TicketKindView) -> Self {
         match value {
@@ -2489,6 +2620,7 @@ impl From<Ticket> for TicketView {
                     rendered: !diagram.rendered_png.is_empty(),
                     rendered_theme: diagram.rendered_theme,
                     published_attachment_id: diagram.published_attachment_id,
+                    published_source_attachment_id: diagram.published_source_attachment_id,
                 })
                 .collect(),
             web_links: value.web_links.into_iter().map(Into::into).collect(),

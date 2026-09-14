@@ -278,6 +278,8 @@ fn attachment_calls_return_images_text_blobs_and_partial_errors() {
         }],
         selected_ticket_ids: Vec::new(),
         closed: false,
+        archive_outcome: None,
+        closed_at: None,
         submission_attempt: None,
     });
     service.flush().unwrap();
@@ -432,6 +434,8 @@ fn workspace_compacts_backlog_and_change_set_payloads() {
         id: "CS-open".into(),
         name: "Open".into(),
         closed: false,
+        archive_outcome: None,
+        closed_at: None,
         selected_ticket_ids: Vec::new(),
         tickets: Vec::new(),
         has_attachments: true,
@@ -440,6 +444,8 @@ fn workspace_compacts_backlog_and_change_set_payloads() {
         id: "CS-closed".into(),
         name: "Closed".into(),
         closed: true,
+        archive_outcome: None,
+        closed_at: None,
         selected_ticket_ids: Vec::new(),
         tickets: Vec::new(),
         has_attachments: false,

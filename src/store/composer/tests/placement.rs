@@ -176,6 +176,8 @@ fn opening_a_change_set_selects_the_first_visible_ticket() {
         ],
         selected_ticket_ids: Vec::new(),
         closed: false,
+        archive_outcome: None,
+        closed_at: None,
         submission_attempt: None,
     }]);
 
@@ -582,6 +584,8 @@ fn tasks_allow_subtask_children() {
         id: "CS-1".into(),
         name: "Task subtasks".into(),
         closed: false,
+        archive_outcome: None,
+        closed_at: None,
         tickets: vec![TicketChange {
             id: "TASK-1".into(),
             original: Some(Ticket {

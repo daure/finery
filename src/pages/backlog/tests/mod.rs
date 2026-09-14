@@ -33,6 +33,7 @@ use crate::jira::JiraOption;
 use crate::store::work_items::{
     BacklogSnapshot, IssueStatusTransition, RunwayCapacitySource, Sprint, StatusTransition,
     SubtaskProgress, VelocityReport, VelocitySprint, WorkItem, apply_capacity, rank_plan,
+    release::{ReleaseVersion, parse_date},
 };
 
 fn work_item(key: &str, title: &str) -> WorkItem {
@@ -251,7 +252,8 @@ fn backlog_header_orders_toolbar_focus_and_shows_desktop_labels() {
     assert!(cell_position(&header, "Group by") < cell_position(&header, "Estimated"));
     assert!(cell_position(&header, "Estimated") < cell_position(&header, "User"));
     assert!(cell_position(&header, "User") < cell_position(&header, "Type"));
-    assert!(cell_position(&header, "Type") < cell_position(&header, "Velocity"));
+    assert!(cell_position(&header, "Type") < cell_position(&header, "Status"));
+    assert!(cell_position(&header, "Status") < cell_position(&header, "Velocity"));
     assert!(cell_position(&header, "Velocity") < cell_position(&header, "Refresh"));
 
     let focus_position = |path| {
@@ -286,6 +288,10 @@ fn backlog_header_orders_toolbar_focus_and_shows_desktop_labels() {
     );
     assert!(
         focus_position(TreePath::from_keys([ChildKey::new("issue-types")]))
+            < focus_position(TreePath::from_keys([ChildKey::new("statuses")]))
+    );
+    assert!(
+        focus_position(TreePath::from_keys([ChildKey::new("statuses")]))
             < focus_position(TreePath::from_keys([ChildKey::new("velocity")]))
     );
     assert!(
@@ -334,8 +340,11 @@ fn backlog_header_uses_two_rows_for_compact_widths() {
     assert!(lines[0].contains(" R"));
     assert!(!lines[0].contains(" G"));
     assert!(lines[1].contains("Search..."));
-    assert!(lines[1].contains("User"));
-    assert!(lines[1].contains("Type"));
+    assert!(lines[1].contains("󰀄"));
+    assert!(lines[1].contains("󰡯"));
+    assert!(lines[1].contains(""));
+    assert!(!lines[1].contains("User"));
+    assert!(!lines[1].contains("Type"));
     assert!(lines[1].contains("󰑭"));
     assert!(!lines[1].contains("Estimated"));
     let group_by = layout
@@ -347,8 +356,9 @@ fn backlog_header_uses_two_rows_for_compact_widths() {
         })
         .unwrap();
     assert!(group_by.area.x > cell_position(&lines[0], "󰖟").unwrap() as u16);
-    assert!(cell_position(&lines[1], "󰑭") < cell_position(&lines[1], "User"));
-    assert!(cell_position(&lines[1], "User") < cell_position(&lines[1], "Type"));
+    assert!(cell_position(&lines[1], "󰑭") < cell_position(&lines[1], "󰀄"));
+    assert!(cell_position(&lines[1], "󰀄") < cell_position(&lines[1], "󰡯"));
+    assert!(cell_position(&lines[1], "󰡯") < cell_position(&lines[1], ""));
     let focus_position = |path| {
         layout
             .focus_targets()
@@ -386,6 +396,10 @@ fn backlog_header_uses_two_rows_for_compact_widths() {
     assert!(
         focus_position(TreePath::from_keys([ChildKey::new("users")]))
             < focus_position(TreePath::from_keys([ChildKey::new("issue-types")]))
+    );
+    assert!(
+        focus_position(TreePath::from_keys([ChildKey::new("issue-types")]))
+            < focus_position(TreePath::from_keys([ChildKey::new("statuses")]))
     );
 }
 
@@ -466,6 +480,57 @@ fn backlog_groups_sprint_and_backlog_tickets_by_release_with_a_missing_version_g
             ..
         })
     ));
+}
+
+#[test]
+fn backlog_groups_releases_by_scheduled_dates_before_version_names() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    snapshot.sprints[0].work_items[0].fix_versions = vec!["zeta".into()];
+    snapshot.sprints[0].work_items[0].releases = vec![ReleaseVersion {
+        id: "1".into(),
+        name: "zeta".into(),
+        start_date: parse_date("2026-09-14"),
+        end_date: parse_date("2026-09-28"),
+    }];
+    snapshot.work_items[0].fix_versions = vec!["alpha".into()];
+    snapshot.work_items[0].releases = vec![ReleaseVersion {
+        id: "2".into(),
+        name: "alpha".into(),
+        start_date: parse_date("2026-10-12"),
+        end_date: parse_date("2026-10-26"),
+    }];
+    let mut undated = work_item("FIN-9", "Undated release work");
+    undated.fix_versions = vec!["beta".into()];
+    undated.releases = vec![ReleaseVersion {
+        id: "3".into(),
+        name: "beta".into(),
+        start_date: None,
+        end_date: None,
+    }];
+    snapshot
+        .work_items
+        .extend([undated, work_item("FIN-10", "Unreleased work")]);
+
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    tree.group_by_release_for_test();
+    let area = Rect::new(0, 0, 100, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let lines = rendered_lines(&terminal, area);
+    let position = |label: &str| lines.iter().position(|line| line.contains(label)).unwrap();
+    assert!(position("zeta •") < position("alpha •"));
+    assert!(position("alpha •") < position("beta •"));
+    assert!(position("beta •") < position("(no release version) •"));
 }
 
 #[test]
@@ -683,6 +748,39 @@ fn user_filter_shows_only_matching_assignees() {
     let text = rendered_lines(&terminal, area).concat();
     assert!(!text.contains("Ada ticket"));
     assert!(text.contains("Maya ticket"));
+}
+
+#[test]
+fn status_filter_shows_only_matching_ticket_statuses() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    snapshot.work_items = vec![
+        WorkItem {
+            status: "In Progress".into(),
+            ..work_item("FIN-8", "Active ticket")
+        },
+        WorkItem {
+            status: "Done".into(),
+            ..work_item("FIN-9", "Completed ticket")
+        },
+    ];
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    tree.set_statuses_filter(vec!["In Progress".into()]);
+    let area = Rect::new(0, 0, 100, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(text.contains("Active ticket"));
+    assert!(!text.contains("Completed ticket"));
 }
 
 #[test]
@@ -904,6 +1002,24 @@ fn backlog_estimated_toggle_is_focusable_with_shift_e() {
         .unwrap();
 
     assert_eq!(estimated.hotkey_sequences, ["shift+e"]);
+}
+
+#[test]
+fn backlog_status_filter_is_focusable_with_shift_s() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot(), sender, Default::default());
+    let area = Rect::new(0, 0, 100, 16);
+    let mut layout = LayoutCtx::new();
+    view.layout(area, &mut layout);
+
+    let statuses = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.path == TreePath::from_keys([ChildKey::new("statuses")]))
+        .unwrap();
+
+    assert_eq!(statuses.hotkey_sequences, ["shift+s"]);
 }
 
 #[test]
@@ -2831,13 +2947,19 @@ fn v_opens_a_focused_description_snackbar() {
         matches!(event.focus_request(), Some(FocusRequest::Path(path)) if path == &TreePath::from_keys([ChildKey::second()]))
     );
     let mut layout = LayoutCtx::new();
-    page.layout(area, &mut layout);
+    layout.with_overlay_bounds(area, |ctx| page.layout(area, ctx));
     assert!(
         layout
             .focus_targets()
             .iter()
             .any(|target| target.id == FocusId::new("syntax-highlighter"))
     );
+    let description = layout
+        .overlays()
+        .iter()
+        .find(|entry| entry.layer == tuicore::OverlayLayer::Modal)
+        .expect("description dialog should be visible");
+    assert_eq!(description.area.width, 72);
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
     terminal
         .draw(|frame| {
@@ -2867,7 +2989,14 @@ fn v_opens_a_focused_description_snackbar() {
     assert_eq!(key_cell.fg, tuicore::theme().muted_fg());
 
     let mobile = Rect::new(0, 0, 60, 30);
-    page.layout(mobile, &mut LayoutCtx::new());
+    let mut layout = LayoutCtx::new();
+    layout.with_overlay_bounds(mobile, |ctx| page.layout(mobile, ctx));
+    let description = layout
+        .overlays()
+        .iter()
+        .find(|entry| entry.layer == tuicore::OverlayLayer::Modal)
+        .expect("description dialog should stay visible after resize");
+    assert_eq!(description.area.width, 60);
     let mut terminal = Terminal::new(TestBackend::new(mobile.width, mobile.height)).unwrap();
     terminal
         .draw(|frame| {

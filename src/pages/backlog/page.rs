@@ -534,6 +534,7 @@ pub(crate) struct BacklogPage {
     issue_types_requested: bool,
     velocity_dialog_close_requested: Rc<Cell<bool>>,
     description_dialog_close_requested: Rc<Cell<bool>>,
+    description_dialog_active: bool,
     area: Rect,
 }
 
@@ -604,6 +605,7 @@ impl BacklogPage {
             issue_types_requested: false,
             velocity_dialog_close_requested,
             description_dialog_close_requested,
+            description_dialog_active: false,
             area: Rect::default(),
         }
     }
@@ -1129,6 +1131,13 @@ impl BacklogPage {
                 }
                 BacklogSectionEvent::UsersChanged(users) => {
                     self.view.base_mut().base_mut().set_users_filter(users);
+                    self.focus_backlog_data(ctx);
+                }
+                BacklogSectionEvent::StatusesChanged(statuses) => {
+                    self.view
+                        .base_mut()
+                        .base_mut()
+                        .set_statuses_filter(statuses);
                     self.focus_backlog_data(ctx);
                 }
                 BacklogSectionEvent::OpenVelocity => self.open_velocity_dialog(ctx),
@@ -2324,6 +2333,7 @@ impl BacklogPage {
         let settings = settings.read().expect("settings lock poisoned");
         self.velocity_dialog_close_requested.set(false);
         self.description_dialog_close_requested.set(false);
+        self.description_dialog_active = false;
         self.view.replace_layer(
             velocity_dialog(
                 self.snapshot
@@ -2355,6 +2365,7 @@ impl BacklogPage {
     ) {
         self.velocity_dialog_close_requested.set(false);
         self.description_dialog_close_requested.set(false);
+        self.description_dialog_active = true;
         let close_requested = Rc::clone(&self.description_dialog_close_requested);
         let content = Flex::column().child(
             "description",
@@ -2410,6 +2421,7 @@ impl BacklogPage {
         if self.velocity_dialog_close_requested.replace(false)
             || self.description_dialog_close_requested.replace(false)
         {
+            self.description_dialog_active = false;
             self.view.set_active_with_context(false, ctx);
             self.focus_backlog_data(ctx);
         }
@@ -3917,6 +3929,11 @@ impl TuiNode for BacklogPage {
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.area = area;
+        if self.description_dialog_active {
+            self.view.set_docked(
+                DockSpec::bottom(50).cross_percent(description_width_percent(area.width)),
+            );
+        }
         if self.shows_initial_loading() {
             ctx.with_focus_fallback(FocusId::new("backlog-loading"), area, |ctx| {
                 self.loading_view.layout(area, ctx)

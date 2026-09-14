@@ -13,12 +13,12 @@ use tuicore::{
 };
 
 use crate::{
-    app_settings::AppSettings,
+    app_settings::{AppSettings, ComposerKeyBinding},
     service::AppService,
     store::composer::{ChangeSet, ComposerState},
 };
 
-use super::{change_set_list::ChangeSetListView, ticket_editor::TicketEditor};
+use super::{change_set_overview::ChangeSetOverview, ticket_editor::TicketEditor};
 
 pub(crate) fn page(
     change_sets: Vec<ChangeSet>,
@@ -30,9 +30,10 @@ pub(crate) fn page(
 
 pub(crate) struct ComposerPage {
     state: Rc<RefCell<ComposerState>>,
-    change_sets: ChangeSetListView,
+    change_sets: ChangeSetOverview,
     editor: TicketEditor,
     service: AppService,
+    home: ComposerKeyBinding,
     catalog_revision: i64,
     poll_elapsed: Duration,
     external_reload_needed: bool,
@@ -46,15 +47,15 @@ impl ComposerPage {
     ) -> Self {
         let composer_state = ComposerState::from_change_sets(change_sets);
         let state = Rc::new(RefCell::new(composer_state));
-        let composer_keys = settings
-            .read()
-            .expect("settings lock poisoned")
-            .composer_keys
-            .clone();
+        let settings_guard = settings.read().expect("settings lock poisoned");
+        let composer_keys = settings_guard.composer_keys.clone();
+        let home = settings_guard.backlog_keys.home.clone();
+        drop(settings_guard);
         Self {
-            change_sets: ChangeSetListView::new(Rc::clone(&state), service.clone(), composer_keys),
+            change_sets: ChangeSetOverview::new(Rc::clone(&state), service.clone(), composer_keys),
             editor: TicketEditor::new(Rc::clone(&state), settings, service.clone()),
             state,
+            home,
             catalog_revision: service.composer_catalog_revision(),
             service,
             poll_elapsed: Duration::ZERO,
@@ -96,6 +97,23 @@ impl ComposerPage {
         if is_open {
             self.editor.on_open(ctx);
         }
+    }
+
+    fn home_matches(&self, event: &TuiEvent) -> bool {
+        matches!(event, TuiEvent::Key(key) if self.home.matches(*key))
+    }
+
+    fn reset_to_home(&mut self, ctx: &mut EventCtx<()>) {
+        let was_open = self.in_change_set();
+        let _ = self
+            .state
+            .borrow_mut()
+            .dispatch(crate::store::composer::ComposerAction::CloseChangeSet);
+        self.editor.sync();
+        self.change_sets.reset_to_home(ctx);
+        self.handle_active_view_change(was_open, ctx);
+        ctx.request_layout();
+        ctx.request_redraw();
     }
 
     fn open_selected_ticket(
@@ -421,6 +439,10 @@ impl TuiNode for ComposerPage {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        if self.home_matches(event) {
+            self.reset_to_home(ctx);
+            return EventOutcome::Handled;
+        }
         let was_open = self.in_change_set();
         let outcome = self.active_mut().event(event, ctx);
         self.handle_active_view_change(was_open, ctx);
@@ -436,6 +458,10 @@ impl TuiNode for ComposerPage {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
+        if self.home_matches(event) {
+            self.reset_to_home(ctx);
+            return EventOutcome::Handled;
+        }
         let was_open = self.in_change_set();
         let outcome = self.active_mut().dispatch_event(route, event, ctx);
         self.handle_active_view_change(was_open, ctx);

@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::work_items::WorkItem;
 
+mod archive;
 pub(crate) mod summary;
+pub(crate) use archive::ArchiveOutcome;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum TicketKind {
@@ -109,6 +111,8 @@ pub(crate) struct MermaidDiagram {
     pub rendered_theme: String,
     #[serde(default)]
     pub published_attachment_id: Option<String>,
+    #[serde(default)]
+    pub published_source_attachment_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -270,6 +274,10 @@ pub(crate) struct ChangeSet {
     #[serde(default)]
     pub closed: bool,
     #[serde(default)]
+    pub closed_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub archive_outcome: Option<ArchiveOutcome>,
+    #[serde(default)]
     pub submission_attempt: Option<SubmissionAttempt>,
 }
 
@@ -313,10 +321,19 @@ pub(crate) enum ComposerAction {
         id: String,
         name: String,
     },
+    CloneChangeSet(ChangeSet),
     DeleteChangeSet(String),
+    ArchiveChangeSet {
+        id: String,
+        outcome: ArchiveOutcome,
+    },
     OpenChangeSet(String),
     CloseChangeSet,
     RenameChangeSet(String),
+    RenameChangeSetById {
+        id: String,
+        name: String,
+    },
     SelectTicket(Option<String>),
     SetSelectedTickets(Vec<String>),
     SetViewMode(ComposerViewMode),
@@ -500,6 +517,8 @@ impl ComposerState {
                     id: "CS-1".into(),
                     name: "Checkout reliability".into(),
                     closed: false,
+                    archive_outcome: None,
+                    closed_at: None,
                     tickets: vec![
                         TicketChange {
                             id: tickets[0].key.clone(),
@@ -544,6 +563,8 @@ impl ComposerState {
                     tickets: Vec::new(),
                     selected_ticket_ids: Vec::new(),
                     closed: false,
+                    archive_outcome: None,
+                    closed_at: None,
                     submission_attempt: None,
                 },
             ],
@@ -597,7 +618,7 @@ impl ComposerState {
         if self
             .change_sets
             .iter()
-            .any(|set| set.id == change_set_id && set.submission_attempt.is_none())
+            .any(|set| set.id == change_set_id && !set.closed && set.submission_attempt.is_none())
         {
             self.submitting_change_sets.insert(change_set_id.into());
             true
@@ -678,7 +699,8 @@ impl ComposerState {
         let Some((ticket_id, index)) = self.attachment_target() else {
             return false;
         };
-        self.view_mode == ComposerViewMode::Changes
+        self.remote_queries_allowed()
+            && self.view_mode == ComposerViewMode::Changes
             && !self.active_change_set_is_submitting()
             && self.active_set().is_some_and(|set| {
                 set.tickets
@@ -701,7 +723,8 @@ impl ComposerState {
         let Some((ticket_id, _)) = self.attachment_target() else {
             return false;
         };
-        self.view_mode == ComposerViewMode::Changes
+        self.remote_queries_allowed()
+            && self.view_mode == ComposerViewMode::Changes
             && !self.active_change_set_is_submitting()
             && self.active_set().is_some_and(|set| {
                 set.tickets
@@ -717,7 +740,8 @@ impl ComposerState {
         let Some(ticket_id) = self.selected_parent_ticket_id() else {
             return false;
         };
-        self.view_mode == ComposerViewMode::Changes
+        self.remote_queries_allowed()
+            && self.view_mode == ComposerViewMode::Changes
             && !self.active_change_set_is_submitting()
             && self
                 .active_set()
@@ -729,7 +753,8 @@ impl ComposerState {
         let Some((ticket_id, index)) = self.mermaid_diagram_target() else {
             return false;
         };
-        self.view_mode == ComposerViewMode::Changes
+        self.remote_queries_allowed()
+            && self.view_mode == ComposerViewMode::Changes
             && !self.active_change_set_is_submitting()
             && self.active_set().is_some_and(|set| {
                 set.tickets
@@ -800,7 +825,8 @@ impl ComposerState {
 
     pub(crate) fn selected_is_editable(&self) -> bool {
         self.selected_change().is_some_and(|change| {
-            self.view_mode == ComposerViewMode::Changes
+            self.remote_queries_allowed()
+                && self.view_mode == ComposerViewMode::Changes
                 && !self.active_change_set_is_submitting()
                 && change.can_edit(true)
         })
@@ -962,6 +988,9 @@ impl ComposerState {
     }
 
     pub(crate) fn submission_plan(&self, ids: &[String]) -> Result<SubmissionPlan, String> {
+        if self.active_set().is_some_and(|set| set.closed) {
+            return Err("Archived change sets cannot be submitted".into());
+        }
         if ids.is_empty() {
             return Err("Select at least one ticket to commit".into());
         }
@@ -1060,6 +1089,9 @@ impl ComposerState {
     }
 
     pub(crate) fn dispatch(&mut self, action: ComposerAction) -> Result<(), PlacementError> {
+        if self.active_set().is_some_and(|set| set.closed) && action.mutates_active_change_set() {
+            return Err(PlacementError::ClosedChangeSet);
+        }
         if self.active_change_set_is_submitting() && action.mutates_active_change_set() {
             return Err(PlacementError::NotEditable);
         }
@@ -1071,8 +1103,14 @@ impl ComposerState {
                     tickets: Vec::new(),
                     selected_ticket_ids: Vec::new(),
                     closed: false,
+                    archive_outcome: None,
+                    closed_at: None,
                     submission_attempt: None,
                 });
+            }
+            ComposerAction::CloneChangeSet(change_set) => self.change_sets.push(change_set),
+            ComposerAction::ArchiveChangeSet { id, outcome } => {
+                self.archive_change_set(&id, outcome)?
             }
             ComposerAction::DeleteChangeSet(id) => {
                 if self.submitting_change_sets.contains(&id) {
@@ -1094,6 +1132,14 @@ impl ComposerState {
             ComposerAction::CloseChangeSet => self.close_change_set(),
             ComposerAction::RenameChangeSet(name) => {
                 if let Some(change_set) = self.active_set_mut() {
+                    change_set.name = name;
+                }
+            }
+            ComposerAction::RenameChangeSetById { id, name } => {
+                if self.submitting_change_sets.contains(&id) {
+                    return Err(PlacementError::NotEditable);
+                }
+                if let Some(change_set) = self.change_sets.iter_mut().find(|set| set.id == id) {
                     change_set.name = name;
                 }
             }
@@ -1677,6 +1723,9 @@ impl ComposerState {
         let set = self
             .change_set_mut(change_set_id)
             .ok_or(PlacementError::UnknownTicket)?;
+        if set.archive_outcome.is_some() {
+            return Err(PlacementError::ClosedChangeSet);
+        }
         let change = set
             .tickets
             .iter_mut()
@@ -1715,7 +1764,9 @@ impl ComposerState {
             }
         }
         set.selected_ticket_ids.retain(|selected| selected != id);
-        set.closed = !set.tickets.is_empty() && set.tickets.iter().all(TicketChange::is_submitted);
+        if !set.tickets.is_empty() && set.tickets.iter().all(TicketChange::is_submitted) {
+            set.mark_closed();
+        }
         Ok(())
     }
 
@@ -1794,6 +1845,9 @@ impl ComposerState {
         let set = self
             .change_set_mut(change_set_id)
             .ok_or(PlacementError::UnknownTicket)?;
+        if set.closed {
+            return Err(PlacementError::ClosedChangeSet);
+        }
         if set.submission_attempt.is_none() {
             set.submission_attempt = Some(SubmissionAttempt {
                 owner_id,
@@ -2025,6 +2079,7 @@ impl ComposerState {
                 rendered_png,
                 rendered_theme,
                 published_attachment_id: None,
+                published_source_attachment_id: None,
             });
         });
         let Some(index) = self
@@ -2543,6 +2598,11 @@ impl ComposerAction {
                 | Self::DeleteSelectedAttachment
                 | Self::RestoreSelectedAttachment
                 | Self::RemoveSelectedAttachment
+                | Self::AddAttachment { .. }
+                | Self::AddMermaidDiagram { .. }
+                | Self::RenameSelectedMermaidDiagram(_)
+                | Self::UpdateSelectedMermaidDiagramMarkup { .. }
+                | Self::RemoveSelectedMermaidDiagram
                 | Self::SetSelectedTickets(_)
         )
     }
@@ -2551,6 +2611,8 @@ impl ComposerAction {
         matches!(
             self,
             Self::RenameChangeSet(_)
+                | Self::RenameChangeSetById { .. }
+                | Self::ArchiveChangeSet { .. }
                 | Self::CreateTicket { .. }
                 | Self::CreateTicketAt { .. }
                 | Self::CreateTicketWithId { .. }

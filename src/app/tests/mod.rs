@@ -2,11 +2,11 @@ use std::time::Duration;
 
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use tuicore::{
-    AnimationSettings, EventCtx, Key, KeyEvent, KeyModifiers, Propagation, RenderCtx, TuiEvent,
-    TuiNode,
+    AnimationSettings, ChildKey, EventCtx, FocusRequest, Key, KeyEvent, KeyModifiers, Propagation,
+    RenderCtx, TreePath, TuiEvent, TuiNode,
 };
 
-use crate::service::AppService;
+use crate::{service::AppService, store::composer::ComposerState};
 
 use super::root;
 
@@ -97,4 +97,72 @@ fn home_shortcut_closes_global_dialogs() {
     assert!(!app.view.base().is_active());
     assert!(!app.view.base().base().is_active());
     assert_eq!(ctx.propagation(), Propagation::Stopped);
+}
+
+#[test]
+fn home_shortcut_resets_composer_to_its_overview() {
+    tuicore::init();
+    let mut app = root(AppService::for_tests(), ComposerState::demo().change_sets);
+    let area = Rect::new(0, 0, 96, 30);
+    app.selected_page.set(Some(1));
+    let mut layout = tuicore::LayoutCtx::new();
+    app.layout(area, &mut layout);
+    let tickets = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id == tuicore::FocusId::new("data-view"))
+        .unwrap()
+        .clone();
+    app.dispatch_focus(&tickets, true, &mut tuicore::FocusCtx::default());
+    app.dispatch_event(
+        &tuicore::EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::default(),
+    );
+
+    let mut ctx = EventCtx::default();
+    assert!(app.go_home(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('h'),
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut ctx,
+    ));
+
+    app.layout(area, &mut tuicore::LayoutCtx::new());
+    let tabs = tuicore::EventRoute::new(TreePath::from_keys([
+        ChildKey::first(),
+        ChildKey::first(),
+        ChildKey::first(),
+        ChildKey::new("pages"),
+    ]));
+    let mut select_composer = EventCtx::default();
+    app.view.dispatch_event(
+        &tabs,
+        &TuiEvent::Key(KeyEvent::from(Key::Char(']'))),
+        &mut select_composer,
+    );
+    assert!(matches!(
+        select_composer.focus_request(),
+        Some(FocusRequest::FirstChildOf { .. })
+    ));
+
+    app.selected_page.set(Some(1));
+    app.layout(area, &mut tuicore::LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            app.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let text: String = (0..area.height)
+        .flat_map(|y| {
+            (0..area.width).map(move |x| buffer.cell((x, y)).unwrap().symbol().to_owned())
+        })
+        .collect();
+
+    assert!(text.contains("New change set"));
 }

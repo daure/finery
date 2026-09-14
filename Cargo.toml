@@ -30,7 +30,7 @@ path = "src/main.rs"
 [dependencies]
 axum = "0.8"
 base64 = "0.22"
-chrono = "0.4.45"
+chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 ratatui = "0.30"
@@ -42,7 +42,7 @@ serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "sqlite", "postgres", "migrate", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "net", "signal"] }
 tracing-appender = "0.2"
-tuicore = { version = "0.39.0", path = "../tuicore" }
+tuicore = { version = "0.40.0", path = "../tuicore" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

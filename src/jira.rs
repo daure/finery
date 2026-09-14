@@ -1,6 +1,7 @@
 use std::{
     cmp::{Ordering, Reverse},
     collections::{HashMap, HashSet},
+    io::Read,
     time::Duration,
 };
 
@@ -43,6 +44,7 @@ const ISSUE_FIELDS: [&str; 14] = [
     "issuelinks",
     "statuscategorychangedate",
 ];
+const MERMAID_SOURCE_BYTES_LIMIT: usize = 5 * 1024 * 1024;
 
 const BACKLOG_FIELDS: [&str; 11] = [
     "summary",
@@ -428,6 +430,7 @@ pub(crate) fn fetch_composer_issues(
         .map(|issue| -> Result<_, String> {
             let (mut ticket, work_item) = to_ticket_and_work_item(issue, story_points_field_id);
             ticket.web_links = fetch_web_links(&client, &base_url, &email, &token, &ticket.key)?;
+            hydrate_mermaid_diagrams(&client, &email, &token, &mut ticket)?;
             let key = ticket.key.clone();
             Ok((
                 key,
@@ -1373,6 +1376,7 @@ pub(crate) fn fetch_with_subtasks(
     let subtask_keys = composer_subtask_keys(&issue);
     let mut ticket = to_ticket_with_story_points(issue, story_points_field_id);
     ticket.web_links = fetch_web_links(&client, &base_url, &email, &token, key)?;
+    hydrate_mermaid_diagrams(&client, &email, &token, &mut ticket)?;
     let subtasks = bulk_fetch_tickets(
         &client,
         &base_url,
@@ -2413,6 +2417,7 @@ fn bulk_fetch_tickets(
         .map(|issue| {
             let mut ticket = to_ticket_with_story_points(issue, story_points_field_id);
             ticket.web_links = fetch_web_links(client, base_url, email, token, &ticket.key)?;
+            hydrate_mermaid_diagrams(client, email, token, &mut ticket)?;
             Ok((ticket.key.clone(), ticket))
         })
         .collect()
@@ -2453,6 +2458,7 @@ fn fetch_ticket(
     let mut ticket = response_json::<JiraIssue>(response)
         .map(|issue| to_ticket_with_story_points(issue, story_points_field_id))?;
     ticket.web_links = fetch_web_links(client, base_url, email, token, key)?;
+    hydrate_mermaid_diagrams(client, email, token, &mut ticket)?;
     Ok(ticket)
 }
 
@@ -2568,7 +2574,7 @@ fn create_issue(
         warnings.push(created_issue_warning(&created.key, message));
     }
     let published_diagrams =
-        match apply_mermaid_diagrams(client, base_url, email, token, &created.key, desired) {
+        match apply_mermaid_diagrams(client, base_url, email, token, &created.key, None, desired) {
             Ok(diagrams) => diagrams,
             Err(message) => {
                 warnings.push(created_issue_warning(&created.key, message));
@@ -2658,8 +2664,15 @@ fn update_issue(
         )?;
     }
     apply_attachment_changes(client, base_url, email, token, &original.key, desired)?;
-    let published_diagrams =
-        apply_mermaid_diagrams(client, base_url, email, token, &original.key, desired)?;
+    let published_diagrams = apply_mermaid_diagrams(
+        client,
+        base_url,
+        email,
+        token,
+        &original.key,
+        Some(original),
+        desired,
+    )?;
     apply_web_link_changes(
         client,
         base_url,
@@ -2754,12 +2767,39 @@ fn apply_mermaid_diagrams(
     email: &str,
     token: &str,
     issue_key: &str,
+    original: Option<&Ticket>,
     desired: &Ticket,
-) -> Result<HashMap<String, String>, String> {
+) -> Result<HashMap<String, PublishedMermaidAttachments>, String> {
     let renderer = MermaidRenderer::new();
     let active_theme = theme();
     let mut attachment_ids = HashMap::new();
+    for removed in original.into_iter().flat_map(|ticket| {
+        ticket.mermaid_diagrams.iter().filter(|diagram| {
+            !desired
+                .mermaid_diagrams
+                .iter()
+                .any(|candidate| candidate.id == diagram.id)
+        })
+    }) {
+        delete_published_mermaid_attachments(client, base_url, email, token, removed)?;
+    }
     for diagram in &desired.mermaid_diagrams {
+        let original_diagram = original.and_then(|ticket| {
+            ticket
+                .mermaid_diagrams
+                .iter()
+                .find(|candidate| candidate.id == diagram.id)
+        });
+        if original_diagram.is_some_and(|source| mermaid_diagram_is_unchanged(source, diagram)) {
+            attachment_ids.insert(
+                diagram.id.clone(),
+                PublishedMermaidAttachments::from_diagram(diagram),
+            );
+            continue;
+        }
+        if let Some(source) = original_diagram {
+            delete_published_mermaid_attachments(client, base_url, email, token, source)?;
+        }
         let png = if diagram.rendered_png.is_empty()
             || diagram.rendered_theme != active_theme.name().id()
         {
@@ -2778,55 +2818,147 @@ fn apply_mermaid_diagrams(
         } else {
             diagram.rendered_png.clone()
         };
-        let part = reqwest::blocking::multipart::Part::bytes(png)
-            .file_name(mermaid_png_filename(&diagram.title))
-            .mime_str("image/png")
-            .map_err(|error| error.to_string())?;
-        let form = reqwest::blocking::multipart::Form::new().part("file", part);
-        let response = client
-            .post(format!(
-                "{base_url}/rest/api/3/issue/{issue_key}/attachments"
-            ))
-            .basic_auth(email, Some(token))
-            .header("Accept", "application/json")
-            .header("X-Atlassian-Token", "no-check")
-            .multipart(form)
-            .send()
-            .map_err(|error| error.to_string())?;
-        let attachments = response_json::<Vec<Value>>(response)?;
-        let attachment_id = attachments
-            .first()
-            .and_then(|attachment| attachment.get("id"))
-            .and_then(|id| {
-                id.as_str()
-                    .map(str::to_owned)
-                    .or_else(|| id.as_u64().map(|id| id.to_string()))
-            })
-            .ok_or_else(|| {
-                format!(
-                    "Jira did not return an attachment ID for Mermaid diagram {}",
-                    diagram.title
-                )
-            })?;
-        attachment_ids.insert(diagram.id.clone(), attachment_id);
+        let source_attachment_id = upload_mermaid_attachment(
+            client,
+            base_url,
+            email,
+            token,
+            issue_key,
+            mermaid_source_filename(&diagram.title),
+            "text/vnd.mermaid",
+            diagram.markup.as_bytes().to_vec(),
+            &diagram.title,
+        )?;
+        let png_attachment_id = upload_mermaid_attachment(
+            client,
+            base_url,
+            email,
+            token,
+            issue_key,
+            mermaid_png_filename(&diagram.title),
+            "image/png",
+            png,
+            &diagram.title,
+        )?;
+        attachment_ids.insert(
+            diagram.id.clone(),
+            PublishedMermaidAttachments {
+                png_attachment_id: Some(png_attachment_id),
+                source_attachment_id: Some(source_attachment_id),
+            },
+        );
     }
     Ok(attachment_ids)
+}
+
+#[derive(Debug, Clone)]
+struct PublishedMermaidAttachments {
+    png_attachment_id: Option<String>,
+    source_attachment_id: Option<String>,
+}
+
+impl PublishedMermaidAttachments {
+    fn from_diagram(diagram: &crate::store::composer::MermaidDiagram) -> Self {
+        Self {
+            png_attachment_id: diagram.published_attachment_id.clone(),
+            source_attachment_id: diagram.published_source_attachment_id.clone(),
+        }
+    }
+}
+
+fn mermaid_diagram_is_unchanged(
+    original: &crate::store::composer::MermaidDiagram,
+    desired: &crate::store::composer::MermaidDiagram,
+) -> bool {
+    original.title == desired.title
+        && original.diagram_type == desired.diagram_type
+        && original.markup == desired.markup
+}
+
+fn delete_published_mermaid_attachments(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    diagram: &crate::store::composer::MermaidDiagram,
+) -> Result<(), String> {
+    for attachment_id in [
+        diagram.published_source_attachment_id.as_deref(),
+        diagram.published_attachment_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let response = client
+            .delete(format!("{base_url}/rest/api/3/attachment/{attachment_id}"))
+            .basic_auth(email, Some(token))
+            .send()
+            .map_err(|error| error.to_string())?;
+        ensure_success(response)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upload_mermaid_attachment(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    issue_key: &str,
+    filename: String,
+    mime_type: &str,
+    data: Vec<u8>,
+    diagram_title: &str,
+) -> Result<String, String> {
+    let part = reqwest::blocking::multipart::Part::bytes(data)
+        .file_name(filename)
+        .mime_str(mime_type)
+        .map_err(|error| error.to_string())?;
+    let form = reqwest::blocking::multipart::Form::new().part("file", part);
+    let response = client
+        .post(format!(
+            "{base_url}/rest/api/3/issue/{issue_key}/attachments"
+        ))
+        .basic_auth(email, Some(token))
+        .header("Accept", "application/json")
+        .header("X-Atlassian-Token", "no-check")
+        .multipart(form)
+        .send()
+        .map_err(|error| error.to_string())?;
+    response_json::<Vec<Value>>(response)?
+        .first()
+        .and_then(|attachment| attachment.get("id"))
+        .and_then(|id| {
+            id.as_str()
+                .map(str::to_owned)
+                .or_else(|| id.as_u64().map(|id| id.to_string()))
+        })
+        .ok_or_else(|| {
+            format!("Jira did not return an attachment ID for Mermaid diagram {diagram_title}")
+        })
 }
 
 fn with_published_mermaid_attachments(
     mut ticket: Ticket,
     desired: &Ticket,
-    attachment_ids: &HashMap<String, String>,
+    attachment_ids: &HashMap<String, PublishedMermaidAttachments>,
 ) -> Ticket {
     ticket.mermaid_diagrams = desired
         .mermaid_diagrams
         .iter()
         .cloned()
         .map(|mut diagram| {
-            diagram.published_attachment_id = attachment_ids
-                .get(&diagram.id)
-                .cloned()
-                .or(diagram.published_attachment_id);
+            if let Some(attachments) = attachment_ids.get(&diagram.id) {
+                diagram.published_attachment_id = attachments
+                    .png_attachment_id
+                    .clone()
+                    .or(diagram.published_attachment_id);
+                diagram.published_source_attachment_id = attachments
+                    .source_attachment_id
+                    .clone()
+                    .or(diagram.published_source_attachment_id);
+            }
             diagram
         })
         .collect();
@@ -2834,6 +2966,14 @@ fn with_published_mermaid_attachments(
 }
 
 fn mermaid_png_filename(title: &str) -> String {
+    format!("{}.png", mermaid_filename_stem(title))
+}
+
+fn mermaid_source_filename(title: &str) -> String {
+    format!("{}.mmd", mermaid_filename_stem(title))
+}
+
+fn mermaid_filename_stem(title: &str) -> String {
     let stem = title
         .trim()
         .chars()
@@ -2847,7 +2987,100 @@ fn mermaid_png_filename(title: &str) -> String {
         .collect::<String>()
         .trim_matches('-')
         .to_owned();
-    format!("{}.png", if stem.is_empty() { "diagram" } else { &stem })
+    if stem.is_empty() {
+        "diagram".into()
+    } else {
+        stem
+    }
+}
+
+fn hydrate_mermaid_diagrams(
+    client: &Client,
+    email: &str,
+    token: &str,
+    ticket: &mut Ticket,
+) -> Result<(), String> {
+    let png_ids = ticket
+        .attachments
+        .iter()
+        .filter_map(|attachment| {
+            mermaid_attachment_stem(&attachment.filename, "png")
+                .map(|stem| (stem, attachment.id.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    let sources = ticket
+        .attachments
+        .iter()
+        .filter_map(|attachment| {
+            let stem = mermaid_attachment_stem(&attachment.filename, "mmd")?;
+            let png_attachment_id = png_ids.get(&stem)?.clone();
+            Some((
+                stem,
+                attachment.id.clone(),
+                png_attachment_id,
+                attachment.content_url.clone(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let mut diagrams = Vec::with_capacity(sources.len());
+    for (title, source_attachment_id, png_attachment_id, content_url) in sources {
+        let content_url = content_url.ok_or_else(|| {
+            format!("Mermaid source attachment {source_attachment_id} has no content URL")
+        })?;
+        let response = client
+            .get(content_url)
+            .basic_auth(email, Some(token))
+            .send()
+            .map_err(|error| error.to_string())?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > MERMAID_SOURCE_BYTES_LIMIT as u64)
+        {
+            return Err(format!(
+                "Mermaid source attachment {source_attachment_id} exceeds the {MERMAID_SOURCE_BYTES_LIMIT}-byte limit"
+            ));
+        }
+        let mut bytes = Vec::new();
+        response
+            .take(MERMAID_SOURCE_BYTES_LIMIT.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        if bytes.len() > MERMAID_SOURCE_BYTES_LIMIT {
+            return Err(format!(
+                "Mermaid source attachment {source_attachment_id} exceeds the {MERMAID_SOURCE_BYTES_LIMIT}-byte limit"
+            ));
+        }
+        let markup = String::from_utf8(bytes).map_err(|_| {
+            format!("Mermaid source attachment {source_attachment_id} is not valid UTF-8")
+        })?;
+        diagrams.push(crate::store::composer::MermaidDiagram {
+            id: source_attachment_id.clone(),
+            diagram_type: mermaid_diagram_type(&markup),
+            title,
+            markup,
+            rendered_png: Vec::new(),
+            rendered_theme: String::new(),
+            published_attachment_id: Some(png_attachment_id),
+            published_source_attachment_id: Some(source_attachment_id),
+        });
+    }
+    ticket.mermaid_diagrams = diagrams;
+    Ok(())
+}
+
+fn mermaid_attachment_stem(filename: &str, extension: &str) -> Option<String> {
+    let (stem, actual_extension) = filename.rsplit_once('.')?;
+    (!stem.is_empty() && actual_extension.eq_ignore_ascii_case(extension)).then(|| stem.into())
+}
+
+fn mermaid_diagram_type(markup: &str) -> String {
+    markup
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("%%"))
+        .and_then(|line| line.split_whitespace().next())
+        .unwrap_or("mermaid")
+        .into()
 }
 
 fn apply_web_link_changes(
@@ -3247,6 +3480,7 @@ fn same_jira_content(left: &Ticket, right: &Ticket) -> bool {
         && left.labels == right.labels
         && left.parent_key == right.parent_key
         && left.attachments == right.attachments
+        && left.mermaid_diagrams == right.mermaid_diagrams
         && left.web_links == right.web_links
         && left.issue_links == right.issue_links
 }

@@ -8,8 +8,9 @@ use crate::store::composer::summary::ChangeSetSummary;
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
-    style::{Modifier, Style},
-    text::{Line, Text},
+    style::Style,
+    text::{Line, Span, Text},
+    widgets::{Paragraph, Wrap},
 };
 use tuicore::{
     ActivationMode, AnimationSettings, Button, CellContext, ChildKey, Column, Dialog, DialogAction,
@@ -17,14 +18,15 @@ use tuicore::{
     FocusRequest, FocusTarget, HotkeyEvent, HotkeyLabelMode, InputChrome, Key, KeyModifiers,
     KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, ListControl,
     ListControlEvent, ListControlKeyBindings, MenuButton, MenuItem, RenderCtx, TextInput,
-    TickResult, TuiEvent, TuiNode, keybindings,
+    TickResult, TuiEvent, TuiNode, keybindings, line_width,
 };
 
 use crate::{
     app_settings::ComposerKeyBindings,
     service::AppService,
     store::composer::{
-        ChangeKind, ChangeSet, ComposerAction, ComposerState, Ticket, TicketChange, TicketKind,
+        ArchiveOutcome, ChangeKind, ChangeSet, ComposerAction, ComposerState, Ticket, TicketChange,
+        TicketKind,
     },
 };
 
@@ -32,24 +34,62 @@ use crate::{
 struct ChangeSetRow {
     id: String,
     name: String,
+    status: ChangeSetStatus,
     summary: ChangeSetSummary,
+}
+
+#[derive(Clone, Copy)]
+enum ChangeSetStatus {
+    Open,
+    Rejected,
+    Done,
+}
+
+impl ChangeSetStatus {
+    fn from_change_set(change_set: &ChangeSet) -> Self {
+        match change_set.archive_outcome {
+            Some(ArchiveOutcome::Cancelled) => Self::Rejected,
+            Some(ArchiveOutcome::Concluded) => Self::Done,
+            None if !change_set.tickets.is_empty()
+                && change_set.submitted_count() == change_set.tickets.len() =>
+            {
+                Self::Done
+            }
+            None => Self::Open,
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Open => "",
+            Self::Rejected | Self::Done => "",
+        }
+    }
+
+    fn style(self) -> Style {
+        let theme = tuicore::theme();
+        match self {
+            Self::Open => Style::default().fg(theme.accent_fg()),
+            Self::Rejected | Self::Done => Style::default().fg(theme.text_fg()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum ChangeSetFilter {
     All,
     Open,
-    Closed,
+    Archived,
 }
 
 impl ChangeSetFilter {
-    const OPTIONS: [Self; 3] = [Self::All, Self::Open, Self::Closed];
+    const OPTIONS: [Self; 3] = [Self::All, Self::Open, Self::Archived];
 
     fn label(self) -> &'static str {
         match self {
             Self::All => "All",
             Self::Open => "Open",
-            Self::Closed => "Closed",
+            Self::Archived => "Archived",
         }
     }
 
@@ -57,7 +97,7 @@ impl ChangeSetFilter {
         match self {
             Self::All => "",
             Self::Open => "",
-            Self::Closed => "",
+            Self::Archived => "",
         }
     }
 
@@ -69,7 +109,7 @@ impl ChangeSetFilter {
         match self {
             Self::All => true,
             Self::Open => !change_set.closed,
-            Self::Closed => change_set.closed,
+            Self::Archived => change_set.closed,
         }
     }
 }
@@ -81,25 +121,58 @@ pub(super) struct ChangeSetListView {
     filter: ChangeSetFilter,
     new_change_set_requested: Rc<RefCell<Option<String>>>,
     dialog_close_requested: Rc<RefCell<bool>>,
+    delete_key: crate::app_settings::ComposerKeyBinding,
 }
 
 type ChangeSetControl = ListControl<ChangeSetRow, String>;
-type ChangeSetDialog = tuicore::DialogHost<WideTextInput, ()>;
+pub(super) type ChangeSetDialog = tuicore::DialogHost<WideTextInput, ()>;
 type ChangeSetView = DialogLayer<ChangeSetContent, ChangeSetDialog>;
 
 const CHANGE_SET_DIALOG_WIDTH: u16 = 48;
 
-struct WideTextInput {
+pub(super) struct WideTextInput {
     input: TextInput<()>,
+    visible: bool,
+    input_visible: bool,
+    prose: Option<String>,
+    prose_area: Rect,
+    input_area: Rect,
 }
 
 impl WideTextInput {
-    fn new(input: TextInput<()>) -> Self {
-        Self { input }
+    pub(super) fn new(input: TextInput<()>) -> Self {
+        Self {
+            input,
+            visible: true,
+            input_visible: true,
+            prose: None,
+            prose_area: Rect::default(),
+            input_area: Rect::default(),
+        }
     }
 
-    fn current_value(&self) -> &str {
+    pub(super) fn prose_only(prose: impl Into<String>) -> Self {
+        Self {
+            input: TextInput::new(),
+            visible: true,
+            input_visible: false,
+            prose: Some(prose.into()),
+            prose_area: Rect::default(),
+            input_area: Rect::default(),
+        }
+    }
+
+    pub(super) fn with_prose(mut self, prose: impl Into<String>) -> Self {
+        self.prose = Some(prose.into());
+        self
+    }
+
+    pub(super) fn current_value(&self) -> &str {
         self.input.current_value()
+    }
+
+    pub(super) fn enter_insert_mode(&mut self) {
+        self.input.set_insert_mode(true);
     }
 
     fn reset(&mut self) {
@@ -110,24 +183,68 @@ impl WideTextInput {
 
 impl TuiNode for WideTextInput {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
-        let input = self.input.measure(proposal);
+        if !self.visible {
+            return LayoutSizeHint::content(0, 0).normalized(proposal);
+        }
+        let input = self.input_visible.then(|| self.input.measure(proposal));
+        let width = input
+            .as_ref()
+            .map(|input| input.preferred.width)
+            .unwrap_or_default()
+            .max(CHANGE_SET_DIALOG_WIDTH);
         LayoutSizeHint::content(
-            input.preferred.width.max(CHANGE_SET_DIALOG_WIDTH),
-            input.preferred.height,
+            width,
+            input
+                .as_ref()
+                .map(|input| input.preferred.height)
+                .unwrap_or_default()
+                .saturating_add(self.prose_height(width)),
         )
         .normalized(proposal)
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        self.input.layout(area, ctx)
+        if self.visible {
+            let prose_height = self.prose_height(area.width).min(area.height);
+            self.prose_area = Rect::new(area.x, area.y, area.width, prose_height);
+            self.input_area = Rect::new(
+                area.x,
+                area.y.saturating_add(prose_height),
+                area.width,
+                area.height.saturating_sub(prose_height),
+            );
+            if self.input_visible {
+                self.input.layout(self.input_area, ctx)
+            } else {
+                LayoutResult::new(area)
+            }
+        } else {
+            LayoutResult::new(area)
+        }
     }
 
-    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, _ctx: &mut RenderCtx<'a>) {
-        self.input.render(frame, area);
+    fn render<'a>(&'a self, frame: &mut Frame, _area: Rect, _ctx: &mut RenderCtx<'a>) {
+        if self.visible {
+            if let Some(prose) = &self.prose {
+                frame.render_widget(
+                    Paragraph::new(prose.as_str())
+                        .style(Style::default().fg(tuicore::theme().text_fg()))
+                        .wrap(Wrap { trim: true }),
+                    self.prose_area,
+                );
+            }
+            if self.input_visible {
+                self.input.render(frame, self.input_area);
+            }
+        }
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        self.input.event(event, ctx)
+        if self.input_visible {
+            self.input.event(event, ctx)
+        } else {
+            EventOutcome::Ignored
+        }
     }
 
     fn dispatch_event(
@@ -136,35 +253,77 @@ impl TuiNode for WideTextInput {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        self.input.dispatch_event(route, event, ctx)
+        if self.input_visible {
+            self.input.dispatch_event(route, event, ctx)
+        } else {
+            EventOutcome::Ignored
+        }
     }
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
-        self.input.tick(dt, settings)
+        if self.input_visible {
+            self.input.tick(dt, settings)
+        } else {
+            TickResult::IDLE
+        }
     }
 
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
-        self.input.focus(target, focused, ctx)
+        if self.input_visible {
+            self.input.focus(target, focused, ctx);
+        }
     }
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
-        self.input.dispatch_focus(target, focused, ctx)
+        if self.input_visible {
+            self.input.dispatch_focus(target, focused, ctx);
+        }
     }
 
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
-        self.input.init(ctx)
+        if self.input_visible {
+            self.input.init(ctx);
+        }
     }
 
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
-        self.input.mount(ctx)
+        if self.input_visible {
+            self.input.mount(ctx);
+        }
     }
 
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
-        self.input.unmount(ctx)
+        if self.input_visible {
+            self.input.unmount(ctx);
+        }
     }
 
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
-        self.input.destroy(ctx)
+        if self.input_visible {
+            self.input.destroy(ctx);
+        }
+    }
+}
+
+impl WideTextInput {
+    fn prose_height(&self, width: u16) -> u16 {
+        let Some(prose) = &self.prose else {
+            return 0;
+        };
+        let width = usize::from(width.max(1));
+        let mut lines = 1usize;
+        let mut current_width = 0usize;
+        for word in prose.split_whitespace() {
+            let word_width = line_width(&Line::from(word));
+            let separator = usize::from(current_width > 0);
+            if current_width > 0 && current_width + separator + word_width > width {
+                lines = lines.saturating_add(1);
+                current_width = word_width;
+            } else {
+                current_width += separator + word_width;
+            }
+        }
+        lines as u16
     }
 }
 
@@ -175,6 +334,8 @@ struct ChangeSetContent {
     button_area: Rect,
     filter_area: Rect,
     control_area: Rect,
+    archive_sequence: String,
+    actions_sequence: String,
 }
 
 impl ChangeSetContent {
@@ -182,6 +343,8 @@ impl ChangeSetContent {
         new_button: Button<()>,
         filter_menu: MenuButton<ChangeSetFilter, ()>,
         control: ChangeSetControl,
+        archive_sequence: String,
+        actions_sequence: String,
     ) -> Self {
         Self {
             new_button,
@@ -190,6 +353,8 @@ impl ChangeSetContent {
             button_area: Rect::default(),
             filter_area: Rect::default(),
             control_area: Rect::default(),
+            archive_sequence,
+            actions_sequence,
         }
     }
 
@@ -260,7 +425,12 @@ impl TuiNode for ChangeSetContent {
         ctx.with_focus_fallback_hotkey_sequences_status(
             FocusId::new("data-view"),
             self.control_area,
-            ["ys".to_owned()],
+            [
+                "ys".to_owned(),
+                "yp".to_owned(),
+                self.archive_sequence.clone(),
+                self.actions_sequence.clone(),
+            ],
             |ctx| {
                 ctx.push_slot(ChildKey::new("change-sets"), self.control_area, |ctx| {
                     self.control.layout(self.control_area, ctx);
@@ -323,7 +493,8 @@ impl TuiNode for ChangeSetContent {
             return outcome;
         }
         if let Some(path) = route.path.without_first_if(&ChildKey::new("change-sets")) {
-            if path.keys().len() == 1
+            if !self.control.is_confirming_remove()
+                && path.keys().len() == 1
                 && !self.control.data_view().is_searching()
                 && matches!(event, TuiEvent::Key(key) if keybindings().focus().unfocus_matches(*key))
             {
@@ -433,6 +604,7 @@ impl ChangeSetListView {
                 ChangeSetRow {
                     id: format!("CS-{next}"),
                     name,
+                    status: ChangeSetStatus::Open,
                     summary: ChangeSetSummary::default(),
                 }
             },
@@ -445,6 +617,7 @@ impl ChangeSetListView {
         .filter_controls(false)
         .keybindings(ListControlKeyBindings {
             add: Vec::new(),
+            remove: vec![keys.delete_change_set.spec()],
             ..ListControlKeyBindings::default()
         })
         .activation_mode(ActivationMode::OnActivateKey)
@@ -505,6 +678,8 @@ impl ChangeSetListView {
                     }),
                 change_set_filter_menu(filter, &keys.change_set_filter),
                 control,
+                keys.archive.sequence().to_owned(),
+                keys.change_set_actions.sequence().to_owned(),
             ),
             dialog,
         )
@@ -519,6 +694,7 @@ impl ChangeSetListView {
             filter,
             new_change_set_requested,
             dialog_close_requested,
+            delete_key: keys.delete_change_set,
         }
     }
 
@@ -528,6 +704,18 @@ impl ChangeSetListView {
             .control
             .data_view_mut()
             .set_rows(rows(&self.state.borrow(), self.filter));
+    }
+
+    pub(super) fn reset_to_home(&mut self, ctx: &mut EventCtx<()>) {
+        self.view.set_active_with_context(false, ctx);
+        self.filter = ChangeSetFilter::Open;
+        let content = self.view.base_mut();
+        content.filter_menu.close();
+        content
+            .filter_menu
+            .set_label(ChangeSetFilter::Open.menu_label());
+        content.control.data_view_mut().clear_search();
+        self.sync();
     }
 
     fn create_change_set(&mut self, name: String, ctx: &mut EventCtx<()>) {
@@ -673,25 +861,93 @@ impl ChangeSetListView {
         true
     }
 
-    #[cfg(test)]
+    fn yank_prepare(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        if !matches!(event, TuiEvent::Hotkey(HotkeyEvent::Commit(sequence)) if sequence == "yp")
+            || !self.prepare_yank_available()
+        {
+            return false;
+        }
+        let Some(id) = self.view.base().control.data_view().highlighted_id() else {
+            return false;
+        };
+        let state = self.state.borrow();
+        let Some(change_set) = state.change_sets.iter().find(|set| set.id == id) else {
+            return false;
+        };
+        ctx.copy_to_clipboard(change_set_prepare_text(change_set));
+        ctx.stop_propagation();
+        true
+    }
+
     pub(super) fn highlighted_change_set(&self) -> Option<String> {
         self.view.base().control.data_view().highlighted_id()
+    }
+
+    pub(super) fn highlight_change_set(&mut self, id: &str) {
+        self.view
+            .base_mut()
+            .control
+            .data_view_mut()
+            .highlight_id(&id.to_owned());
+    }
+
+    pub(super) fn show_open_change_set(&mut self, id: &str) {
+        self.filter = ChangeSetFilter::Open;
+        self.view
+            .base_mut()
+            .filter_menu
+            .set_label(ChangeSetFilter::Open.menu_label());
+        self.sync();
+        self.highlight_change_set(id);
+    }
+
+    pub(super) fn request_delete(&mut self, id: &str, ctx: &mut EventCtx<()>) {
+        let control = &mut self.view.base_mut().control;
+        if !control.data_view().rows().iter().any(|row| row.id == id) {
+            return;
+        }
+        control.data_view_mut().highlight_id(&id.to_owned());
+        control.event(&TuiEvent::Key(self.delete_key.event()), ctx);
+        self.drain_events(ctx);
+    }
+
+    pub(super) fn archive_available(&self) -> bool {
+        let content = self.view.base();
+        !self.view.is_active()
+            && !content.filter_menu.is_open()
+            && !content.control.is_confirming_remove()
+            && !content.control.is_adding()
+            && !content.control.is_editing()
+            && !content.control.is_reordering()
+            && !content.control.data_view().is_searching()
+    }
+
+    fn prepare_yank_available(&self) -> bool {
+        self.archive_available() && self.view.base().control.data_view().is_focused()
     }
 }
 
 fn rows(state: &ComposerState, filter: ChangeSetFilter) -> Vec<ChangeSetRow> {
-    let mut rows: Vec<_> = state
+    let mut sets: Vec<_> = state
         .change_sets
         .iter()
+        .rev()
         .filter(|set| filter.contains(set))
+        .collect();
+    sets.sort_by_key(|set| {
+        (
+            set.closed,
+            std::cmp::Reverse(if set.closed { set.closed_at } else { None }),
+        )
+    });
+    sets.into_iter()
         .map(|set| ChangeSetRow {
             id: set.id.clone(),
             name: set.name.clone(),
+            status: ChangeSetStatus::from_change_set(set),
             summary: ChangeSetSummary::new(set),
         })
-        .collect();
-    rows.reverse();
-    rows
+        .collect()
 }
 
 fn change_set_filter_menu(
@@ -715,14 +971,18 @@ fn change_set_column() -> Column<ChangeSetRow, String> {
         Constraint::Percentage(100),
         |row: &ChangeSetRow, _: &CellContext<String>| {
             let theme = tuicore::theme();
+            let mut summary = summary::summary_line(&row.summary);
+            summary.spans.insert(0, Span::raw("  "));
             Text::from(vec![
-                Line::styled(
-                    format!("{} · {}", row.id, row.name),
-                    Style::default()
-                        .fg(theme.text_fg())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                summary::summary_line(&row.summary),
+                Line::from(vec![
+                    Span::styled(format!("{} ", row.status.icon()), row.status.style()),
+                    Span::styled(
+                        format!("{} ", row.id),
+                        Style::default().fg(theme.muted_fg()),
+                    ),
+                    Span::styled(row.name.clone(), Style::default().fg(theme.text_fg())),
+                ]),
+                summary,
             ])
         },
     )
@@ -746,6 +1006,9 @@ impl TuiNode for ChangeSetListView {
         if self.yank_share(event, ctx) {
             return EventOutcome::Handled;
         }
+        if self.yank_prepare(event, ctx) {
+            return EventOutcome::Handled;
+        }
         let outcome = self.view.event(event, ctx);
         self.drain_events(ctx);
         outcome
@@ -760,6 +1023,9 @@ impl TuiNode for ChangeSetListView {
             return EventOutcome::Handled;
         }
         if self.yank_share(event, ctx) {
+            return EventOutcome::Handled;
+        }
+        if self.yank_prepare(event, ctx) {
             return EventOutcome::Handled;
         }
         let outcome = self.view.dispatch_event(route, event, ctx);
@@ -843,6 +1109,14 @@ pub(super) fn change_set_share_text(change_set: &ChangeSet, base_url: Option<&st
         }
     }
     lines.join("\n")
+}
+
+fn change_set_prepare_text(change_set: &ChangeSet) -> String {
+    format!(
+        "finery prepare {} \"{}\"",
+        change_set.id,
+        escape_reference(&change_set.name)
+    )
 }
 
 fn append_share_children<'a>(

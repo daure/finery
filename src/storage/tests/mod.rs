@@ -42,6 +42,8 @@ fn change_sets_ticket_snapshots_and_settings_survive_round_trip() {
             id: "CS-1".into(),
             name: "Checkout".into(),
             closed: true,
+            archive_outcome: None,
+            closed_at: Some("2026-09-14T10:00:00.123456789Z".parse().unwrap()),
             selected_ticket_ids: vec!["OPS-1".into()],
             submission_attempt: None,
             tickets: vec![TicketChange {
@@ -101,6 +103,8 @@ fn deleting_change_set_cascades_ticket_changes() {
             id: "CS-2".into(),
             name: "Disposable".into(),
             closed: false,
+            archive_outcome: None,
+            closed_at: None,
             selected_ticket_ids: vec!["NEW-1".into()],
             submission_attempt: None,
             tickets: vec![TicketChange {
