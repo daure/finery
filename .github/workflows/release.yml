@@ -108,3 +108,6 @@ jobs:
           fi
           gh release upload "$RELEASE_TAG" target/distrib/finery-x86_64-unknown-linux-gnu.tar.xz target/distrib/finery-x86_64-unknown-linux-gnu.tar.xz.sha256 target/distrib/finery-installer.sh --clobber
           gh release edit "$RELEASE_TAG" --draft=false
+      - name: Remove temporary package copies before caching
+        if: always() && github.ref == 'refs/heads/main'
+        run: rm -rf -- target/package
