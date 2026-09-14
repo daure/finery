@@ -76,8 +76,6 @@ def release(bump):
     tag = f"v{version}"
     if output("git", "tag", "--list", tag):
         raise ValueError(f"Tag {tag} already exists; rerun its failed workflow instead of retagging")
-    if registry_version("finery", version) is not None:
-        raise ValueError(f"Finery {version} already exists on crates.io")
     tuicore = metadata["dependencies"]["tuicore"]
     if not isinstance(tuicore, str) or not re.fullmatch(r"\d+\.\d+\.\d+", tuicore):
         raise ValueError("Tuicore must declare a crates.io X.Y.Z version")

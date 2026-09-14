@@ -62,22 +62,22 @@ The installer places the binary in `$CARGO_HOME/bin` (default `~/.cargo/bin`). A
 
 Close running Finery sessions, then rerun the installer commands above to download the latest stable binary. If you installed the background MCP service, run `finery service stop` before updating and `finery service start` afterwards. Restart stdio MCP clients to load the updated executable. Your settings and database stay in their normal data directories; back up the database before an upgrade or rollback because older binaries may not support newer database schemas.
 
-### Install from crates.io
-
-For other platforms or source-based installation, install Rust and use:
-
-```bash
-cargo install finery --locked
-# Update from source:
-cargo install finery --locked --force
-```
-
 ## Build from source
 
+Install Rust, then clone and build the repository for your platform:
+
 ```bash
-cargo test
-cargo build --release
-cargo install --path .
+git clone https://github.com/daure/finery.git
+cd finery
+cargo test --locked
+cargo install --path . --locked
+```
+
+For source-based updates, run these commands inside the checkout:
+
+```bash
+git pull --ff-only
+cargo install --path . --locked --force
 ```
 
 After installation:
@@ -120,11 +120,11 @@ cargo release major   # major: 0.27.0 -> 1.0.0
 
 The command checks the branch and published Tuicore dependency, bumps Finery, resolves the release lockfile against crates.io, commits, and atomically pushes `main` and its `vX.Y.Z` tag. It returns without waiting for compilation. Existing `cargo patch`, `cargo minor`, and `cargo major` aliases use the same release flow.
 
-The [Release workflow](https://github.com/daure/finery/actions/workflows/release.yml) checks formatting, runs Clippy with warnings denied, runs tests and package validation, then uses cargo-dist to build and smoke-test an Ubuntu x86_64 archive. After checks pass it publishes to crates.io using the repository's encrypted `CARGO_REGISTRY_TOKEN` secret, then publishes the GitHub Release and installer. All work runs in one job, with no Actions artifact uploads. Release downloads persist until deleted.
+The [Release workflow](https://github.com/daure/finery/actions/workflows/release.yml) checks formatting, runs Clippy with warnings denied, runs tests, then uses cargo-dist to build and smoke-test an Ubuntu x86_64 archive. After checks pass it publishes the GitHub Release and installer using GitHub's built-in repository token. GitHub Releases is the distribution channel for current Finery versions. All work runs in one job, with no Actions artifact uploads. Release downloads persist until deleted.
 
 Normal pushes to `main` run the same checks and warm debug and optimized dependency caches. Tagged releases restore those caches; only `main` saves them so later tags can access them. Release-version commits skip the redundant branch build. Distribution builds disable LTO and strip symbols to favor build speed. The first build after a toolchain or dependency change can take longer. Cache storage is separate from release downloads and temporary Actions artifact storage. To warm the cache manually, run `gh workflow run release.yml --ref main`; this builds without publishing.
 
-Inspect runs with `gh run list --workflow release.yml` and `gh run watch RUN_ID`. Retry a transient failure with `gh run rerun RUN_ID --failed`; an already-published crate version is skipped. For a source fix, commit the fix and run a new patch release. Tags are immutable: do not move a published tag. If the local push fails, inspect the release commit/tag and use the exact retry command printed by the script.
+Inspect runs with `gh run list --workflow release.yml` and `gh run watch RUN_ID`. Retry a transient failure with `gh run rerun RUN_ID --failed`. For a source fix, commit the fix and run a new patch release. Tags are immutable: do not move a published tag. If the local push fails, inspect the release commit/tag and use the exact retry command printed by the script.
 
 ### Local Tuicore development
 

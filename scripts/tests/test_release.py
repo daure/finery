@@ -1,4 +1,3 @@
-import importlib.util
 import os
 from pathlib import Path
 import subprocess
@@ -73,7 +72,7 @@ class ReleaseGitTests(unittest.TestCase):
                 return real_run(*args, **kwargs)
 
             try:
-                with patch.object(release, "__file__", str(repo / "scripts/release.py")), patch.object(release, "run", side_effect=run), patch.object(release, "registry_version", side_effect=[None, {"yanked": False}]), patch.object(release, "registry_cargo") as cargo:
+                with patch.object(release, "__file__", str(repo / "scripts/release.py")), patch.object(release, "run", side_effect=run), patch.object(release, "registry_version", return_value={"yanked": False}), patch.object(release, "registry_cargo") as cargo:
                     release.release("patch")
                 self.assertIn('version = "0.27.1"', (repo / "Cargo.toml").read_text())
                 self.assertEqual(git("rev-parse", "HEAD"), git("rev-parse", "v0.27.1^{commit}"))
@@ -84,23 +83,6 @@ class ReleaseGitTests(unittest.TestCase):
                 self.assertEqual(git("status", "--porcelain"), "")
             finally:
                 os.chdir(original_cwd)
-
-
-class PublishTests(unittest.TestCase):
-    def setUp(self):
-        spec = importlib.util.spec_from_file_location("publish_crate", SCRIPTS / "publish-crate.py")
-        self.module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.module)
-
-    def test_retry_skips_published_version(self):
-        with patch.object(self.module, "registry_version", return_value={"num": "0.27.0"}), patch.object(self.module.subprocess, "run") as run:
-            self.module.main()
-            run.assert_not_called()
-
-    def test_publication_failure_propagates(self):
-        with patch.object(self.module, "registry_version", return_value=None), patch.dict(self.module.os.environ, {"CARGO_REGISTRY_TOKEN": "test"}), patch.object(self.module.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "cargo")):
-            with self.assertRaises(subprocess.CalledProcessError):
-                self.module.main()
 
 
 if __name__ == "__main__":
