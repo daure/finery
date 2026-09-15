@@ -56,7 +56,7 @@ export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 finery --help
 ```
 
-The installer places the binary in `$CARGO_HOME/bin` (default `~/.cargo/bin`). Add that directory to your shell's PATH permanently if needed. The Releases page also provides a `.tar.xz` archive and SHA-256 checksum for manual installation; versioned releases remain available for rollback.
+The installer places the binary in `$CARGO_HOME/bin` (default `~/.cargo/bin`). Add that directory to your shell's PATH permanently if needed. The Releases page also provides a `.tar.xz` archive and SHA-256 checksum for manual installation; the latest 30 stable releases remain available for rollback.
 
 ### Update
 
@@ -123,6 +123,18 @@ The command checks the branch and published Tuicore dependency, bumps Finery, re
 The [Release workflow](https://github.com/daure/finery/actions/workflows/release.yml) checks formatting, runs Clippy with warnings denied, runs tests, then uses cargo-dist to build and smoke-test an Ubuntu x86_64 archive. After checks pass it publishes the GitHub Release and installer using GitHub's built-in repository token. GitHub Releases is the distribution channel for current Finery versions. All work runs in one job, with no Actions artifact uploads. Release downloads persist until deleted.
 
 Normal pushes to `main` run the same checks and warm debug and optimized dependency caches. Tagged releases restore those caches; only `main` saves them so later tags can access them. Release-version commits skip the redundant branch build. Distribution builds disable LTO and strip symbols to favor build speed. The first build after a toolchain or dependency change can take longer. Cache storage is separate from release downloads and temporary Actions artifact storage. To warm the cache manually, run `gh workflow run release.yml --ref main`; this builds without publishing.
+
+After a successful tagged release, a serialized retention job keeps the 30 most recently published stable releases, ordered by publication time. It deletes older GitHub release records and their downloads using the official GitHub API through `gh`, preserving all Git tags, drafts, and prereleases. Older version-specific download URLs stop working; their source tags remain available. The script checks all pages and rechecks each candidate before deletion; it refuses cleanup if the triggering release is missing or outside the retained set. This policy applies to Finery and Tuido only.
+
+Preview cleanup without deleting anything:
+
+```bash
+python3 scripts/prune-releases.py --repo daure/finery --keep 30
+```
+
+Deletion requires both `--apply` and `--published-tag TAG`; the release workflow supplies these only after publication succeeds. Main-branch builds run the preview only.
+
+Cleanup also refuses to delete the release designated as GitHub's **Latest**, protecting the installer URL if an older version is pinned there.
 
 Inspect runs with `gh run list --workflow release.yml` and `gh run watch RUN_ID`. Retry a transient failure with `gh run rerun RUN_ID --failed`. For a source fix, commit the fix and run a new patch release. Tags are immutable: do not move a published tag. If the local push fails, inspect the release commit/tag and use the exact retry command printed by the script.
 
