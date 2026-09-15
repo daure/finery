@@ -335,7 +335,7 @@ fn backlog_header_uses_two_rows_for_compact_widths() {
     assert!(lines[0].contains("󰖟"));
     assert!(lines[0].contains("|W|"));
     assert!(!lines[0].contains("Web"));
-    assert!(lines[0].contains(""));
+    assert!(lines[0].contains("󰑮"));
     assert!(lines[0].contains(" V"));
     assert!(lines[0].contains(" R"));
     assert!(!lines[0].contains(" G"));

@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - name: Validate tag and dependency source
+      - name: Validate tag
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
@@ -44,15 +44,13 @@ jobs:
           if os.environ["GITHUB_REF_TYPE"] == "tag":
               assert re.fullmatch(r"v\d+\.\d+\.\d+", tag), "Expected a stable version tag"
               assert tag == "v" + manifest["package"]["version"], "Tag must match Cargo.toml"
-          lock = tomllib.loads(pathlib.Path("Cargo.lock").read_text())
-          tuicore = next(p for p in lock["package"] if p["name"] == "tuicore")
-          assert tuicore["source"] == "registry+https://github.com/rust-lang/crates.io-index"
-          assert tuicore["checksum"], "Tuicore requires a registry checksum"
           PY
       - name: Install Rust
         run: |
           rustup toolchain install 1.96.0 --profile minimal --component clippy,rustfmt
           rustup default 1.96.0
+      - name: Resolve latest published Tuicore
+        run: python3 scripts/prepare_ci.py
       - name: Restore compiled dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:

@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -19,19 +20,10 @@ class ReleaseTests(unittest.TestCase):
             release.next_version("0.27.0-rc.1", "patch")
 
     def test_dirty_tree_stops_before_network_or_publication(self):
-        with patch.object(release.os, "chdir"), patch.object(release, "output", return_value=" M Cargo.toml"), patch.object(release, "registry_version") as registry:
+        with patch.object(release.os, "chdir"), patch.object(release, "output", return_value=" M Cargo.toml"), patch.object(release, "run") as run:
             with self.assertRaisesRegex(ValueError, "working tree must be clean"):
                 release.release("patch")
-            registry.assert_not_called()
-
-    def test_registry_cargo_ignores_local_config(self):
-        with patch.object(release, "run") as run:
-            release.registry_cargo("metadata", "--locked")
-            args, kwargs = run.call_args
-            self.assertEqual(args[:3], ("cargo", "metadata", "--manifest-path"))
-            self.assertEqual(args[-1], "--locked")
-            self.assertEqual(str(kwargs["cwd"]), kwargs["env"]["CARGO_HOME"])
-            self.assertIn("finery-release-cargo-", kwargs["env"]["CARGO_HOME"])
+            run.assert_not_called()
 
 
 class ReleaseGitTests(unittest.TestCase):
@@ -47,21 +39,33 @@ class ReleaseGitTests(unittest.TestCase):
         original_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, environment):
             root = Path(directory)
+            os.environ["CARGO_HOME"] = str(root / "cargo-home")
+            (root / "cargo-home").mkdir()
             repo = root / "repo"
             repo.mkdir()
             (repo / "scripts").mkdir()
-            (repo / "Cargo.toml").write_text('[package]\nname = "finery"\nversion = "0.27.0"\n[dependencies]\ntuicore = "0.40.0"\n')
-            (repo / "Cargo.lock").write_text("version = 4\n")
+            (repo / "src").mkdir()
+            (repo / "src/main.rs").write_text("fn main() {}\n")
+            (repo / "Cargo.toml").write_text('[package]\nname = "finery"\nversion = "0.27.0"\n[dependencies]\ntuicore = { path = "../tuicore" }\n')
+            local = root / "tuicore"
+            (local / "src").mkdir(parents=True)
+            (local / "src/lib.rs").write_text("")
+            local_manifest = '[package]\nname = "tuicore"\nversion = "1.0.0"\n'
+            (local / "Cargo.toml").write_text(local_manifest)
+            subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=repo, check=True)
 
             def git(*args):
                 return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
 
             git("init", "--initial-branch=main")
-            git("add", "Cargo.toml", "Cargo.lock")
+            git("add", "Cargo.toml", "Cargo.lock", "src")
             git("commit", "-m", "Initial")
             git("init", "--bare", str(root / "remote.git"))
             git("remote", "add", "origin", str(root / "remote.git"))
             git("push", "origin", "main")
+            (local / "Cargo.toml").write_text(local_manifest.replace("1.0.0", "2.0.0"))
+            subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=repo, check=True)
+            self.assertIn("Cargo.lock", git("status", "--porcelain"))
             real_run = release.run
             calls = []
 
@@ -72,14 +76,18 @@ class ReleaseGitTests(unittest.TestCase):
                 return real_run(*args, **kwargs)
 
             try:
-                with patch.object(release, "__file__", str(repo / "scripts/release.py")), patch.object(release, "run", side_effect=run), patch.object(release, "registry_version", return_value={"yanked": False}), patch.object(release, "registry_cargo") as cargo:
+                with patch.object(release, "__file__", str(repo / "scripts/release.py")), patch.object(release, "run", side_effect=run):
                     release.release("patch")
                 self.assertIn('version = "0.27.1"', (repo / "Cargo.toml").read_text())
                 self.assertEqual(git("rev-parse", "HEAD"), git("rev-parse", "v0.27.1^{commit}"))
                 self.assertIn(git("rev-parse", "HEAD"), git("ls-remote", "origin", "refs/heads/main"))
                 self.assertIn("refs/tags/v0.27.1", git("ls-remote", "origin", "refs/tags/v0.27.1"))
                 self.assertIn(("git", "push", "--atomic", "origin", "HEAD:refs/heads/main", "refs/tags/v0.27.1"), calls)
-                self.assertEqual([call.args[0] for call in cargo.call_args_list], ["update", "update"])
+                self.assertEqual([call for call in calls if call[0] == "cargo"], [("cargo", "update", "--workspace")])
+                self.assertEqual(tomllib.loads((repo / "Cargo.toml").read_text())["dependencies"]["tuicore"], {"path": "../tuicore"})
+                packages = tomllib.loads((repo / "Cargo.lock").read_text())["package"]
+                self.assertIn({"name": "tuicore", "version": "2.0.0"}, packages)
+                self.assertEqual(next(p["version"] for p in packages if p["name"] == "finery"), "0.27.1")
                 self.assertEqual(git("status", "--porcelain"), "")
             finally:
                 os.chdir(original_cwd)

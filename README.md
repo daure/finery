@@ -114,7 +114,7 @@ Service lifecycle supports Linux systemd-user and macOS launchd. HTTP stays loop
 
 ## Release
 
-From a clean `main` checkout with Git push access, Python 3.11+, Rust, and an authenticated GitHub CLI (`gh auth login`):
+From `main` with committed source changes, a sibling `../tuicore` checkout, Git push access, Python 3.11+, Rust, and an authenticated GitHub CLI (`gh auth login`):
 
 ```bash
 cargo release          # patch: 0.27.0 -> 0.27.1
@@ -124,7 +124,9 @@ cargo release major   # major: 0.27.0 -> 1.0.0
 ./scripts/release.sh patch
 ```
 
-The command checks the branch and published Tuicore dependency, bumps Finery, resolves the release lockfile against crates.io, commits, and atomically pushes `main` and its `vX.Y.Z` tag. It returns without waiting for compilation. Existing `cargo patch`, `cargo minor`, and `cargo major` aliases use the same release flow.
+The command checks the branch and local Tuicore path, bumps Finery, refreshes and commits the local lockfile, and atomically pushes `main` and its `vX.Y.Z` tag. Generated `Cargo.lock` changes are accepted; all other files must be clean. It returns without waiting for compilation. Existing `cargo patch`, `cargo minor`, and `cargo major` aliases use the same release flow.
+
+GitHub Actions runs `scripts/prepare_ci.py` before Cargo checks and builds. It selects the highest stable, non-yanked Tuicore version on crates.io across all major versions, pins that exact version in the CI manifest, and resolves its registry lockfile. Checks and distribution builds use that resolution. These edits remain in the disposable CI checkout. The selected version is printed in the workflow log; rerunning a workflow can select a newer published version. Registry or compatibility failures stop the build. Publish required Tuicore changes before releasing Finery.
 
 The [Release workflow](https://github.com/daure/finery/actions/workflows/release.yml) checks formatting, runs Clippy with warnings denied, runs tests, then uses cargo-dist to build and smoke-test an Ubuntu x86_64 archive. After checks pass it publishes the GitHub Release and installer using GitHub's built-in repository token. GitHub Releases is the distribution channel for current Finery versions. All work runs in one job, with no Actions artifact uploads. Release downloads persist until deleted.
 
@@ -146,11 +148,10 @@ Inspect runs with `gh run list --workflow release.yml` and `gh run watch RUN_ID`
 
 ### Local Tuicore development
 
-Finery declares Tuicore as a crates.io dependency. To compile against your local working copy, put this in your personal `~/.cargo/config.toml`:
+Finery declares a direct relative path dependency:
 
 ```toml
-[patch.crates-io]
-tuicore = { path = "/absolute/path/to/tuicore" }
+tuicore = { path = "../tuicore" }
 ```
 
-Local builds compile the working copy whenever it satisfies the dependency requirement and is selected by Cargo; `cargo update -p tuicore` selects the override when needed. This can modify `Cargo.lock`, which must be committed or deliberately restored before releasing. The release command resolves Tuicore from crates.io without the personal override. Publish required Tuicore changes first, update Finery's declared dependency version, and commit those changes before releasing. CI builds use the committed registry lockfile; users only download the compiled Finery binary.
+Keep the repositories side by side and run `cargo run -- dev`. Local builds always compile that Tuicore working copy, regardless of its version. Cargo maintains the local lockfile automatically; `cargo release` handles it when releasing. Personal `[patch.crates-io]` overrides are unnecessary for this workflow and can produce unused-patch warnings in helper crates.

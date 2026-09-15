@@ -183,7 +183,7 @@ fn grouping_icon(grouping: Option<BacklogGroupBy>) -> &'static str {
     match grouping {
         Some(BacklogGroupBy::Release) => "",
         Some(BacklogGroupBy::Epic) => "",
-        None => "",
+        None => "󰑮",
     }
 }
 

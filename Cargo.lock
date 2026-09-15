@@ -10596,9 +10596,7 @@ dependencies = [
 
 [[package]]
 name = "tuicore"
-version = "0.40.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bba7fe8c08cdbd18a86255e0099db2e151ac222e0e46c7e6a2e3c90fed4f5e68"
+version = "0.40.3"
 dependencies = [
  "ansi-to-tui",
  "base64 0.22.1",

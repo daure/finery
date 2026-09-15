@@ -2,16 +2,12 @@
 """Queue a versioned release; GitHub Actions owns validation and publication."""
 
 import argparse
-import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
-import tempfile
 import tomllib
-import urllib.error
-import urllib.request
 
 
 def run(*args, **kwargs):
@@ -20,20 +16,6 @@ def run(*args, **kwargs):
 
 def output(*args):
     return run(*args, stdout=subprocess.PIPE).stdout.strip()
-
-
-def registry_version(crate, version):
-    request = urllib.request.Request(
-        f"https://crates.io/api/v1/crates/{crate}/{version}",
-        headers={"User-Agent": "finery-release"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.load(response)["version"]
-    except urllib.error.HTTPError as error:
-        if error.code == 404:
-            return None
-        raise
 
 
 def next_version(version, bump):
@@ -46,22 +28,10 @@ def next_version(version, bump):
     return ".".join(map(str, parts))
 
 
-def registry_cargo(*args):
-    # Local Cargo patches must never select the source used by CI releases.
-    manifest = str(Path("Cargo.toml").resolve())
-    with tempfile.TemporaryDirectory(prefix="finery-release-cargo-") as directory:
-        home = Path(directory)
-        registry = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo")) / "registry"
-        if registry.is_dir():
-            (home / "registry").symlink_to(registry.resolve(), target_is_directory=True)
-        run("cargo", args[0], "--manifest-path", manifest, *args[1:],
-            cwd=home, env={**os.environ, "CARGO_HOME": str(home)})
-
-
 def release(bump):
     os.chdir(Path(__file__).resolve().parent.parent)
-    if output("git", "status", "--porcelain", "--untracked-files=all"):
-        raise ValueError("Git working tree must be clean, including Cargo.lock and untracked files")
+    if output("git", "status", "--porcelain", "--untracked-files=all", "--", ".", ":(exclude)Cargo.lock"):
+        raise ValueError("Git working tree must be clean except for generated Cargo.lock changes")
     branch = output("git", "symbolic-ref", "--quiet", "--short", "HEAD")
     if branch != "main":
         raise ValueError("Release from main")
@@ -77,16 +47,12 @@ def release(bump):
     if output("git", "tag", "--list", tag):
         raise ValueError(f"Tag {tag} already exists; rerun its failed workflow instead of retagging")
     tuicore = metadata["dependencies"]["tuicore"]
-    if not isinstance(tuicore, str) or not re.fullmatch(r"\d+\.\d+\.\d+", tuicore):
-        raise ValueError("Tuicore must declare a crates.io X.Y.Z version")
-    published = registry_version("tuicore", tuicore)
-    if published is None or published["yanked"]:
-        raise ValueError(f"Publish non-yanked Tuicore {tuicore} before releasing Finery")
+    if tuicore != {"path": "../tuicore"}:
+        raise ValueError("Tuicore must use the local ../tuicore path")
 
     manifest_path.write_text(manifest.replace(f'version = "{old_version}"', f'version = "{version}"', 1))
     try:
-        registry_cargo("update", "--workspace")
-        registry_cargo("update", "-p", "tuicore", "--precise", tuicore)
+        run("cargo", "update", "--workspace")
         run("git", "diff", "--check")
         run("git", "add", "Cargo.toml", "Cargo.lock")
         run("git", "commit", "-m", f"release: {tag}")
