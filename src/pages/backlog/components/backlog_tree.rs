@@ -2171,10 +2171,7 @@ pub(in crate::pages::backlog) fn selectable_issue_types(
                 .filter(char::is_ascii_alphanumeric)
                 .flat_map(char::to_lowercase)
                 .collect::<String>();
-            !matches!(
-                normalized.as_str(),
-                "subtask" | "subtasks" | "epic"
-            )
+            !matches!(normalized.as_str(), "subtask" | "subtasks" | "epic")
         })
         .collect()
 }

@@ -70,8 +70,10 @@ class ReleaseGitTests(unittest.TestCase):
             calls = []
 
             def run(*args, **kwargs):
-                calls.append(args)
+                calls.append((args, kwargs))
                 if args[:2] == ("gh", "auth"):
+                    return subprocess.CompletedProcess(args, 0)
+                if args[0] in ("cargo", "python3") and args[:2] != ("cargo", "update"):
                     return subprocess.CompletedProcess(args, 0)
                 return real_run(*args, **kwargs)
 
@@ -82,8 +84,36 @@ class ReleaseGitTests(unittest.TestCase):
                 self.assertEqual(git("rev-parse", "HEAD"), git("rev-parse", "v0.27.1^{commit}"))
                 self.assertIn(git("rev-parse", "HEAD"), git("ls-remote", "origin", "refs/heads/main"))
                 self.assertIn("refs/tags/v0.27.1", git("ls-remote", "origin", "refs/tags/v0.27.1"))
-                self.assertIn(("git", "push", "--atomic", "origin", "HEAD:refs/heads/main", "refs/tags/v0.27.1"), calls)
-                self.assertEqual([call for call in calls if call[0] == "cargo"], [("cargo", "update", "--workspace")])
+                self.assertIn(
+                    (("git", "push", "--atomic", "origin", "HEAD:refs/heads/main", "refs/tags/v0.27.1"), {}),
+                    calls,
+                )
+                tag_call = next(
+                    call
+                    for call in calls
+                    if call[0] == ("git", "tag", "-a", "v0.27.1", "-m", "release: v0.27.1")
+                )
+                self.assertEqual(tag_call[1]["env"]["GIT_EDITOR"], "true")
+                self.assertEqual(
+                    [call for call, _ in calls if call[0] == "cargo"],
+                    [
+                        ("cargo", "fmt", "--all", "--check"),
+                        (
+                            "cargo",
+                            "fmt",
+                            "--manifest-path",
+                            "tools/release-command/Cargo.toml",
+                            "--check",
+                        ),
+                        ("cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings"),
+                        ("cargo", "test", "--locked"),
+                        ("cargo", "update", "--workspace"),
+                    ],
+                )
+                self.assertIn(
+                    (("python3", "-m", "unittest", "discover", "-s", "scripts/tests"), {}),
+                    calls,
+                )
                 self.assertEqual(tomllib.loads((repo / "Cargo.toml").read_text())["dependencies"]["tuicore"], {"path": "../tuicore"})
                 packages = tomllib.loads((repo / "Cargo.lock").read_text())["package"]
                 self.assertIn({"name": "tuicore", "version": "2.0.0"}, packages)

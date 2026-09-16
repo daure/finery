@@ -28,6 +28,20 @@ def next_version(version, bump):
     return ".".join(map(str, parts))
 
 
+def preflight():
+    run("cargo", "fmt", "--all", "--check")
+    run(
+        "cargo",
+        "fmt",
+        "--manifest-path",
+        "tools/release-command/Cargo.toml",
+        "--check",
+    )
+    run("python3", "-m", "unittest", "discover", "-s", "scripts/tests")
+    run("cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings")
+    run("cargo", "test", "--locked")
+
+
 def release(bump):
     os.chdir(Path(__file__).resolve().parent.parent)
     if output("git", "status", "--porcelain", "--untracked-files=all", "--", ".", ":(exclude)Cargo.lock"):
@@ -49,6 +63,7 @@ def release(bump):
     tuicore = metadata["dependencies"]["tuicore"]
     if tuicore != {"path": "../tuicore"}:
         raise ValueError("Tuicore must use the local ../tuicore path")
+    preflight()
 
     manifest_path.write_text(manifest.replace(f'version = "{old_version}"', f'version = "{version}"', 1))
     try:
@@ -56,7 +71,15 @@ def release(bump):
         run("git", "diff", "--check")
         run("git", "add", "Cargo.toml", "Cargo.lock")
         run("git", "commit", "-m", f"release: {tag}")
-        run("git", "tag", "-a", tag, "-m", f"release: {tag}")
+        run(
+            "git",
+            "tag",
+            "-a",
+            tag,
+            "-m",
+            f"release: {tag}",
+            env={**os.environ, "GIT_EDITOR": "true"},
+        )
         run("git", "push", "--atomic", "origin", "HEAD:refs/heads/main", f"refs/tags/{tag}")
     except Exception:
         print(f"Release stopped. Inspect git status, git diff, and tag {tag}; do not rerun the bump blindly.", file=sys.stderr)

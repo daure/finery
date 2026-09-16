@@ -6,9 +6,9 @@ pub(super) use backlog_tree::backlog_tree;
 #[cfg(test)]
 pub(super) use backlog_tree::backlog_tree_with_issue_types;
 #[cfg(test)]
-pub(super) use backlog_tree::selectable_issue_types;
-#[cfg(test)]
 pub(super) use backlog_tree::issue_types_in_snapshot;
+#[cfg(test)]
+pub(super) use backlog_tree::selectable_issue_types;
 pub(super) use backlog_tree::{
     BacklogSectionEvent, BacklogTree, backlog_tree_with_issue_types_and_keys,
 };

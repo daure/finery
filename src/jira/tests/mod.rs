@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     io::{Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     thread,
     time::Duration,
 };
@@ -82,8 +82,7 @@ fn jira_settings(base_url: String) -> AppSettings {
 fn one_request_server(listener: TcpListener, body: String) -> thread::JoinHandle<(String, bool)> {
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0; 4096];
-        let size = stream.read(&mut request).unwrap();
+        let request = read_request(&mut stream);
         write!(
             stream,
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -93,11 +92,33 @@ fn one_request_server(listener: TcpListener, body: String) -> thread::JoinHandle
         listener.set_nonblocking(true).unwrap();
         thread::sleep(Duration::from_millis(50));
         let extra_request = listener.accept().is_ok();
-        (
-            String::from_utf8_lossy(&request[..size]).into_owned(),
-            extra_request,
-        )
+        (request, extra_request)
     })
+}
+
+fn read_request(stream: &mut TcpStream) -> String {
+    let mut request = Vec::new();
+    let mut buffer = [0; 4096];
+    loop {
+        let size = stream.read(&mut buffer).unwrap();
+        assert!(size > 0, "request ended before its body was received");
+        request.extend_from_slice(&buffer[..size]);
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or_default();
+        if request.len() >= header_end + 4 + content_length {
+            return String::from_utf8_lossy(&request).into_owned();
+        }
+    }
 }
 
 fn request_server(listener: TcpListener, bodies: Vec<String>) -> thread::JoinHandle<Vec<String>> {
@@ -106,15 +127,14 @@ fn request_server(listener: TcpListener, bodies: Vec<String>) -> thread::JoinHan
             .into_iter()
             .map(|body| {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0; 4096];
-                let size = stream.read(&mut request).unwrap();
+                let request = read_request(&mut stream);
                 write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len(),
                 )
                 .unwrap();
-                String::from_utf8_lossy(&request[..size]).into_owned()
+                request
             })
             .collect()
     })
