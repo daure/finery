@@ -56,6 +56,17 @@ fn opening_requests_focus_for_the_search_input() {
 }
 
 #[test]
+fn configured_jira_urls_filter_recent_tickets_by_issue_key() {
+    let service = AppService::for_tests();
+    service.settings().write().unwrap().jira_base_url = "https://finery.atlassian.net".into();
+    let mut menu = super::RecentTicketsMenu::new(service);
+    *menu.query.borrow_mut() = Some("https://finery.atlassian.net/browse/DPP-5263".into());
+
+    assert!(menu.sync_query());
+    assert_eq!(menu.input.current_value(), "DPP-5263");
+}
+
+#[test]
 fn yp_copies_the_highlighted_ticket_prepare_reference_with_quoted_title() {
     use tuicore::{HotkeyEvent, TuiEvent, TuiNode};
 

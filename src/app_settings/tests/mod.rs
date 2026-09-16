@@ -9,8 +9,9 @@ use super::{
     COMPOSER_ADD_SIBLING_KEY_SETTING, COMPOSER_COMMIT_KEY_SETTING,
     COMPOSER_CREATE_SUBMIT_KEY_SETTING, COMPOSER_DESCRIPTION_FOCUS_KEY_SETTING,
     COMPOSER_DESCRIPTION_READER_KEY_SETTING, COMPOSER_ISSUE_TYPE_KEY_SETTING,
-    JIRA_COMPANY_MANAGED_URLS_SETTING, JIRA_STORY_POINTS_BOARD_ID_SETTING,
-    JIRA_STORY_POINTS_FIELD_ID_SETTING, RECENT_TICKETS_LIMIT_SETTING, SPEED_READER_WPM_SETTING,
+    COMPOSER_METADATA_TAB_KEY_SETTING, JIRA_COMPANY_MANAGED_URLS_SETTING,
+    JIRA_STORY_POINTS_BOARD_ID_SETTING, JIRA_STORY_POINTS_FIELD_ID_SETTING,
+    RECENT_TICKETS_LIMIT_SETTING, SPEED_READER_WPM_SETTING,
 };
 
 #[test]
@@ -103,6 +104,25 @@ fn jira_issue_url_uses_the_configured_site_and_trims_trailing_slashes() {
     assert_eq!(
         settings.jira_issue_url("FIN-42").as_deref(),
         Some("https://finery.atlassian.net/browse/FIN-42")
+    );
+}
+
+#[test]
+fn configured_jira_browse_urls_normalize_to_the_issue_key() {
+    let settings = AppSettings {
+        jira_base_url: "https://finery.atlassian.net///".into(),
+        ..AppSettings::default()
+    };
+
+    assert_eq!(
+        settings.normalize_jira_ticket_query(
+            "https://finery.atlassian.net/browse/DPP-5263?focusedCommentId=123#comment-123"
+        ),
+        "DPP-5263"
+    );
+    assert_eq!(
+        settings.normalize_jira_ticket_query("https://other.atlassian.net/browse/DPP-5263"),
+        "https://other.atlassian.net/browse/DPP-5263"
     );
 }
 
@@ -261,6 +281,7 @@ fn composer_keys_resolve_labels_and_reject_active_duplicates() {
     let settings = AppSettings::resolve(&values).unwrap();
     assert_eq!(settings.composer_keys.add_sibling.label(), "⌥s");
     assert_eq!(settings.composer_keys.commit.label(), "⌃m");
+    assert_eq!(settings.composer_keys.metadata_tab.label(), "M");
     assert_eq!(settings.composer_keys.create_submit.label(), "⌃Enter");
     assert_eq!(settings.composer_keys.description_focus.label(), "dd");
     assert_eq!(settings.composer_keys.description_inline.label(), "I");
@@ -284,6 +305,15 @@ fn composer_keys_resolve_labels_and_reject_active_duplicates() {
     let duplicate_create_dialog =
         HashMap::from([(COMPOSER_CREATE_SUBMIT_KEY_SETTING.into(), "o".into())]);
     assert!(AppSettings::resolve(&duplicate_create_dialog).is_err());
+
+    let legacy_commit = HashMap::from([(COMPOSER_COMMIT_KEY_SETTING.into(), "shift+m".into())]);
+    let migrated = AppSettings::resolve(&legacy_commit).unwrap();
+    assert_eq!(migrated.composer_keys.commit.label(), "⌃Enter");
+    assert!(
+        migrated
+            .values()
+            .contains(&(COMPOSER_METADATA_TAB_KEY_SETTING, "shift+m".into(),))
+    );
 
     let prefix_across_workspace = HashMap::from([
         (COMPOSER_ADD_SIBLING_KEY_SETTING.into(), "d".into()),

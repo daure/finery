@@ -98,14 +98,11 @@ pub(super) fn ticket_data_view_with_number_jump(
                 .collect::<Vec<_>>(),
         )
         .selected(effective_ticket_selection(state))
-        .copy_with({
-            let jira_base_url = jira_base_url.clone();
-            move |row| {
-                jira_base_url
-                    .as_ref()
-                    .filter(|_| !row.item.key.starts_with("NEW-"))
-                    .map(|base_url| format!("{base_url}/browse/{}", row.item.key))
-                    .unwrap_or_default()
+        .copy_with(|row| {
+            if row.attachment.is_some() || row.mermaid_diagram.is_some() {
+                String::new()
+            } else {
+                row.item.key.clone()
             }
         })
         .copy_hotkey("yp", |row| {

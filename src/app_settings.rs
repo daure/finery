@@ -48,6 +48,7 @@ pub(crate) const COMPOSER_REFRESH_KEY_SETTING: &str = "composer.refresh_key";
 pub(crate) const COMPOSER_TITLE_KEY_SETTING: &str = "composer.title_key";
 pub(crate) const COMPOSER_DESCRIPTION_TAB_KEY_SETTING: &str = "composer.description_tab_key";
 pub(crate) const COMPOSER_PROPERTIES_TAB_KEY_SETTING: &str = "composer.properties_tab_key";
+pub(crate) const COMPOSER_METADATA_TAB_KEY_SETTING: &str = "composer.metadata_tab_key";
 pub(crate) const COMPOSER_DESCRIPTION_FOCUS_KEY_SETTING: &str = "composer.description_focus_key";
 pub(crate) const COMPOSER_DESCRIPTION_EDITOR_KEY_SETTING: &str = "composer.description_editor_key";
 pub(crate) const COMPOSER_DESCRIPTION_READER_KEY_SETTING: &str = "composer.description_reader_key";
@@ -163,6 +164,7 @@ pub(crate) struct ComposerKeyBindings {
     pub(crate) title: ComposerKeyBinding,
     pub(crate) description_tab: ComposerKeyBinding,
     pub(crate) properties_tab: ComposerKeyBinding,
+    pub(crate) metadata_tab: ComposerKeyBinding,
     pub(crate) description_focus: ComposerSequenceBinding,
     pub(crate) description_editor: ComposerSequenceBinding,
     pub(crate) description_reader: ComposerSequenceBinding,
@@ -216,6 +218,15 @@ impl ComposerKeyBindings {
                 setting,
             )
         };
+        let legacy_commit_key = values
+            .get(COMPOSER_COMMIT_KEY_SETTING)
+            .is_some_and(|value| value.eq_ignore_ascii_case("shift+m"))
+            && !values.contains_key(COMPOSER_METADATA_TAB_KEY_SETTING);
+        let commit = if legacy_commit_key {
+            ComposerKeyBinding::parse("ctrl+enter".into(), COMPOSER_COMMIT_KEY_SETTING)?
+        } else {
+            binding(COMPOSER_COMMIT_KEY_SETTING, "ctrl+enter")?
+        };
         let bindings = Self {
             add_sibling: binding(COMPOSER_ADD_SIBLING_KEY_SETTING, "shift+a")?,
             add_child: binding(COMPOSER_ADD_CHILD_KEY_SETTING, "shift+c")?,
@@ -228,11 +239,12 @@ impl ComposerKeyBindings {
             clone_change_set: binding(COMPOSER_CLONE_CHANGE_SET_KEY_SETTING, "ctrl+o")?,
             archive_done: binding(COMPOSER_ARCHIVE_DONE_KEY_SETTING, "d")?,
             archive_reject: binding(COMPOSER_ARCHIVE_REJECT_KEY_SETTING, "r")?,
-            commit: binding(COMPOSER_COMMIT_KEY_SETTING, "shift+m")?,
+            commit,
             refresh: binding(COMPOSER_REFRESH_KEY_SETTING, "shift+r")?,
             title: binding(COMPOSER_TITLE_KEY_SETTING, "shift+t")?,
             description_tab: binding(COMPOSER_DESCRIPTION_TAB_KEY_SETTING, "shift+d")?,
             properties_tab: binding(COMPOSER_PROPERTIES_TAB_KEY_SETTING, "shift+p")?,
+            metadata_tab: binding(COMPOSER_METADATA_TAB_KEY_SETTING, "shift+m")?,
             description_focus: sequence_binding(COMPOSER_DESCRIPTION_FOCUS_KEY_SETTING, "dd")?,
             description_editor: sequence_binding(COMPOSER_DESCRIPTION_EDITOR_KEY_SETTING, "do")?,
             description_reader: sequence_binding(COMPOSER_DESCRIPTION_READER_KEY_SETTING, "ds")?,
@@ -269,6 +281,7 @@ impl ComposerKeyBindings {
             bindings.title.sequence(),
             bindings.description_tab.sequence(),
             bindings.properties_tab.sequence(),
+            bindings.metadata_tab.sequence(),
             bindings.ticket_action.sequence(),
             bindings.restore_reset.sequence(),
             bindings.description_focus.sequence(),
@@ -687,6 +700,10 @@ impl AppSettings {
                 self.composer_keys.properties_tab.sequence.clone(),
             ),
             (
+                COMPOSER_METADATA_TAB_KEY_SETTING,
+                self.composer_keys.metadata_tab.sequence.clone(),
+            ),
+            (
                 COMPOSER_DESCRIPTION_FOCUS_KEY_SETTING,
                 self.composer_keys.description_focus.sequence.clone(),
             ),
@@ -840,6 +857,20 @@ impl AppSettings {
         (!base_url.is_empty() && !key.trim().is_empty()).then(|| format!("{base_url}/browse/{key}"))
     }
 
+    pub(crate) fn normalize_jira_ticket_query(&self, query: &str) -> String {
+        let query = query.trim();
+        let base_url = self.jira_base_url.trim().trim_end_matches('/');
+        let Some(key) = (!base_url.is_empty())
+            .then(|| query.strip_prefix(base_url))
+            .flatten()
+            .and_then(|path| path.strip_prefix("/browse/"))
+            .and_then(jira_issue_key_from_browse_path)
+        else {
+            return query.to_owned();
+        };
+        key.to_owned()
+    }
+
     pub(crate) fn jira_board_url(&self, page: Option<&str>) -> Option<String> {
         let base_url = self.jira_base_url.trim().trim_end_matches('/');
         let project = self.jira_default_project.trim();
@@ -900,6 +931,18 @@ fn sprint_name_fragments(value: Option<&String>) -> Vec<String> {
             }
             fragments
         })
+}
+
+fn jira_issue_key_from_browse_path(path: &str) -> Option<&str> {
+    let key = path.split(['/', '?', '#']).next()?;
+    let (project, number) = key.split_once('-')?;
+    (!project.is_empty()
+        && project
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        && !number.is_empty()
+        && number.chars().all(|character| character.is_ascii_digit()))
+    .then_some(key)
 }
 
 fn parse_composer_key(value: &str) -> Option<KeySpec> {

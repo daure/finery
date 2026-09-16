@@ -28,7 +28,7 @@ mod release_dates;
 
 use mapping::*;
 
-const ISSUE_FIELDS: [&str; 14] = [
+const ISSUE_FIELDS: [&str; 17] = [
     "summary",
     "description",
     "issuetype",
@@ -43,6 +43,9 @@ const ISSUE_FIELDS: [&str; 14] = [
     "attachment",
     "issuelinks",
     "statuscategorychangedate",
+    "reporter",
+    "created",
+    "updated",
 ];
 const MERMAID_SOURCE_BYTES_LIMIT: usize = 5 * 1024 * 1024;
 
@@ -59,7 +62,7 @@ const BACKLOG_FIELDS: [&str; 11] = [
     "fixVersions",
     "statuscategorychangedate",
 ];
-const COMPOSER_FIELDS: [&str; 14] = [
+const COMPOSER_FIELDS: [&str; 17] = [
     "summary",
     "description",
     "issuetype",
@@ -74,6 +77,9 @@ const COMPOSER_FIELDS: [&str; 14] = [
     "attachment",
     "issuelinks",
     "statuscategorychangedate",
+    "reporter",
+    "created",
+    "updated",
 ];
 const BACKLOG_JQL: &str = "";
 const MAX_VELOCITY_GOAL_LOOKUPS: usize = 10;
@@ -1721,15 +1727,6 @@ pub(crate) fn epics(settings: &AppSettings) -> Result<Vec<JiraEpic>, String> {
             .then_with(|| left.key.cmp(&right.key))
     });
     Ok(epics)
-}
-
-pub(crate) fn project_issue_types(settings: &AppSettings) -> Result<Vec<JiraOption>, String> {
-    let project_key = settings.jira_default_project.trim();
-    if project_key.is_empty() {
-        return Err("Default Jira project is required to load issue types".into());
-    }
-    let (client, base_url, email, token) = configured_client(settings)?;
-    create_issue_types(&client, &base_url, &email, &token, project_key)
 }
 
 fn create_issue_types(

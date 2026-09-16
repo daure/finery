@@ -642,6 +642,7 @@ impl ComposerService {
             .change_set
             .tickets
             .iter()
+            .filter(|change| change.kind != ChangeKind::Deleted)
             .map(|change| {
                 clone_source_ticket_key(change)
                     .ok_or_else(|| invalid("change set contains a local ticket that cannot resync"))

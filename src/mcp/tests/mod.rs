@@ -195,6 +195,7 @@ fn attachment_calls_return_images_text_blobs_and_partial_errors() {
         description: String::new(),
         description_safe_to_overwrite: true,
         description_overwrite_warning: None,
+        jira_metadata: None,
         kind: TicketKind::Task,
         status: "To Do".into(),
         priority: "Medium".into(),

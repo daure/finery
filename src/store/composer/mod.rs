@@ -32,6 +32,8 @@ pub(crate) struct Ticket {
     pub description_safe_to_overwrite: bool,
     #[serde(default)]
     pub description_overwrite_warning: Option<String>,
+    #[serde(default)]
+    pub jira_metadata: Option<JiraTicketMetadata>,
     pub kind: TicketKind,
     pub status: String,
     pub priority: String,
@@ -60,6 +62,13 @@ pub(crate) struct Ticket {
     pub web_links: Vec<TicketWebLink>,
     #[serde(default)]
     pub issue_links: Vec<TicketIssueLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct JiraTicketMetadata {
+    pub reporter: String,
+    pub created: String,
+    pub updated: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1491,6 +1500,7 @@ impl ComposerState {
             description: String::new(),
             description_safe_to_overwrite: true,
             description_overwrite_warning: None,
+            jira_metadata: None,
             kind,
             status: String::new(),
             priority: "Medium".into(),
@@ -2668,6 +2678,11 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             description: "## Outcome\n\nCustomers can retry checkout without losing their basket.\n\n## Acceptance Criteria\n\n- Basket state survives a failed authorization.\n- A successful retry creates one order.".into(),
             description_safe_to_overwrite: true,
             description_overwrite_warning: None,
+            jira_metadata: Some(JiraTicketMetadata {
+                reporter: "Mina Patel".into(),
+                created: "2026-08-14T09:30:00.000+0000".into(),
+                updated: "2026-09-15T14:05:00.000+0000".into(),
+            }),
             kind: TicketKind::Story,
             status: "In Progress".into(),
             priority: "High".into(),
@@ -2692,6 +2707,11 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             description: "## Description\n\nAdd an idempotent retry path for transient gateway errors.".into(),
             description_safe_to_overwrite: true,
             description_overwrite_warning: None,
+            jira_metadata: Some(JiraTicketMetadata {
+                reporter: "Ada Mensah".into(),
+                created: "2026-08-21T11:45:00.000+0000".into(),
+                updated: "2026-09-16T08:20:00.000+0000".into(),
+            }),
             kind: TicketKind::Task,
             status: "To Do".into(),
             priority: "Highest".into(),
@@ -2716,6 +2736,11 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             description: "Legacy callback superseded by the event stream.".into(),
             description_safe_to_overwrite: true,
             description_overwrite_warning: None,
+            jira_metadata: Some(JiraTicketMetadata {
+                reporter: "Lin Chen".into(),
+                created: "2026-07-30T16:00:00.000+0000".into(),
+                updated: "2026-09-10T12:10:00.000+0000".into(),
+            }),
             kind: TicketKind::Task,
             status: "Done".into(),
             priority: "Low".into(),
@@ -2740,6 +2765,11 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
             description: "Show actionable gateway failures without exposing provider internals.".into(),
             description_safe_to_overwrite: true,
             description_overwrite_warning: None,
+            jira_metadata: Some(JiraTicketMetadata {
+                reporter: "Mina Patel".into(),
+                created: "2026-09-01T10:15:00.000+0000".into(),
+                updated: "2026-09-12T17:40:00.000+0000".into(),
+            }),
             kind: TicketKind::Bug,
             status: "Backlog".into(),
             priority: "Medium".into(),

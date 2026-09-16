@@ -497,6 +497,7 @@ pub(in crate::pages::backlog) struct BacklogTree {
 impl BacklogTree {
     pub(in crate::pages::backlog) fn set_snapshot(&mut self, snapshot: &BacklogSnapshot) {
         self.snapshot = snapshot.clone();
+        self.set_issue_types(issue_types_in_snapshot(snapshot));
         self.users.set_rows(selectable_users(snapshot));
         self.statuses.set_rows(selectable_statuses(snapshot));
         let highlighted = self.control.data_view().highlighted_id();
@@ -1040,6 +1041,22 @@ impl BacklogTree {
     }
 
     fn handle_yank(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        if matches!(event, TuiEvent::Yank) {
+            if let Some(key) = self
+                .control
+                .data_view()
+                .highlighted_id()
+                .and_then(|id| self.control.items().iter().find(|row| row.id == id))
+                .and_then(|row| match &row.content {
+                    BacklogRowContent::WorkItem(item) => Some(item.item.key.clone()),
+                    BacklogRowContent::Section { .. } | BacklogRowContent::Group { .. } => None,
+                })
+            {
+                ctx.copy_to_clipboard(key);
+            }
+            ctx.stop_propagation();
+            return true;
+        }
         let TuiEvent::Hotkey(HotkeyEvent::Commit(sequence)) = event else {
             return false;
         };
@@ -2148,12 +2165,43 @@ pub(in crate::pages::backlog) fn selectable_issue_types(
     issue_types
         .into_iter()
         .filter(|issue_type| {
+            let normalized = issue_type
+                .label
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .flat_map(char::to_lowercase)
+                .collect::<String>();
             !matches!(
-                issue_type.label.to_ascii_lowercase().as_str(),
-                "subtask" | "sub-task" | "epic"
+                normalized.as_str(),
+                "subtask" | "subtasks" | "epic"
             )
         })
         .collect()
+}
+
+pub(in crate::pages::backlog) fn issue_types_in_snapshot(
+    snapshot: &BacklogSnapshot,
+) -> Vec<JiraOption> {
+    let mut issue_types = snapshot
+        .sprints
+        .iter()
+        .flat_map(|sprint| &sprint.work_items)
+        .chain(&snapshot.work_items)
+        .map(|item| item.kind.trim())
+        .filter(|kind| !kind.is_empty())
+        .map(|kind| JiraOption {
+            id: kind.to_owned(),
+            label: kind.to_owned(),
+        })
+        .collect::<Vec<_>>();
+    issue_types.sort_unstable_by(|left, right| {
+        left.label
+            .to_ascii_lowercase()
+            .cmp(&right.label.to_ascii_lowercase())
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    issue_types.dedup_by(|left, right| left.label.eq_ignore_ascii_case(&right.label));
+    selectable_issue_types(issue_types)
 }
 
 fn issue_type_labels(issue_types: &[JiraOption]) -> HashMap<String, String> {

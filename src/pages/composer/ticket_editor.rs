@@ -752,7 +752,7 @@ impl TicketEditor {
     }
 
     #[cfg(test)]
-    pub(super) fn detail_panel_areas(&self) -> (Rect, Rect) {
+    pub(super) fn detail_panel_areas(&self) -> (Rect, Rect, Rect) {
         self.view
             .base()
             .base()
@@ -793,7 +793,7 @@ impl TicketEditor {
     }
 
     #[cfg(test)]
-    pub(super) fn wide_panel_focus(&self) -> (bool, bool) {
+    pub(super) fn wide_panel_focus(&self) -> (bool, bool, bool) {
         self.view
             .base()
             .base()

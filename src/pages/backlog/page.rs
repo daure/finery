@@ -56,10 +56,6 @@ enum BacklogResult {
         generation: u64,
         result: Result<BacklogSnapshot, String>,
     },
-    IssueTypesLoaded {
-        generation: u64,
-        result: Result<Vec<JiraOption>, String>,
-    },
     Ranked {
         generation: u64,
         result: Result<(), String>,
@@ -179,7 +175,6 @@ pub(super) struct RequestGenerations {
     active_epic_sets: HashSet<u64>,
     active_release_sets: HashSet<u64>,
     active_story_points_sets: HashSet<u64>,
-    active_issue_types_load: Option<u64>,
     rank_refresh_load: Option<u64>,
     preserve_optimistic_view_load: Option<u64>,
 }
@@ -215,20 +210,6 @@ impl RequestGenerations {
         let generation = self.next();
         self.active_status_load = Some(generation);
         generation
-    }
-
-    fn start_issue_types_load(&mut self) -> u64 {
-        let generation = self.next();
-        self.active_issue_types_load = Some(generation);
-        generation
-    }
-
-    fn complete_issue_types_load(&mut self, generation: u64) -> bool {
-        if self.active_issue_types_load != Some(generation) {
-            return false;
-        }
-        self.active_issue_types_load = None;
-        true
     }
 
     fn complete_status_load(&mut self, generation: u64) -> bool {
@@ -481,10 +462,9 @@ pub(super) fn should_poll(
     loading: bool,
     ranking: bool,
     status_working: bool,
-    issue_types_loading: bool,
     retry_pending: bool,
 ) -> bool {
-    loading || ranking || status_working || issue_types_loading || retry_pending
+    loading || ranking || status_working || retry_pending
 }
 
 pub(crate) fn page(service: AppService) -> BacklogPage {
@@ -505,7 +485,6 @@ pub(crate) struct BacklogPage {
     epics_loading: bool,
     releases_loading: bool,
     current_user_loading: bool,
-    issue_types_loading: bool,
     syncing_ticket_keys: Rc<RefCell<HashSet<String>>>,
     current_user: Option<JiraAssignee>,
     assignees: Option<Vec<BacklogAssignee>>,
@@ -529,7 +508,6 @@ pub(crate) struct BacklogPage {
     data_focus_path: TreePath,
     reload_notification_pending: bool,
     settings_revision: u64,
-    issue_types_requested: bool,
     velocity_dialog_close_requested: Rc<Cell<bool>>,
     description_dialog_close_requested: Rc<Cell<bool>>,
     description_dialog_active: bool,
@@ -572,7 +550,6 @@ impl BacklogPage {
             epics_loading: false,
             releases_loading: false,
             current_user_loading: false,
-            issue_types_loading: false,
             syncing_ticket_keys,
             current_user: None,
             assignees: None,
@@ -600,7 +577,6 @@ impl BacklogPage {
             ]),
             reload_notification_pending: false,
             settings_revision,
-            issue_types_requested: false,
             velocity_dialog_close_requested,
             description_dialog_close_requested,
             description_dialog_active: false,
@@ -739,31 +715,6 @@ impl BacklogPage {
         }
     }
 
-    fn load_issue_types(&mut self) {
-        if self.issue_types_requested {
-            return;
-        }
-        self.issue_types_requested = true;
-        let generation = self.generations.start_issue_types_load();
-        self.issue_types_loading = true;
-        let service = self.service.clone();
-        let sender = self.sender.clone();
-        if let Err(error) = std::thread::Builder::new()
-            .name("finery-jira-issue-types".into())
-            .spawn(move || {
-                let _ = sender.send(BacklogResult::IssueTypesLoaded {
-                    generation,
-                    result: service.jira_project_issue_types(),
-                });
-            })
-            && self.generations.complete_issue_types_load(generation)
-        {
-            self.issue_types_loading = false;
-            self.service
-                .report_error(format!("Could not load Jira issue types: {error}"));
-        }
-    }
-
     fn shows_initial_loading(&self) -> bool {
         self.loading
     }
@@ -774,9 +725,6 @@ impl BacklogPage {
             changed |= match result {
                 BacklogResult::Loaded { generation, result } => {
                     self.apply_load_result(generation, result)
-                }
-                BacklogResult::IssueTypesLoaded { generation, result } => {
-                    self.apply_issue_types_result(generation, result)
                 }
                 BacklogResult::Ranked { generation, result } => {
                     self.apply_rank_result(generation, result)
@@ -837,24 +785,6 @@ impl BacklogPage {
             };
         }
         changed
-    }
-
-    fn apply_issue_types_result(
-        &mut self,
-        generation: u64,
-        result: Result<Vec<JiraOption>, String>,
-    ) -> bool {
-        if !self.generations.complete_issue_types_load(generation) {
-            return false;
-        }
-        self.issue_types_loading = false;
-        match result {
-            Ok(issue_types) => self.view.base_mut().base_mut().set_issue_types(issue_types),
-            Err(error) => self
-                .service
-                .report_error(format!("Could not load Jira issue types: {error}")),
-        }
-        true
     }
 
     fn apply_load_result(
@@ -4022,7 +3952,6 @@ impl TuiNode for BacklogPage {
                 || self.epics_loading
                 || self.releases_loading
                 || !self.syncing_ticket_keys.borrow().is_empty(),
-            self.issue_types_loading,
             self.rank_refresh_retry.pending(),
         ) {
             result.merge(TickResult::scheduled_after(Duration::from_millis(50)))
@@ -4056,7 +3985,6 @@ impl TuiNode for BacklogPage {
         self.loading_view.mount(ctx);
         self.view.mount(ctx);
         self.focus_backlog_after_load = true;
-        self.load_issue_types();
         self.load_assignees();
         self.load(false, false);
         ctx.request_tick();

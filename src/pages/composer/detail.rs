@@ -34,13 +34,16 @@ use super::fields::{
     DescriptionEditRequest, PendingDescriptionActions, description_diff_texts,
 };
 use super::mermaid::{DiagramContent, DiagramMarkup, DiagramTitle};
+use super::metadata::JiraMetadata;
 use super::property_fields::PropertyFields;
 
 type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
 type SharedDescription = SharedNode<BoundDescription>;
 type SharedProperties = SharedNode<PropertyFields>;
+type SharedMetadata = SharedNode<JiraMetadata>;
 type WideDescription = PanelHost<SharedDescription, ()>;
 type WideProperties = PanelHost<SharedProperties, ()>;
+type WideMetadata = PanelHost<SharedMetadata, ()>;
 type TicketFields = Split<BoundTextField, ResponsiveDetails>;
 type TicketDetail = Split<Flex<()>, TicketFields>;
 type FileFields = Split<AttachmentFilename, Tabs<()>>;
@@ -76,8 +79,10 @@ struct PanelBody<C> {
 struct WideDetails {
     description: WideDescription,
     properties: WideProperties,
+    metadata: WideMetadata,
     description_area: Rect,
     properties_area: Rect,
+    metadata_area: Rect,
 }
 
 impl<C> SharedNode<C> {
@@ -116,18 +121,28 @@ impl<C> PanelBody<C> {
 }
 
 impl WideDetails {
-    fn new(description: WideDescription, properties: WideProperties) -> Self {
+    fn new(
+        description: WideDescription,
+        properties: WideProperties,
+        metadata: WideMetadata,
+    ) -> Self {
         Self {
             description,
             properties,
+            metadata,
             description_area: Rect::default(),
             properties_area: Rect::default(),
+            metadata_area: Rect::default(),
         }
     }
 
     #[cfg(test)]
-    fn child_areas(&self) -> (Rect, Rect) {
-        (self.description_area, self.properties_area)
+    fn child_areas(&self) -> (Rect, Rect, Rect) {
+        (
+            self.description_area,
+            self.properties_area,
+            self.metadata_area,
+        )
     }
 
     fn set_focused_section(&mut self, section: Option<usize>, settings: AnimationSettings) {
@@ -137,13 +152,17 @@ impl WideDetails {
         self.properties
             .panel_mut()
             .set_focused(section == Some(1), settings);
+        self.metadata
+            .panel_mut()
+            .set_focused(section == Some(2), settings);
     }
 
     #[cfg(test)]
-    fn panel_focus(&self) -> (bool, bool) {
+    fn panel_focus(&self) -> (bool, bool, bool) {
         (
             self.description.panel().is_focused(),
             self.properties.panel().is_focused(),
+            self.metadata.panel().is_focused(),
         )
     }
 }
@@ -303,29 +322,40 @@ impl TuiNode for WideDetails {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
         let description = self.description.measure(proposal);
         let properties = self.properties.measure(proposal);
+        let metadata = self.metadata.measure(proposal);
         LayoutSizeHint::content(
             description
                 .preferred
                 .width
-                .saturating_add(properties.preferred.width),
+                .saturating_add(properties.preferred.width)
+                .saturating_add(metadata.preferred.width),
             description
                 .preferred
                 .height
-                .max(properties.preferred.height),
+                .max(properties.preferred.height)
+                .max(metadata.preferred.height),
         )
         .normalized(proposal)
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        let [description, properties] =
-            Layout::horizontal([Constraint::Ratio(7, 10), Constraint::Ratio(3, 10)]).areas(area);
+        let [description, properties, metadata] = Layout::horizontal([
+            Constraint::Ratio(6, 10),
+            Constraint::Ratio(2, 10),
+            Constraint::Ratio(2, 10),
+        ])
+        .areas(area);
         self.description_area = description;
         self.properties_area = properties;
+        self.metadata_area = metadata;
         ctx.push_slot(ChildKey::new("tab-0"), description, |ctx| {
             self.description.layout(description, ctx);
         });
         ctx.push_slot(ChildKey::new("tab-1"), properties, |ctx| {
             self.properties.layout(properties, ctx);
+        });
+        ctx.push_slot(ChildKey::new("tab-2"), metadata, |ctx| {
+            self.metadata.layout(metadata, ctx);
         });
         LayoutResult::new(area)
     }
@@ -333,6 +363,7 @@ impl TuiNode for WideDetails {
     fn render<'a>(&'a self, frame: &mut Frame, _area: Rect, ctx: &mut RenderCtx<'a>) {
         self.description.render(frame, self.description_area, ctx);
         self.properties.render(frame, self.properties_area, ctx);
+        self.metadata.render(frame, self.metadata_area, ctx);
     }
 
     fn dispatch_event(
@@ -350,6 +381,10 @@ impl TuiNode for WideDetails {
                 ChildKey::new("tab-1"),
                 &mut self.properties as &mut dyn TuiNode<()>,
             ),
+            (
+                ChildKey::new("tab-2"),
+                &mut self.metadata as &mut dyn TuiNode<()>,
+            ),
         ] {
             if let Some(path) = route.path.without_first_if(&key) {
                 return child.dispatch_event(&EventRoute::new(path), event, ctx);
@@ -362,6 +397,7 @@ impl TuiNode for WideDetails {
         self.description
             .tick(dt, settings)
             .merge(self.properties.tick(dt, settings))
+            .merge(self.metadata.tick(dt, settings))
     }
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
@@ -369,25 +405,31 @@ impl TuiNode for WideDetails {
             self.description.dispatch_focus(&target, focused, ctx);
         } else if let Some(target) = target.for_child(&ChildKey::new("tab-1")) {
             self.properties.dispatch_focus(&target, focused, ctx);
+        } else if let Some(target) = target.for_child(&ChildKey::new("tab-2")) {
+            self.metadata.dispatch_focus(&target, focused, ctx);
         }
     }
 
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.description.init(ctx);
         self.properties.init(ctx);
+        self.metadata.init(ctx);
     }
 
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.description.mount(ctx);
         self.properties.mount(ctx);
+        self.metadata.mount(ctx);
     }
 
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.metadata.unmount(ctx);
         self.properties.unmount(ctx);
         self.description.unmount(ctx);
     }
 
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.metadata.destroy(ctx);
         self.properties.destroy(ctx);
         self.description.destroy(ctx);
     }
@@ -453,6 +495,7 @@ impl DetailPane {
             service.clone(),
             keys.clone(),
         )));
+        let metadata = Rc::new(UnsafeCell::new(JiraMetadata::new(Rc::clone(&state))));
         let property_shortcuts = Rc::new(RefCell::new(Vec::new()));
         let mut tabs = Tabs::new(vec![
             Tab::new(
@@ -465,6 +508,11 @@ impl DetailPane {
                 PanelBody::new(SharedNode::owner(Rc::clone(&properties))),
             )
             .hotkey(keys.properties_tab.sequence()),
+            Tab::new(
+                "Metadata",
+                PanelBody::new(SharedNode::owner(Rc::clone(&metadata))),
+            )
+            .hotkey(keys.metadata_tab.sequence()),
         ])
         .action_hotkey(
             keys.description_focus.sequence(),
@@ -531,9 +579,13 @@ impl DetailPane {
             .top_left("Properties")
             .hotkey(keys.properties_tab.sequence())
             .host(SharedNode::reference(Rc::clone(&properties)));
+        let wide_metadata = Panel::new()
+            .top_left("Metadata")
+            .hotkey(keys.metadata_tab.sequence())
+            .host(SharedNode::reference(Rc::clone(&metadata)));
         let details = ResponsiveDetails {
             narrow: tabs,
-            wide: WideDetails::new(wide_description, wide_properties),
+            wide: WideDetails::new(wide_description, wide_properties, wide_metadata),
             properties,
             property_shortcuts,
             property_keys,
@@ -793,7 +845,7 @@ impl DetailPane {
     }
 
     #[cfg(test)]
-    pub(super) fn detail_panel_areas(&self) -> (Rect, Rect) {
+    pub(super) fn detail_panel_areas(&self) -> (Rect, Rect, Rect) {
         self.detail.second().second().wide_areas()
     }
 
@@ -808,7 +860,7 @@ impl DetailPane {
     }
 
     #[cfg(test)]
-    pub(super) fn wide_panel_focus(&self) -> (bool, bool) {
+    pub(super) fn wide_panel_focus(&self) -> (bool, bool, bool) {
         self.detail.second().second().wide_panel_focus()
     }
 }
@@ -895,10 +947,11 @@ impl ResponsiveDetails {
         };
         self.wide.description.panel_mut().set_border(border);
         self.wide.properties.panel_mut().set_border(border);
+        self.wide.metadata.panel_mut().set_border(border);
     }
 
     #[cfg(test)]
-    fn wide_areas(&self) -> (Rect, Rect) {
+    fn wide_areas(&self) -> (Rect, Rect, Rect) {
         self.wide.child_areas()
     }
 
@@ -913,7 +966,7 @@ impl ResponsiveDetails {
     }
 
     #[cfg(test)]
-    fn wide_panel_focus(&self) -> (bool, bool) {
+    fn wide_panel_focus(&self) -> (bool, bool, bool) {
         self.wide.panel_focus()
     }
 }
@@ -1325,6 +1378,8 @@ impl TuiNode for ResponsiveDetails {
             Some(0)
         } else if target.for_child(&ChildKey::new("tab-1")).is_some() {
             Some(1)
+        } else if target.for_child(&ChildKey::new("tab-2")).is_some() {
+            Some(2)
         } else {
             None
         };
@@ -1572,6 +1627,7 @@ mod file_content_tests {
             description: String::new(),
             description_safe_to_overwrite: true,
             description_overwrite_warning: None,
+            jira_metadata: None,
             kind: TicketKind::Task,
             status: "To Do".into(),
             priority: "Medium".into(),
@@ -1639,6 +1695,7 @@ mod file_content_tests {
             description: String::new(),
             description_safe_to_overwrite: true,
             description_overwrite_warning: None,
+            jira_metadata: None,
             kind: TicketKind::Task,
             status: "To Do".into(),
             priority: "Medium".into(),
@@ -1760,6 +1817,7 @@ mod file_content_tests {
             description: String::new(),
             description_safe_to_overwrite: true,
             description_overwrite_warning: None,
+            jira_metadata: None,
             kind: TicketKind::Task,
             status: "To Do".into(),
             priority: "Medium".into(),

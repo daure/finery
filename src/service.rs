@@ -648,6 +648,13 @@ impl AppService {
         })
     }
 
+    pub(crate) fn normalize_jira_ticket_query(&self, query: &str) -> String {
+        self.settings
+            .read()
+            .map(|settings| settings.normalize_jira_ticket_query(query))
+            .unwrap_or_else(|_| query.trim().to_owned())
+    }
+
     pub(crate) fn search_jira_for_composer(
         &self,
         query: &str,
@@ -691,15 +698,6 @@ impl AppService {
             .trim_end_matches('/')
             .to_owned();
         jira::velocity_tickets(&settings, sprint_ids).map(|tickets| (base_url, tickets))
-    }
-
-    pub(crate) fn jira_project_issue_types(&self) -> Result<Vec<jira::JiraOption>, String> {
-        let settings = self
-            .settings
-            .read()
-            .map_err(|_| "settings lock is unavailable".to_string())?
-            .clone();
-        jira::project_issue_types(&settings)
     }
 
     pub(crate) fn jira_status_transitions_by_issue(

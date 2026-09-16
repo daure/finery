@@ -269,7 +269,12 @@ impl AddTicketMenu {
         if self.mode != AddMenuMode::Existing {
             return false;
         }
-        let query = self.dropdown.search_query().to_owned();
+        let query = self
+            .service
+            .normalize_jira_ticket_query(self.dropdown.search_query());
+        if query != self.dropdown.search_query() {
+            self.dropdown.set_search_query(&query);
+        }
         let mut changed = false;
         if query != self.last_query {
             self.last_query = query;

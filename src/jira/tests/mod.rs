@@ -48,6 +48,7 @@ fn ticket(key: &str, kind: TicketKind, parent_key: Option<&str>) -> Ticket {
         description: String::new(),
         description_safe_to_overwrite: true,
         description_overwrite_warning: None,
+        jira_metadata: None,
         kind,
         status: "To Do".into(),
         priority: "Medium".into(),
@@ -1171,6 +1172,9 @@ fn jira_ticket_maps_attachment_metadata() {
     let ticket = to_ticket(JiraIssue {
         key: "FIN-7".into(),
         fields: json!({
+            "reporter": { "displayName": "Mina" },
+            "created": "2026-09-04T16:14:04.000+0000",
+            "updated": "2026-09-05T09:30:00.000+0000",
             "attachment": [{
                 "filename": "image-20260904-161404.png",
                 "created": "2026-09-04T16:14:04.000+0000",
@@ -1182,6 +1186,15 @@ fn jira_ticket_maps_attachment_metadata() {
     });
 
     assert_eq!(ticket.attachments.len(), 1);
+    assert_eq!(ticket.jira_metadata.as_ref().unwrap().reporter, "Mina");
+    assert_eq!(
+        ticket.jira_metadata.as_ref().unwrap().created,
+        "2026-09-04T16:14:04.000+0000"
+    );
+    assert_eq!(
+        ticket.jira_metadata.as_ref().unwrap().updated,
+        "2026-09-05T09:30:00.000+0000"
+    );
     assert_eq!(ticket.attachments[0].filename, "image-20260904-161404.png");
     assert_eq!(
         ticket.attachments[0].created,

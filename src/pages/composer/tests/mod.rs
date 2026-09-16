@@ -60,6 +60,7 @@ fn share_ticket(key: &str, title: &str, kind: TicketKind, parent_key: Option<&st
         description: String::new(),
         description_safe_to_overwrite: true,
         description_overwrite_warning: None,
+        jira_metadata: None,
         kind,
         status: "To Do".into(),
         priority: "Medium".into(),
@@ -471,8 +472,10 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     assert!(text.contains("Keep checkout state across retries"));
     assert!(text.contains("Description"));
     assert!(text.contains("Properties"));
+    assert!(text.contains("Metadata"));
     assert!(text.contains("Description |D|"));
     assert!(text.contains("Properties |P|"));
+    assert!(text.contains("Metadata |M|"));
     assert_eq!(text.matches("dd·do·ds").count(), 1);
     assert!(!text.contains("dd·do·ds·it"));
     assert!(!text.contains("Jira description · Markdown"));
@@ -483,9 +486,24 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     assert_eq!(
         tabs_hotkeys.hotkey_sequences,
         vec![
-            "shift+d", "shift+p", "dd", "do", "ds", "it", "pa", "st", "pr", "ee", "sp", "fv", "be",
-            "uu", "ui",
+            "shift+d", "shift+p", "shift+m", "dd", "do", "ds", "it", "pa", "st", "pr", "ee", "sp",
+            "fv", "be", "uu", "ui",
         ]
+    );
+    page.dispatch_event(
+        &EventRoute::new(tabs_hotkeys.path.clone()),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("shift+m".into())),
+        &mut EventCtx::default(),
+    );
+    assert_eq!(page.narrow_selected_index(), 2);
+    let metadata = render_text(&mut page);
+    assert!(metadata.contains("Reporter     Mina Patel"));
+    assert!(metadata.contains("Created      2026-08-14 09:30 +00:00"));
+    assert!(metadata.contains("Last updated 2026-09-15 14:05 +00:00"));
+    page.dispatch_event(
+        &EventRoute::new(tabs_hotkeys.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("shift+d".into())),
+        &mut EventCtx::default(),
     );
     let description_hotkeys = target(&mut page, "textarea");
     assert!(description_hotkeys.hotkey_sequences.is_empty());
@@ -1441,8 +1459,8 @@ fn submit_requires_confirmation() {
     page.dispatch_event(
         &EventRoute::new(title.path),
         &TuiEvent::Key(KeyEvent {
-            code: Key::Char('m'),
-            modifiers: KeyModifiers::SHIFT,
+            code: Key::Enter,
+            modifiers: KeyModifiers::CONTROL,
         }),
         &mut EventCtx::default(),
     );
@@ -1465,8 +1483,8 @@ fn submit_confirmation_lists_the_effective_scope() {
     page.dispatch_event(
         &EventRoute::new(title.path),
         &TuiEvent::Key(KeyEvent {
-            code: Key::Char('m'),
-            modifiers: KeyModifiers::SHIFT,
+            code: Key::Enter,
+            modifiers: KeyModifiers::CONTROL,
         }),
         &mut EventCtx::default(),
     );
@@ -1591,7 +1609,7 @@ fn ctrl_enter_opens_the_selected_existing_ticket() {
 }
 
 #[test]
-fn yy_copies_the_focused_composer_ticket_url() {
+fn yy_copies_the_focused_composer_ticket_key() {
     tuicore::init();
     let mut state = ComposerState::demo();
     state
@@ -1609,10 +1627,7 @@ fn yy_copies_the_focused_composer_ticket_url() {
 
     view.event(&TuiEvent::Yank, &mut ctx);
 
-    assert_eq!(
-        ctx.clipboard_request(),
-        Some("https://jira.example/browse/FIN-157")
-    );
+    assert_eq!(ctx.clipboard_request(), Some("FIN-157"));
 }
 
 #[test]
@@ -2346,7 +2361,10 @@ fn toolbar_hotkeys_run_without_focusing_their_buttons() {
     let mut submit_ctx = EventCtx::default();
     page.dispatch_event(
         &EventRoute::new(tickets.path),
-        &TuiEvent::Key(KeyEvent::from(Key::Char('M'))),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Enter,
+            modifiers: KeyModifiers::CONTROL,
+        }),
         &mut submit_ctx,
     );
     assert!(submit_ctx.layout_requested());
@@ -3108,8 +3126,11 @@ fn responsive_details_use_tabs_when_narrow_and_seventy_thirty_panels_when_wide()
             .iter()
             .any(|target| target.id == FocusId::new("tabs"))
     );
-    let (description, properties) = page.detail_panel_areas();
-    assert_eq!((description.width, properties.width), (84, 36));
+    let (description, properties, metadata) = page.detail_panel_areas();
+    assert_eq!(
+        (description.width, properties.width, metadata.width),
+        (72, 24, 24)
+    );
     for hotkey in ["it", "st", "pr", "ee"] {
         assert!(wide.focus_targets().iter().any(|target| {
             target
@@ -3225,12 +3246,12 @@ fn wide_panel_focus_selects_the_matching_narrow_tab() {
 
     page.dispatch_focus(&priority, true, &mut FocusCtx::default());
     assert_eq!(page.narrow_selected_index(), 1);
-    assert_eq!(page.wide_panel_focus(), (false, true));
+    assert_eq!(page.wide_panel_focus(), (false, true, false));
 
     page.dispatch_focus(&priority, false, &mut FocusCtx::default());
     page.dispatch_focus(&description, true, &mut FocusCtx::default());
     assert_eq!(page.narrow_selected_index(), 0);
-    assert_eq!(page.wide_panel_focus(), (true, false));
+    assert_eq!(page.wide_panel_focus(), (true, false, false));
 }
 
 #[test]
@@ -3447,7 +3468,8 @@ fn deleted_ticket_hotkeys_and_escape_return_to_change_sets() {
     assert_eq!(
         tabs.hotkey_sequences,
         vec![
-            "shift+d", "shift+p", "ds", "it", "pa", "st", "pr", "ee", "sp", "fv", "be", "uu", "ui",
+            "shift+d", "shift+p", "shift+m", "ds", "it", "pa", "st", "pr", "ee", "sp", "fv", "be",
+            "uu", "ui",
         ]
     );
 

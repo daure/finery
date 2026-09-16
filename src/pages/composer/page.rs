@@ -379,7 +379,7 @@ impl ComposerPage {
     }
 
     #[cfg(test)]
-    pub(super) fn detail_panel_areas(&self) -> (Rect, Rect) {
+    pub(super) fn detail_panel_areas(&self) -> (Rect, Rect, Rect) {
         self.editor.detail_panel_areas()
     }
 
@@ -399,7 +399,7 @@ impl ComposerPage {
     }
 
     #[cfg(test)]
-    pub(super) fn wide_panel_focus(&self) -> (bool, bool) {
+    pub(super) fn wide_panel_focus(&self) -> (bool, bool, bool) {
         self.editor.wide_panel_focus()
     }
 

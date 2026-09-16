@@ -37,6 +37,7 @@ fn existing_jira_search_uses_centered_dropdown_popup_without_trigger_field() {
         description: String::new(),
         description_safe_to_overwrite: true,
         description_overwrite_warning: None,
+        jira_metadata: None,
         kind: TicketKind::Story,
         status: "To Do".into(),
         priority: "High".into(),
@@ -122,6 +123,7 @@ fn existing_search_keeps_legal_result_beyond_first_ten() {
             description: String::new(),
             description_safe_to_overwrite: true,
             description_overwrite_warning: None,
+            jira_metadata: None,
             kind: TicketKind::Task,
             status: "To Do".into(),
             priority: "Medium".into(),
@@ -147,6 +149,7 @@ fn existing_search_keeps_legal_result_beyond_first_ten() {
         description: String::new(),
         description_safe_to_overwrite: true,
         description_overwrite_warning: None,
+        jira_metadata: None,
         kind: TicketKind::Story,
         status: "To Do".into(),
         priority: "Medium".into(),
@@ -169,6 +172,20 @@ fn existing_search_keeps_legal_result_beyond_first_ten() {
 
     assert_eq!(menu.tickets.len(), 1);
     assert_eq!(menu.tickets[0].ticket.key, "FIN-legal");
+}
+
+#[test]
+fn existing_ticket_search_uses_the_key_from_a_configured_jira_url() {
+    let service = AppService::for_tests();
+    service.settings().write().unwrap().jira_base_url = "https://finery.atlassian.net".into();
+    let mut menu = AddTicketMenu::new(service);
+    menu.mode = super::AddMenuMode::Existing;
+    menu.dropdown
+        .set_search_query("https://finery.atlassian.net/browse/DPP-5263");
+
+    assert!(menu.drain_search());
+    assert_eq!(menu.last_query, "DPP-5263");
+    assert_eq!(menu.dropdown.search_query(), "DPP-5263");
 }
 
 fn search_ticket(ticket: Ticket) -> ComposerSearchTicket {

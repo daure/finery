@@ -15,7 +15,7 @@ use tuicore::{
 use super::{
     components::{
         BacklogQuickMenu, BacklogQuickMenuEvent, BacklogTree, backlog_tree,
-        backlog_tree_with_issue_types, selectable_issue_types,
+        backlog_tree_with_issue_types, issue_types_in_snapshot, selectable_issue_types,
     },
     page::{
         BacklogPage, MAX_UNCONFIRMED_TRANSFER_REFRESHES, PendingRank, PendingRankReconciliation,
@@ -802,6 +802,14 @@ fn issue_type_dropdown_excludes_epics_and_subtasks() {
             id: "4".into(),
             label: "Sub-task".into(),
         },
+        JiraOption {
+            id: "5".into(),
+            label: "Subtasks".into(),
+        },
+        JiraOption {
+            id: "6".into(),
+            label: "Sub-tasks".into(),
+        },
     ]);
 
     assert_eq!(
@@ -810,6 +818,29 @@ fn issue_type_dropdown_excludes_epics_and_subtasks() {
             .map(|issue_type| issue_type.label.as_str())
             .collect::<Vec<_>>(),
         ["Story"]
+    );
+}
+
+#[test]
+fn issue_type_dropdown_uses_types_present_in_the_backlog() {
+    let mut snapshot = snapshot();
+    snapshot.sprints[0].work_items[0].kind = "Bug".into();
+    snapshot.work_items[0].kind = "Story".into();
+    snapshot.work_items.push(WorkItem {
+        kind: "bug".into(),
+        ..work_item("FIN-9", "Duplicate type")
+    });
+    snapshot.work_items.push(WorkItem {
+        kind: "Epic".into(),
+        ..work_item("FIN-10", "Epic")
+    });
+
+    assert_eq!(
+        issue_types_in_snapshot(&snapshot)
+            .into_iter()
+            .map(|issue_type| issue_type.label)
+            .collect::<Vec<_>>(),
+        ["Bug", "Story"]
     );
 }
 
@@ -3058,6 +3089,25 @@ fn yp_copies_a_backlog_ticket_prepare_reference_but_not_a_section() {
 }
 
 #[test]
+fn yy_copies_a_backlog_ticket_key_but_not_a_section() {
+    tuicore::init();
+    let (sender, _receiver) = mpsc::channel();
+    let snapshot = snapshot();
+    let key = snapshot.work_items[0].key.clone();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+    tree.highlight(&format!("ticket:{key}"));
+    let mut ctx = EventCtx::default();
+    tree.dispatch_event(&route, &TuiEvent::Yank, &mut ctx);
+    assert_eq!(ctx.clipboard_request(), Some(key.as_str()));
+
+    tree.highlight("section:backlog");
+    let mut ctx = EventCtx::default();
+    tree.dispatch_event(&route, &TuiEvent::Yank, &mut ctx);
+    assert_eq!(ctx.clipboard_request(), None);
+}
+
+#[test]
 fn successful_direct_rank_keeps_the_optimistic_order_without_reconciliation() {
     tuicore::init();
     let rollback = BacklogSnapshot {
@@ -4041,11 +4091,11 @@ fn unconfirmed_transfer_refreshes_exhaust() {
 
 #[test]
 fn polling_runs_only_while_work_is_pending() {
-    assert!(should_poll(true, false, false, false, false));
-    assert!(should_poll(false, true, false, false, false));
-    assert!(should_poll(false, false, true, false, false));
-    assert!(should_poll(false, false, false, true, false));
-    assert!(!should_poll(false, false, false, false, false));
+    assert!(should_poll(true, false, false, false));
+    assert!(should_poll(false, true, false, false));
+    assert!(should_poll(false, false, true, false));
+    assert!(should_poll(false, false, false, true));
+    assert!(!should_poll(false, false, false, false));
 }
 
 #[test]

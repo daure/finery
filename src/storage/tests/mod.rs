@@ -15,6 +15,7 @@ fn ticket(key: &str, title: &str) -> Ticket {
         description: "Description".into(),
         description_safe_to_overwrite: true,
         description_overwrite_warning: None,
+        jira_metadata: None,
         kind: TicketKind::Story,
         status: "To Do".into(),
         priority: "High".into(),

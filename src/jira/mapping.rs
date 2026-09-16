@@ -2,7 +2,8 @@ use serde_json::Value;
 
 use crate::store::{
     composer::{
-        AttachmentChangeKind, Ticket, TicketAttachment, TicketIssueLink, TicketKind, TicketWebLink,
+        AttachmentChangeKind, JiraTicketMetadata, Ticket, TicketAttachment, TicketIssueLink,
+        TicketKind, TicketWebLink,
         jira_adf::{adf_is_safe_to_overwrite, adf_overwrite_warning, adf_to_markdown},
     },
     work_items::{BacklogSnapshot, SubtaskProgress, WorkItem, is_done_status},
@@ -24,6 +25,11 @@ pub(super) fn to_ticket(issue: JiraIssue) -> Ticket {
         description: adf_to_markdown(field("description")),
         description_safe_to_overwrite: adf_is_safe_to_overwrite(field("description")),
         description_overwrite_warning: adf_overwrite_warning(field("description")),
+        jira_metadata: Some(JiraTicketMetadata {
+            reporter: person_name(field("reporter")),
+            created: field("created").as_str().unwrap_or_default().into(),
+            updated: field("updated").as_str().unwrap_or_default().into(),
+        }),
         kind: field("issuetype")
             .get("name")
             .and_then(Value::as_str)
@@ -58,6 +64,14 @@ pub(super) fn to_ticket(issue: JiraIssue) -> Ticket {
         web_links: Vec::new(),
         issue_links: issue_links(field("issuelinks")),
     }
+}
+
+fn person_name(value: &Value) -> String {
+    value
+        .get("displayName")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .into()
 }
 
 pub(super) fn issue_links(value: &Value) -> Vec<TicketIssueLink> {

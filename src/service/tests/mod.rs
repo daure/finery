@@ -172,6 +172,7 @@ fn ticket(key: &str) -> Ticket {
         description: String::new(),
         description_safe_to_overwrite: true,
         description_overwrite_warning: None,
+        jira_metadata: None,
         kind: TicketKind::Task,
         status: "To Do".into(),
         priority: "Medium".into(),
@@ -337,10 +338,23 @@ fn cloning_an_archived_change_set_resyncs_each_jira_ticket() {
         create_attempt: false,
         sibling_order: 1,
     });
+    archived.tickets.push(TicketChange {
+        id: "FIN-3".into(),
+        original: Some(ticket("FIN-3")),
+        updated: None,
+        kind: ChangeKind::Deleted,
+        submitted: None,
+        retry_blocked: false,
+        create_attempt: false,
+        sibling_order: 2,
+    });
     runtime
         .block_on(storage.save_change_set(&archived))
         .unwrap();
     let lookup = Arc::new(|key: &str| -> Result<Ticket, String> {
+        if key == "FIN-3" {
+            return Err("deleted ticket should not be fetched".into());
+        }
         let mut synced = ticket(key);
         if key == "FIN-1" {
             synced

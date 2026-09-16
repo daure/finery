@@ -6,6 +6,7 @@ mod detail;
 mod fields;
 mod issue_links;
 mod mermaid;
+mod metadata;
 mod page;
 mod property_fields;
 mod source;
