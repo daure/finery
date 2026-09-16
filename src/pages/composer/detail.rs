@@ -345,7 +345,7 @@ impl TuiNode for WideDetails {
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         let [description, secondary] =
-            Layout::horizontal([Constraint::Ratio(6, 10), Constraint::Ratio(4, 10)]).areas(area);
+            Layout::horizontal([Constraint::Ratio(3, 4), Constraint::Ratio(1, 4)]).areas(area);
         self.description_area = description;
         self.secondary_area = secondary;
         ctx.push_slot(ChildKey::new("description"), description, |ctx| {
@@ -448,6 +448,7 @@ pub(super) struct DetailPane {
     external_editor_pending: bool,
     service: AppService,
     detail: TicketDetail,
+    description: SharedNode<BoundDescription>,
     file: FileDetail,
     diagram: DiagramDetail,
     empty: SeasonalEmptyState,
@@ -685,6 +686,7 @@ impl DetailPane {
             service,
             detail: Split::vertical(mode, fields)
                 .constraints(Constraint::Length(1), Constraint::Fill(1)),
+            description: SharedNode::reference(description),
             file,
             diagram,
             empty: SeasonalEmptyState::new("No tickets added"),
@@ -784,6 +786,19 @@ impl DetailPane {
 
     pub(super) fn select_description(&mut self) {
         self.detail.second_mut().second_mut().select_description();
+    }
+
+    pub(super) fn view_mode_focus_request(&self) -> FocusRequest {
+        let state = self.state.borrow();
+        if state.selected_attachment().is_some() || state.selected_mermaid_diagram().is_some() {
+            return FocusRequest::Keep;
+        }
+        self.detail
+            .second()
+            .first()
+            .view_mode_focus_request()
+            .or_else(|| self.description.inner().view_mode_focus_request())
+            .unwrap_or(FocusRequest::Keep)
     }
 
     fn sync(&mut self) {

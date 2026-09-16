@@ -51,6 +51,7 @@ const TEST_WIDTH: u16 = 96;
 
 mod archive;
 mod quick_menu;
+mod view_mode;
 
 fn share_ticket(key: &str, title: &str, kind: TicketKind, parent_key: Option<&str>) -> Ticket {
     Ticket {
@@ -978,10 +979,7 @@ fn view_mode_buttons_select_source_changes_and_diff_by_hotkey() {
             &mut ctx,
         );
         assert_eq!(page.view_mode(), expected);
-        assert_eq!(
-            ctx.focus_request(),
-            Some(&FocusRequest::Target(FocusId::new("data-view")))
-        );
+        assert_eq!(ctx.focus_request(), Some(&FocusRequest::Keep));
     }
 }
 
@@ -3194,7 +3192,7 @@ fn responsive_details_use_tabs_when_narrow_and_description_with_secondary_tabs_w
     let (description, properties, metadata) = page.detail_panel_areas();
     assert_eq!(
         (description.width, properties.width, metadata.width),
-        (72, 48, 48)
+        (90, 30, 30)
     );
     for hotkey in ["it", "st", "pr", "ee"] {
         assert!(wide.focus_targets().iter().any(|target| {

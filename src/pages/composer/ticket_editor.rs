@@ -883,7 +883,7 @@ impl TicketEditor {
         true
     }
 
-    fn drain_outputs(&mut self, focus_after_view_mode_change: bool, ctx: &mut EventCtx<()>) {
+    fn drain_outputs(&mut self, view_mode_hotkey: bool, ctx: &mut EventCtx<()>) {
         self.drain_description_actions(ctx);
         if self.create_dialog_close_requested.replace(false) {
             self.view
@@ -1074,8 +1074,8 @@ impl TicketEditor {
                 .set_active_with_context(false, ctx);
             Self::focus_tickets(ctx);
         }
-        if view_mode_changed && focus_after_view_mode_change {
-            Self::focus_tickets(ctx);
+        if view_mode_changed && view_mode_hotkey {
+            ctx.focus(self.detail_mut().view_mode_focus_request());
         }
         if ticket_action {
             self.view.base_mut().set_active_with_context(false, ctx);

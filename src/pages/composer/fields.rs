@@ -11,7 +11,7 @@ use tuicore::{
     EventOutcome, EventRoute, FocusCtx, FocusId, FocusRequest, FocusTarget, HotkeyEvent,
     InputChrome, Language, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
     Panel, PanelHost, RenderCtx, TagInput, TagInputEvent, TextInput, TextareaInput, TickResult,
-    Toggle, TuiEvent, TuiNode, theme,
+    Toggle, TreePath, TuiEvent, TuiNode, theme,
 };
 
 use crate::{
@@ -566,6 +566,8 @@ pub(super) struct BoundTextField {
     field: TextField,
     input: TextInput,
     diff: PanelHost<DiffViewer>,
+    focused: bool,
+    focus_path: TreePath,
 }
 
 impl BoundTextField {
@@ -599,6 +601,8 @@ impl BoundTextField {
                 .border(BorderKind::RoundedDashed)
                 .top_right("read-only")
                 .host(diff),
+            focused: false,
+            focus_path: TreePath::new(),
         };
         bound.sync();
         bound
@@ -660,6 +664,23 @@ impl BoundTextField {
     pub(super) fn height(&self) -> u16 {
         if self.shows_diff() { 4 } else { 3 }
     }
+
+    pub(super) fn view_mode_focus_request(&self) -> Option<FocusRequest> {
+        self.focused.then(|| {
+            let (path, id) = if self.shows_diff() {
+                (
+                    self.focus_path.child(tuicore::ChildKey::body()),
+                    "diff-viewer",
+                )
+            } else {
+                (self.focus_path.clone(), "input")
+            };
+            FocusRequest::TargetAt {
+                path,
+                id: FocusId::new(id),
+            }
+        })
+    }
 }
 
 fn terminated_line(value: &str) -> String {
@@ -679,6 +700,7 @@ impl TuiNode for BoundTextField {
         }
     }
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.focus_path = ctx.current_path();
         self.sync();
         if self.shows_diff() {
             self.diff.layout(area, ctx)
@@ -738,10 +760,12 @@ impl TuiNode for BoundTextField {
         })
     }
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.focused = focused;
         self.input.focus(target, focused, ctx);
         self.diff.focus(target, focused, ctx);
     }
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.focused = focused;
         self.input.dispatch_focus(target, focused, ctx);
         self.diff.dispatch_focus(target, focused, ctx);
     }
@@ -772,6 +796,8 @@ pub(super) struct BoundDescription {
     reader_hotkey: String,
     input: TextareaInput,
     diff: DiffViewer,
+    focused: bool,
+    focus_path: TreePath,
 }
 
 impl BoundDescription {
@@ -803,9 +829,22 @@ impl BoundDescription {
                 .style(DiffStyle::Word)
                 .show_headers(false)
                 .wrap(true),
+            focused: false,
+            focus_path: TreePath::new(),
         };
         bound.sync();
         bound
+    }
+
+    pub(super) fn view_mode_focus_request(&self) -> Option<FocusRequest> {
+        self.focused.then(|| FocusRequest::TargetAt {
+            path: self.focus_path.clone(),
+            id: FocusId::new(if self.state.borrow().view_mode == ComposerViewMode::Diff {
+                "diff-viewer"
+            } else {
+                "textarea"
+            }),
+        })
     }
 
     fn sync(&mut self) -> bool {
@@ -913,6 +952,7 @@ impl TuiNode for BoundDescription {
         }
     }
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.focus_path = ctx.current_path();
         self.sync();
         if self.edit_request.replace(false) && !self.input.is_disabled() {
             self.input.move_cursor_to_end();
@@ -970,10 +1010,12 @@ impl TuiNode for BoundDescription {
         })
     }
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.focused = focused;
         self.input.focus(target, focused, ctx);
         self.diff.focus(target, focused, ctx);
     }
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.focused = focused;
         self.input.dispatch_focus(target, focused, ctx);
         self.diff.dispatch_focus(target, focused, ctx);
     }
@@ -1131,7 +1173,13 @@ impl TuiNode for BoundViewMode {
         self.buttons.render(frame, area);
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        self.buttons.event(event, ctx)
+        let outcome = self.buttons.event(event, ctx);
+        if outcome == EventOutcome::Handled
+            && matches!(event, TuiEvent::Hotkey(HotkeyEvent::Commit(_)))
+        {
+            ctx.focus(FocusRequest::Keep);
+        }
+        outcome
     }
     fn dispatch_event(
         &mut self,
@@ -1139,7 +1187,11 @@ impl TuiNode for BoundViewMode {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        self.buttons.dispatch_event(route, event, ctx)
+        if route.path.is_empty() {
+            self.event(event, ctx)
+        } else {
+            self.buttons.dispatch_event(route, event, ctx)
+        }
     }
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let changed = self.sync();
