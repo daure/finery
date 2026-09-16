@@ -11,7 +11,14 @@ import tomllib
 
 
 def run(*args, **kwargs):
-    return subprocess.run(args, check=True, text=True, **kwargs)
+    environment = {
+        **os.environ,
+        "PAGER": "cat",
+        "GIT_PAGER": "cat",
+        "CARGO_PAGER": "cat",
+        **kwargs.pop("env", {}),
+    }
+    return subprocess.run(args, check=True, text=True, env=environment, **kwargs)
 
 
 def output(*args):
@@ -78,7 +85,7 @@ def release(bump):
             tag,
             "-m",
             f"release: {tag}",
-            env={**os.environ, "GIT_EDITOR": "true"},
+            env={"GIT_EDITOR": "true"},
         )
         run("git", "push", "--atomic", "origin", "HEAD:refs/heads/main", f"refs/tags/{tag}")
     except Exception:

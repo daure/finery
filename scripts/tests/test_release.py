@@ -13,6 +13,15 @@ import release
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_run_disables_pagers(self):
+        with patch.object(release.subprocess, "run") as subprocess_run:
+            release.run("git", "status", env={"GIT_EDITOR": "true"})
+        environment = subprocess_run.call_args.kwargs["env"]
+        self.assertEqual(environment["PAGER"], "cat")
+        self.assertEqual(environment["GIT_PAGER"], "cat")
+        self.assertEqual(environment["CARGO_PAGER"], "cat")
+        self.assertEqual(environment["GIT_EDITOR"], "true")
+
     def test_stable_version_bumps(self):
         for bump, expected in [("patch", "0.27.1"), ("minor", "0.28.0"), ("major", "1.0.0")]:
             self.assertEqual(release.next_version("0.27.0", bump), expected)
@@ -93,7 +102,7 @@ class ReleaseGitTests(unittest.TestCase):
                     for call in calls
                     if call[0] == ("git", "tag", "-a", "v0.27.1", "-m", "release: v0.27.1")
                 )
-                self.assertEqual(tag_call[1]["env"]["GIT_EDITOR"], "true")
+                self.assertEqual(tag_call[1]["env"], {"GIT_EDITOR": "true"})
                 self.assertEqual(
                     [call for call, _ in calls if call[0] == "cargo"],
                     [
