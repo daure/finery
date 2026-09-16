@@ -18,11 +18,12 @@ use crate::{
     },
     store::work_items::{
         BacklogSnapshot, IssueStatusTransition, RankPlan, RunwayCapacitySource, Sprint,
-        StatusTransition, VelocityReport, VelocitySprint, WorkItem, apply_capacity,
+        StatusTransition, TicketComments, VelocityReport, VelocitySprint, WorkItem, apply_capacity,
         loaded_story_point_average,
     },
 };
 
+mod descriptions;
 mod mapping;
 mod release_dates;
 
@@ -49,7 +50,7 @@ const ISSUE_FIELDS: [&str; 17] = [
 ];
 const MERMAID_SOURCE_BYTES_LIMIT: usize = 5 * 1024 * 1024;
 
-const BACKLOG_FIELDS: [&str; 11] = [
+const BACKLOG_FIELDS: [&str; 12] = [
     "summary",
     "description",
     "issuetype",
@@ -61,6 +62,7 @@ const BACKLOG_FIELDS: [&str; 11] = [
     "labels",
     "fixVersions",
     "statuscategorychangedate",
+    "comment",
 ];
 const COMPOSER_FIELDS: [&str; 17] = [
     "summary",
@@ -532,7 +534,7 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         .into_iter()
         .filter(|sprint| !settings.excludes_sprint(&sprint.name))
         .collect::<Vec<_>>();
-    let (sprints, backlog, closed_velocity_goals, sprint_hydration_warning) =
+    let (sprints, backlog, ticket_comments, closed_velocity_goals, sprint_hydration_warning) =
         std::thread::scope(|scope| -> Result<_, String> {
             let backlog_client = client.clone();
             let backlog_base_url = base_url.clone();
@@ -577,7 +579,7 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
                         let token = token.clone();
                         let story_points_field_id = story_points_field_id.clone();
                         scope.spawn(move || {
-                            sprint_issues(
+                            sprint_issues_with_comments(
                                 &client,
                                 &base_url,
                                 &email,
@@ -596,7 +598,7 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
                     );
                 }
             }
-            let sprint_hydration_warning = hydrate_sprint_subtasks(
+            let sprint_hydration_warning = hydrate_sprint_subtasks_with_comments(
                 &client,
                 &base_url,
                 &email,
@@ -612,10 +614,16 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
             let velocity_goals = velocity_goals
                 .join()
                 .map_err(|_| "Jira velocity sprint goal request panicked".to_string())?;
+            let ticket_comments = sprint_work_items
+                .iter()
+                .flat_map(|loaded| loaded.ticket_comments.iter())
+                .chain(work_items.ticket_comments.iter())
+                .map(|(key, comments)| (key.clone(), comments.clone()))
+                .collect();
             let sprints = sprints
                 .into_iter()
                 .zip(sprint_work_items)
-                .map(|(sprint, work_items)| {
+                .map(|(sprint, loaded)| {
                     Ok(Sprint {
                         id: sprint.id,
                         name: sprint.name,
@@ -623,7 +631,7 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
                         goal: sprint.goal,
                         start_date: sprint.start_date,
                         end_date: sprint.end_date,
-                        work_items,
+                        work_items: loaded.work_items,
                         capacity: None,
                     })
                 })
@@ -631,6 +639,7 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
             Ok((
                 sprints,
                 work_items,
+                ticket_comments,
                 velocity_goals,
                 sprint_hydration_warning,
             ))
@@ -653,7 +662,9 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         warnings: Vec::new(),
         runway: None,
         velocity: velocity.as_ref().ok().cloned(),
+        ticket_comments,
     };
+    descriptions::hydrate(&client, &base_url, &email, &token, &mut snapshot);
     release_dates::hydrate(&client, &base_url, &email, &token, &mut snapshot);
     if let Some(warning) = discovery_warning {
         snapshot.warnings.push(warning);
@@ -1136,17 +1147,18 @@ pub(crate) fn velocity_tickets(
     Ok(results)
 }
 
-fn sprint_issues(
+fn sprint_issues_with_comments(
     client: &Client,
     base_url: &str,
     email: &str,
     token: &str,
     sprint_id: u64,
     story_points_field_id: Option<&str>,
-) -> Result<Vec<WorkItem>, String> {
+) -> Result<LoadedWorkItems, String> {
     let mut start_at = 0;
     let mut work_items = Vec::new();
     let mut embedded_subtasks = Vec::new();
+    let mut ticket_comments = HashMap::new();
     loop {
         let query = vec![
             ("startAt", start_at.to_string()),
@@ -1165,29 +1177,52 @@ fn sprint_issues(
         let loaded = page.issues.len();
         let complete = backlog_page_complete(&page, loaded);
         for issue in page.issues {
+            append_ticket_comments(&issue, &mut ticket_comments);
             let (work_item, subtasks) = to_work_item_with_subtasks(issue, story_points_field_id);
             work_items.push(work_item);
             embedded_subtasks.extend(subtasks);
         }
         if complete {
             append_embedded_subtasks(&mut work_items, embedded_subtasks);
-            return Ok(work_items);
+            return Ok(LoadedWorkItems {
+                work_items,
+                ticket_comments,
+            });
         }
         start_at = page.start_at.saturating_add(page.max_results.max(loaded));
     }
 }
 
-fn hydrate_sprint_subtasks(
+fn sprint_issues(
     client: &Client,
     base_url: &str,
     email: &str,
     token: &str,
-    sprint_work_items: &mut [Vec<WorkItem>],
+    sprint_id: u64,
+    story_points_field_id: Option<&str>,
+) -> Result<Vec<WorkItem>, String> {
+    sprint_issues_with_comments(
+        client,
+        base_url,
+        email,
+        token,
+        sprint_id,
+        story_points_field_id,
+    )
+    .map(|loaded| loaded.work_items)
+}
+
+fn hydrate_sprint_subtasks_with_comments(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    sprint_work_items: &mut [LoadedWorkItems],
     story_points_field_id: Option<&str>,
 ) -> Result<(), String> {
     let mut keys = sprint_work_items
         .iter()
-        .flatten()
+        .flat_map(|loaded| &loaded.work_items)
         .filter(|item| is_subtask_kind(&item.kind))
         .map(|item| item.key.clone())
         .collect::<HashSet<_>>()
@@ -1202,26 +1237,68 @@ fn hydrate_sprint_subtasks(
         .issues
         .into_iter()
         .map(|issue| {
+            let comments =
+                ticket_comment_summary(issue.fields.get("comment").unwrap_or(&Value::Null));
             let work_item = to_work_item(issue, story_points_field_id);
-            (work_item.key.clone(), work_item)
+            (work_item.key.clone(), (work_item, comments))
         })
         .collect::<HashMap<_, _>>();
-    for work_items in sprint_work_items {
-        for work_item in work_items
+    for loaded in sprint_work_items {
+        for work_item in loaded
+            .work_items
             .iter_mut()
             .filter(|item| is_subtask_kind(&item.kind))
         {
-            if let Some(hydrated) = hydrated.get(&work_item.key) {
+            if let Some((hydrated, comments)) = hydrated.get(&work_item.key) {
                 *work_item = hydrated.clone();
+                loaded
+                    .ticket_comments
+                    .insert(work_item.key.clone(), comments.clone());
             }
         }
     }
     Ok(())
 }
 
+#[cfg(test)]
+fn hydrate_sprint_subtasks(
+    client: &Client,
+    base_url: &str,
+    email: &str,
+    token: &str,
+    sprint_work_items: &mut [Vec<WorkItem>],
+    story_points_field_id: Option<&str>,
+) -> Result<(), String> {
+    let mut loaded = sprint_work_items
+        .iter_mut()
+        .map(|work_items| LoadedWorkItems {
+            work_items: std::mem::take(work_items),
+            ticket_comments: HashMap::new(),
+        })
+        .collect::<Vec<_>>();
+    let result = hydrate_sprint_subtasks_with_comments(
+        client,
+        base_url,
+        email,
+        token,
+        &mut loaded,
+        story_points_field_id,
+    );
+    for (work_items, loaded) in sprint_work_items.iter_mut().zip(loaded) {
+        *work_items = loaded.work_items;
+    }
+    result
+}
+
 struct BoardBacklog {
     work_items: Vec<WorkItem>,
     top_level_keys: Vec<String>,
+    ticket_comments: HashMap<String, TicketComments>,
+}
+
+struct LoadedWorkItems {
+    work_items: Vec<WorkItem>,
+    ticket_comments: HashMap<String, TicketComments>,
 }
 
 fn board_backlog(
@@ -1236,6 +1313,7 @@ fn board_backlog(
     let mut work_items = Vec::new();
     let mut top_level_keys = Vec::new();
     let mut embedded_subtasks = Vec::new();
+    let mut ticket_comments = HashMap::new();
     loop {
         let response = client
             .get(format!(
@@ -1249,6 +1327,7 @@ fn board_backlog(
         let loaded = page.issues.len();
         let complete = backlog_page_complete(&page, loaded);
         for issue in page.issues {
+            append_ticket_comments(&issue, &mut ticket_comments);
             let (work_item, subtasks) = to_work_item_with_subtasks(issue, story_points_field_id);
             if !is_subtask_kind(&work_item.kind) {
                 top_level_keys.push(work_item.key.clone());
@@ -1263,10 +1342,40 @@ fn board_backlog(
             return Ok(BoardBacklog {
                 work_items,
                 top_level_keys,
+                ticket_comments,
             });
         }
         start_at = page.start_at.saturating_add(page.max_results.max(loaded));
     }
+}
+
+fn append_ticket_comments(issue: &JiraIssue, summaries: &mut HashMap<String, TicketComments>) {
+    summaries.insert(
+        issue.key.clone(),
+        ticket_comment_summary(issue.fields.get("comment").unwrap_or(&Value::Null)),
+    );
+    for subtask in issue
+        .fields
+        .get("subtasks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(key) = subtask.get("key").and_then(Value::as_str) else {
+            continue;
+        };
+        let fields = subtask.get("fields").unwrap_or(&Value::Null);
+        summaries.insert(
+            key.to_owned(),
+            ticket_comment_summary(fields.get("comment").unwrap_or(&Value::Null)),
+        );
+    }
+}
+
+fn ticket_comment_summary(value: &Value) -> TicketComments {
+    let mut comments = ticket_comment_page(value);
+    comments.complete = comments.total == 0;
+    comments
 }
 
 fn append_embedded_subtasks(work_items: &mut Vec<WorkItem>, subtasks: Vec<WorkItem>) {
@@ -1365,6 +1474,39 @@ pub(crate) fn fetch(settings: &AppSettings, key: &str) -> Result<Ticket, String>
         key,
         story_points_field_for_load(settings, None),
     )
+}
+
+pub(crate) fn ticket_comments(settings: &AppSettings, key: &str) -> Result<TicketComments, String> {
+    const PAGE_SIZE: usize = 500;
+
+    let (client, base_url, email, token) = configured_client(settings)?;
+    let mut start_at = 0usize;
+    let mut comments = Vec::new();
+    loop {
+        let response = client
+            .get(format!("{base_url}/rest/api/3/issue/{key}/comment"))
+            .basic_auth(&email, Some(&token))
+            .query(&[
+                ("startAt", start_at.to_string()),
+                ("maxResults", PAGE_SIZE.to_string()),
+            ])
+            .send()
+            .map_err(|error| error.to_string())?;
+        let page = response_json::<Value>(response)?;
+        let loaded = ticket_comment_page(&page);
+        let page_len = loaded.comments.len();
+        let total = loaded.total;
+        comments.extend(loaded.comments);
+        let is_last = page.get("isLast").and_then(Value::as_bool).unwrap_or(false);
+        if is_last || comments.len() >= total || page_len == 0 {
+            return Ok(TicketComments {
+                total,
+                comments,
+                complete: true,
+            });
+        }
+        start_at = start_at.saturating_add(page_len);
+    }
 }
 
 pub(crate) fn fetch_with_subtasks(

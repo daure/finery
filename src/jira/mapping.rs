@@ -6,7 +6,9 @@ use crate::store::{
         TicketKind, TicketWebLink,
         jira_adf::{adf_is_safe_to_overwrite, adf_overwrite_warning, adf_to_markdown},
     },
-    work_items::{BacklogSnapshot, SubtaskProgress, WorkItem, is_done_status},
+    work_items::{
+        BacklogSnapshot, SubtaskProgress, TicketComment, TicketComments, WorkItem, is_done_status,
+    },
 };
 
 use super::JiraIssue;
@@ -192,6 +194,45 @@ pub(super) fn to_work_item_with_subtasks(
         })
         .collect();
     (work_item, subtasks)
+}
+
+pub(super) fn ticket_comment_page(value: &Value) -> TicketComments {
+    let comments = value
+        .get("comments")
+        .or_else(|| value.get("values"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|comment| {
+            let id = comment.get("id")?.as_str()?.to_owned();
+            Some(TicketComment {
+                id,
+                parent_id: comment.get("parentId").and_then(|parent_id| {
+                    parent_id
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| parent_id.as_u64().map(|parent_id| parent_id.to_string()))
+                }),
+                author: person_name(comment.get("author").unwrap_or(&Value::Null)),
+                created: comment
+                    .get("created")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                body: adf_to_markdown(comment.get("body").unwrap_or(&Value::Null)),
+            })
+        })
+        .collect::<Vec<_>>();
+    let total = value
+        .get("total")
+        .and_then(Value::as_u64)
+        .and_then(|total| usize::try_from(total).ok())
+        .unwrap_or(comments.len());
+    TicketComments {
+        total,
+        complete: comments.len() >= total,
+        comments,
+    }
 }
 
 fn to_work_item_fields(key: &str, fields: &Value, story_points_field_id: Option<&str>) -> WorkItem {

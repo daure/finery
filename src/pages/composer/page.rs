@@ -399,11 +399,6 @@ impl ComposerPage {
     }
 
     #[cfg(test)]
-    pub(super) fn wide_panel_focus(&self) -> (bool, bool, bool) {
-        self.editor.wide_panel_focus()
-    }
-
-    #[cfg(test)]
     pub(super) fn create_kind_menu_is_open(&self) -> bool {
         self.editor.create_kind_menu_is_open()
     }
@@ -492,6 +487,10 @@ impl TuiNode for ComposerPage {
         } else {
             outcome
         }
+    }
+
+    fn take_pending_focus_request(&mut self) -> Option<tuicore::FocusRequest> {
+        self.active_mut().take_pending_focus_request()
     }
 
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {

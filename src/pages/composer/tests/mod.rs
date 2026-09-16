@@ -11,9 +11,9 @@ use std::{
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use tuicore::{
     AnimationSettings, CheckState, ChildKey, EventCtx, EventOutcome, EventRoute,
-    ExternalEditorResponse, FocusCtx, FocusId, FocusManager, FocusRequest, FocusTransition,
-    HotkeyEvent, Key, KeyEvent, KeyModifiers, LayoutCtx, LifecycleCtx, RenderCtx,
-    TabsBodyBorderStyle, TreePath, TuiEvent, TuiNode, theme,
+    ExternalEditorResponse, FocusCtx, FocusId, FocusManager, FocusRequest, HotkeyEvent, Key,
+    KeyEvent, KeyModifiers, LayoutCtx, LifecycleCtx, RenderCtx, TabsBodyBorderStyle, TreePath,
+    TuiEvent, TuiNode, theme,
 };
 
 use super::change_set_list::change_set_share_text;
@@ -421,6 +421,44 @@ fn target_at(page: &mut ComposerPage, id: &str, width: u16) -> tuicore::FocusTar
         .clone()
 }
 
+fn tabs_target_with_hotkey_at(
+    page: &mut ComposerPage,
+    width: u16,
+    hotkey: &str,
+) -> tuicore::FocusTarget {
+    let mut layout = LayoutCtx::new();
+    page.layout(Rect::new(0, 0, width, 40), &mut layout);
+    layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id == FocusId::new("tabs")
+                && target
+                    .hotkey_sequences
+                    .iter()
+                    .any(|sequence| sequence == hotkey)
+        })
+        .unwrap()
+        .clone()
+}
+
+fn desktop_description_tabs(page: &mut ComposerPage) -> tuicore::FocusTarget {
+    let mut layout = LayoutCtx::new();
+    page.layout(Rect::new(0, 0, 120, 40), &mut layout);
+    layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id == FocusId::new("tabs")
+                && target
+                    .hotkey_sequences
+                    .iter()
+                    .any(|sequence| sequence == "dd")
+        })
+        .unwrap()
+        .clone()
+}
+
 fn last_target(page: &mut ComposerPage, id: &str) -> tuicore::FocusTarget {
     let mut layout = LayoutCtx::new();
     page.layout(Rect::new(0, 0, TEST_WIDTH, 40), &mut layout);
@@ -477,6 +515,7 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     assert!(text.contains("Properties |P|"));
     assert!(text.contains("Metadata |M|"));
     assert_eq!(text.matches("dd·do·ds").count(), 1);
+    assert!(!text.contains("D·dd·do·ds"));
     assert!(!text.contains("dd·do·ds·it"));
     assert!(!text.contains("Jira description · Markdown"));
 
@@ -497,9 +536,13 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     );
     assert_eq!(page.narrow_selected_index(), 2);
     let metadata = render_text(&mut page);
-    assert!(metadata.contains("Reporter     Mina Patel"));
-    assert!(metadata.contains("Created      2026-08-14 09:30 +00:00"));
-    assert!(metadata.contains("Last updated 2026-09-15 14:05 +00:00"));
+    assert!(metadata.contains("Reporter"));
+    assert!(metadata.contains("Mina Patel"));
+    assert!(metadata.contains("Created"));
+    assert!(metadata.contains("2026-08-14"));
+    assert!(metadata.contains("Last updated"));
+    assert!(metadata.contains("2026-09-15"));
+    assert!(!metadata.contains("+00:00"));
     page.dispatch_event(
         &EventRoute::new(tabs_hotkeys.path),
         &TuiEvent::Hotkey(HotkeyEvent::Commit("shift+d".into())),
@@ -778,11 +821,12 @@ fn desktop_description_shortcuts_open_the_editor_and_speed_reader() {
     let mut page = composer_page();
     open_change_set(&mut page, 1);
 
-    let description = target_at(&mut page, "textarea", 120);
-    assert_eq!(description.hotkey_sequences, ["dd", "do", "ds"]);
+    let description = desktop_description_tabs(&mut page);
+    assert!(description.hotkey_sequences.contains(&"dd".into()));
+    assert!(description.hotkey_sequences.contains(&"do".into()));
+    assert!(description.hotkey_sequences.contains(&"ds".into()));
     let desktop = render_text_at(&mut page, 120);
     assert!(desktop.contains("dd·do·ds"));
-    assert!(!desktop.contains("shift+d"));
     page.dispatch_focus(&description, true, &mut FocusCtx::default());
 
     let mut editor = EventCtx::default();
@@ -829,8 +873,10 @@ fn description_hotkeys_follow_the_active_view() {
     let source = render_text_at(&mut page, 120);
     assert!(source.contains("dd·ds"));
     assert!(!source.contains("dd·do"));
-    let source_description = target_at(&mut page, "textarea", 120);
-    assert_eq!(source_description.hotkey_sequences, ["dd", "ds"]);
+    let source_description = desktop_description_tabs(&mut page);
+    assert!(source_description.hotkey_sequences.contains(&"dd".into()));
+    assert!(source_description.hotkey_sequences.contains(&"ds".into()));
+    assert!(!source_description.hotkey_sequences.contains(&"do".into()));
 
     let mut source_focus = EventCtx::default();
     page.dispatch_event(
@@ -860,8 +906,10 @@ fn description_hotkeys_follow_the_active_view() {
     let diff = render_text_at(&mut page, 120);
     assert!(diff.contains("dd·do"));
     assert!(!diff.contains("dd·ds"));
-    let diff_panel = target_at(&mut page, "diff-viewer", 120);
-    assert_eq!(diff_panel.hotkey_sequences, ["dd", "do"]);
+    let diff_panel = desktop_description_tabs(&mut page);
+    assert!(diff_panel.hotkey_sequences.contains(&"dd".into()));
+    assert!(diff_panel.hotkey_sequences.contains(&"do".into()));
+    assert!(!diff_panel.hotkey_sequences.contains(&"ds".into()));
 
     let mut diff_focus = EventCtx::default();
     page.dispatch_event(
@@ -3104,7 +3152,7 @@ fn external_property_selection_closes_open_draft_before_escape() {
 }
 
 #[test]
-fn responsive_details_use_tabs_when_narrow_and_seventy_thirty_panels_when_wide() {
+fn responsive_details_use_tabs_when_narrow_and_description_with_secondary_tabs_when_wide() {
     tuicore::init();
     let mut page = composer_page();
     open_change_set(&mut page, 1);
@@ -3120,16 +3168,33 @@ fn responsive_details_use_tabs_when_narrow_and_seventy_thirty_panels_when_wide()
 
     let mut wide = LayoutCtx::new();
     page.layout(Rect::new(0, 0, 120, 40), &mut wide);
+    let secondary_tabs = wide
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id == FocusId::new("tabs")
+                && target
+                    .hotkey_sequences
+                    .iter()
+                    .any(|sequence| sequence == "shift+p")
+        })
+        .unwrap();
     assert!(
-        !wide
-            .focus_targets()
+        secondary_tabs
+            .hotkey_sequences
             .iter()
-            .any(|target| target.id == FocusId::new("tabs"))
+            .any(|sequence| sequence == "shift+p")
+    );
+    assert!(
+        secondary_tabs
+            .hotkey_sequences
+            .iter()
+            .any(|sequence| sequence == "shift+m")
     );
     let (description, properties, metadata) = page.detail_panel_areas();
     assert_eq!(
         (description.width, properties.width, metadata.width),
-        (72, 24, 24)
+        (72, 48, 48)
     );
     for hotkey in ["it", "st", "pr", "ee"] {
         assert!(wide.focus_targets().iter().any(|target| {
@@ -3142,88 +3207,7 @@ fn responsive_details_use_tabs_when_narrow_and_seventy_thirty_panels_when_wide()
 }
 
 #[test]
-fn responsive_details_preserve_the_focused_property_across_breakpoints() {
-    tuicore::init();
-    let mut page = composer_page();
-    open_change_set(&mut page, 1);
-    let narrow_area = Rect::new(0, 0, 96, 40);
-    let wide_area = Rect::new(0, 0, 120, 40);
-
-    let tabs = target_at(&mut page, "tabs", narrow_area.width);
-    page.dispatch_event(
-        &EventRoute::new(tabs.path),
-        &TuiEvent::Hotkey(HotkeyEvent::Commit("shift+p".into())),
-        &mut EventCtx::default(),
-    );
-    let mut narrow = LayoutCtx::new();
-    page.layout(narrow_area, &mut narrow);
-    let priority = narrow
-        .focus_targets()
-        .iter()
-        .find(|target| target.hotkey_sequences == ["pr"])
-        .unwrap()
-        .clone();
-    let mut focus = FocusManager::new();
-    apply_focus_transition(
-        &mut page,
-        focus.apply_request(
-            &FocusRequest::TargetAt {
-                path: priority.path.clone(),
-                id: priority.id.clone(),
-            },
-            narrow.focus_targets(),
-        ),
-    );
-
-    for area in [wide_area, narrow_area] {
-        let mut layout = LayoutCtx::new();
-        page.layout(area, &mut layout);
-        apply_focus_transition(&mut page, focus.validate(layout.focus_targets()));
-        assert_eq!(
-            focus.current().unwrap().hotkey_sequences,
-            ["pr"],
-            "the focused property should survive a responsive layout change"
-        );
-    }
-}
-
-#[test]
-fn responsive_details_preserve_description_focus_across_breakpoints() {
-    tuicore::init();
-    let mut page = composer_page();
-    open_change_set(&mut page, 1);
-    let narrow_area = Rect::new(0, 0, 96, 40);
-    let wide_area = Rect::new(0, 0, 120, 40);
-    let mut narrow = LayoutCtx::new();
-    page.layout(narrow_area, &mut narrow);
-    let description = narrow
-        .focus_targets()
-        .iter()
-        .find(|target| target.id == FocusId::new("textarea"))
-        .unwrap()
-        .clone();
-    let mut focus = FocusManager::new();
-    apply_focus_transition(
-        &mut page,
-        focus.apply_request(
-            &FocusRequest::TargetAt {
-                path: description.path.clone(),
-                id: description.id.clone(),
-            },
-            narrow.focus_targets(),
-        ),
-    );
-
-    for area in [wide_area, narrow_area] {
-        let mut layout = LayoutCtx::new();
-        page.layout(area, &mut layout);
-        apply_focus_transition(&mut page, focus.validate(layout.focus_targets()));
-        assert_eq!(focus.current().unwrap().id, FocusId::new("textarea"));
-    }
-}
-
-#[test]
-fn wide_panel_focus_selects_the_matching_narrow_tab() {
+fn wide_tab_focus_selects_the_matching_narrow_tab() {
     tuicore::init();
     let mut page = composer_page();
     open_change_set(&mut page, 1);
@@ -3246,12 +3230,150 @@ fn wide_panel_focus_selects_the_matching_narrow_tab() {
 
     page.dispatch_focus(&priority, true, &mut FocusCtx::default());
     assert_eq!(page.narrow_selected_index(), 1);
-    assert_eq!(page.wide_panel_focus(), (false, true, false));
 
     page.dispatch_focus(&priority, false, &mut FocusCtx::default());
     page.dispatch_focus(&description, true, &mut FocusCtx::default());
     assert_eq!(page.narrow_selected_index(), 0);
-    assert_eq!(page.wide_panel_focus(), (true, false, false));
+}
+
+#[test]
+fn desktop_description_hotkey_focuses_the_textarea_without_entering_insert_mode() {
+    tuicore::init();
+    let mut page = composer_page();
+    open_change_set(&mut page, 1);
+    let area = Rect::new(0, 0, 120, 40);
+    let mut layout = LayoutCtx::new();
+    page.layout(area, &mut layout);
+    let description = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target
+                .hotkey_sequences
+                .iter()
+                .any(|sequence| sequence == "shift+d")
+        })
+        .unwrap()
+        .clone();
+    let mut hotkey = EventCtx::default();
+
+    page.dispatch_event(
+        &EventRoute::new(description.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("shift+d".into())),
+        &mut hotkey,
+    );
+
+    assert_eq!(
+        hotkey.focus_request(),
+        Some(&FocusRequest::Target(FocusId::new("textarea")))
+    );
+}
+
+#[test]
+fn responsive_details_preserve_the_metadata_tab_across_width_changes() {
+    tuicore::init();
+
+    let mut mobile_to_desktop = composer_page();
+    open_change_set(&mut mobile_to_desktop, 1);
+    let mobile_tabs = target_at(&mut mobile_to_desktop, "tabs", 96);
+    mobile_to_desktop.dispatch_event(
+        &EventRoute::new(mobile_tabs.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("shift+m".into())),
+        &mut EventCtx::default(),
+    );
+    assert_eq!(mobile_to_desktop.narrow_selected_index(), 2);
+    assert!(render_text_at(&mut mobile_to_desktop, 120).contains("Reporter"));
+
+    let mut desktop_to_mobile = composer_page();
+    open_change_set(&mut desktop_to_mobile, 1);
+    let secondary_tabs = tabs_target_with_hotkey_at(&mut desktop_to_mobile, 120, "shift+m");
+    desktop_to_mobile.dispatch_event(
+        &EventRoute::new(secondary_tabs.path),
+        &TuiEvent::Hotkey(HotkeyEvent::Commit("shift+m".into())),
+        &mut EventCtx::default(),
+    );
+    render_text_at(&mut desktop_to_mobile, 96);
+    assert_eq!(desktop_to_mobile.narrow_selected_index(), 2);
+}
+
+#[test]
+fn responsive_details_restore_focus_to_the_matching_tab_across_width_changes() {
+    tuicore::init();
+    for (section, hotkey, focus_id) in [
+        (0, "shift+d", "tabs"),
+        (0, "shift+d", "textarea"),
+        (1, "shift+p", "tabs"),
+        (2, "shift+m", "tabs"),
+    ] {
+        let mut page = composer_page();
+        open_change_set(&mut page, 1);
+        let mobile_tabs = tabs_target_with_hotkey_at(&mut page, 96, hotkey);
+        page.dispatch_event(
+            &EventRoute::new(mobile_tabs.path.clone()),
+            &TuiEvent::Hotkey(HotkeyEvent::Commit(hotkey.into())),
+            &mut EventCtx::default(),
+        );
+        let mut focused = target_at(&mut page, focus_id, 96);
+        page.dispatch_focus(&focused, true, &mut FocusCtx::default());
+
+        for width in [120, 96, 180, 96] {
+            let mut layout = LayoutCtx::new();
+            page.layout(Rect::new(0, 0, width, 40), &mut layout);
+            let expected_path = if width < 100 {
+                mobile_tabs.path.clone()
+            } else {
+                mobile_tabs
+                    .path
+                    .child(tuicore::ChildKey::new(if section == 0 {
+                        "description"
+                    } else {
+                        "secondary"
+                    }))
+            };
+            assert_eq!(
+                page.take_pending_focus_request(),
+                Some(FocusRequest::TargetAt {
+                    path: expected_path.clone(),
+                    id: FocusId::new("tabs"),
+                }),
+                "section {section}, width {width}"
+            );
+            let replacement = layout
+                .focus_targets()
+                .iter()
+                .find(|target| target.path == expected_path && target.id == FocusId::new("tabs"))
+                .unwrap()
+                .clone();
+            page.dispatch_focus(&focused, false, &mut FocusCtx::default());
+            page.dispatch_focus(&replacement, true, &mut FocusCtx::default());
+            focused = replacement;
+            assert_eq!(page.narrow_selected_index(), section);
+            assert_eq!(page.take_pending_focus_request(), None);
+        }
+    }
+}
+
+#[test]
+fn responsive_details_leave_focus_outside_the_details_on_resize() {
+    tuicore::init();
+    for hotkey in ["shift+d", "shift+p", "shift+m"] {
+        let mut page = composer_page();
+        open_change_set(&mut page, 1);
+        let tabs = tabs_target_with_hotkey_at(&mut page, 96, hotkey);
+        page.dispatch_event(
+            &EventRoute::new(tabs.path.clone()),
+            &TuiEvent::Hotkey(HotkeyEvent::Commit(hotkey.into())),
+            &mut EventCtx::default(),
+        );
+        page.dispatch_focus(&tabs, true, &mut FocusCtx::default());
+        page.dispatch_focus(&tabs, false, &mut FocusCtx::default());
+        focus(&mut page, "data-view");
+
+        for width in [120, 96] {
+            page.layout(Rect::new(0, 0, width, 40), &mut LayoutCtx::new());
+            assert_eq!(page.take_pending_focus_request(), None, "{hotkey}, {width}");
+        }
+    }
 }
 
 #[test]
@@ -3334,18 +3456,6 @@ fn narrow_property_shortcuts_open_the_properties_tab_and_focus_the_field() {
             focused.path.keys().iter().any(|key| key.as_str() == field),
             "shortcut {sequence} should focus {field}"
         );
-    }
-}
-
-fn apply_focus_transition(page: &mut ComposerPage, transition: Option<FocusTransition>) {
-    let Some(transition) = transition else {
-        return;
-    };
-    if let Some(previous) = transition.previous {
-        page.dispatch_focus(&previous, false, &mut FocusCtx::default());
-    }
-    if let Some(current) = transition.current {
-        page.dispatch_focus(&current, true, &mut FocusCtx::default());
     }
 }
 

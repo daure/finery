@@ -20,19 +20,21 @@ use super::{
     page::{
         BacklogPage, MAX_UNCONFIRMED_TRANSFER_REFRESHES, PendingRank, PendingRankReconciliation,
         PendingTransfer, PendingTransferReconciliation, RequestGenerations, StatusTransitionCache,
-        apply_assignee_to_snapshot, apply_status_to_snapshot, apply_story_points_to_snapshot,
-        current_user_assignment, description_width_percent, move_work_items_to_edge,
-        quick_menu_labels, recalculate_capacity, reconcile_pending_rank,
+        TicketCommentsPane, apply_assignee_to_snapshot, apply_status_to_snapshot,
+        apply_story_points_to_snapshot, current_user_assignment, description_width_percent,
+        move_work_items_to_edge, quick_menu_labels, recalculate_capacity, reconcile_pending_rank,
         reconcile_pending_transfer, should_poll, source_transfer_highlight,
-        source_transfer_highlight_key, sprint_report, transfer_destinations,
-        transfer_reconciliation_highlight, velocity_dialog, velocity_share_report,
+        source_transfer_highlight_key, sprint_report, strip_legacy_account_id_mentions,
+        transfer_destinations, transfer_reconciliation_highlight, velocity_dialog,
+        velocity_share_report,
     },
 };
 use crate::app_settings::BacklogRunwaySettings;
 use crate::jira::JiraOption;
 use crate::store::work_items::{
     BacklogSnapshot, IssueStatusTransition, RunwayCapacitySource, Sprint, StatusTransition,
-    SubtaskProgress, VelocityReport, VelocitySprint, WorkItem, apply_capacity, rank_plan,
+    SubtaskProgress, TicketComment, TicketComments, VelocityReport, VelocitySprint, WorkItem,
+    apply_capacity, rank_plan,
     release::{ReleaseVersion, parse_date},
 };
 
@@ -168,6 +170,7 @@ fn snapshot() -> BacklogSnapshot {
         warnings: Vec::new(),
         runway: None,
         velocity: None,
+        ticket_comments: Default::default(),
     }
 }
 
@@ -2044,6 +2047,7 @@ fn long_backlog_titles_wrap_to_the_available_viewport_width() {
         story_points_configured: false,
         runway: None,
         velocity: None,
+        ticket_comments: Default::default(),
     };
     let (sender, _) = mpsc::channel();
     let mut view = backlog_tree(&snapshot, sender, Default::default());
@@ -2421,6 +2425,7 @@ fn backlog_search_filters_tickets_and_hides_runway_bands() {
         warnings: Vec::new(),
         runway: None,
         velocity: None,
+        ticket_comments: Default::default(),
     };
     apply_capacity(
         &mut snapshot,
@@ -2591,6 +2596,7 @@ fn backlog_search_requires_contiguous_text() {
         warnings: Vec::new(),
         runway: None,
         velocity: None,
+        ticket_comments: Default::default(),
     };
     let (sender, _) = mpsc::channel();
     let mut tree = backlog_tree(&snapshot, sender, Default::default());
@@ -2647,6 +2653,7 @@ fn backlog_search_matches_epic_names() {
         warnings: Vec::new(),
         runway: None,
         velocity: None,
+        ticket_comments: Default::default(),
     };
     let (sender, _) = mpsc::channel();
     let mut tree = backlog_tree(&snapshot, sender, Default::default());
@@ -2700,6 +2707,7 @@ fn unified_tree_uses_same_section_transient_selection_for_the_quick_menu() {
         warnings: Vec::new(),
         runway: None,
         velocity: None,
+        ticket_comments: Default::default(),
     };
     let (sender, receiver) = mpsc::channel();
     let mut tree = backlog_tree(&snapshot, sender, Default::default());
@@ -2944,15 +2952,27 @@ fn ctrl_enter_opens_the_highlighted_ticket() {
 }
 
 #[test]
-fn v_opens_a_focused_description_snackbar() {
+fn v_opens_a_focused_ticket_detail_dialog() {
     tuicore::init();
     let mut snapshot = snapshot();
-    snapshot.work_items[0].title =
-        "Here is the title and this one is too long to fit in the snackbar without truncation"
-            .into();
+    snapshot.work_items[0].title = "Ticket title".into();
     snapshot.work_items[0].description = format!(
         "## Details\n\nScrollable description {} WRAPPED-END",
         "with enough context to require wrapping ".repeat(3)
+    );
+    snapshot.ticket_comments.insert(
+        "FIN-8".into(),
+        TicketComments {
+            total: 2,
+            comments: vec![TicketComment {
+                id: "1".into(),
+                parent_id: None,
+                author: "Ada".into(),
+                created: "2026-09-16".into(),
+                body: "First comment".into(),
+            }],
+            complete: true,
+        },
     );
     let mut page = BacklogPage::with_snapshot_for_test(snapshot);
     page.view_for_test()
@@ -2991,6 +3011,7 @@ fn v_opens_a_focused_description_snackbar() {
         .find(|entry| entry.layer == tuicore::OverlayLayer::Modal)
         .expect("description dialog should be visible");
     assert_eq!(description.area.width, 72);
+    let dialog_area = description.area;
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
     terminal
         .draw(|frame| {
@@ -3003,21 +3024,20 @@ fn v_opens_a_focused_description_snackbar() {
     let text = lines.concat();
     assert!(text.contains("Scrollable description"));
     assert!(text.contains("WRAPPED-END"));
-    assert!(text.contains("FIN-8 Here is the title and this one is too long"));
-    assert!(text.contains("..."));
-
-    let (y, title_line) = lines
-        .iter()
-        .enumerate()
-        .find(|(_, line)| line.contains("FIN-8 Here is") && line.contains("..."))
-        .expect("description title should render");
-    let x = cell_position(title_line, "FIN-8").expect("description key should render");
-    let key_cell = terminal
-        .backend()
-        .buffer()
-        .cell((x as u16, y as u16))
-        .unwrap();
-    assert_eq!(key_cell.fg, tuicore::theme().muted_fg());
+    assert!(text.contains("Description"));
+    assert!(text.contains("Comments (2)"));
+    assert!(lines[dialog_area.y as usize].contains("Description"));
+    assert!(lines[dialog_area.y as usize].contains("Comments (2)"));
+    assert!(lines[dialog_area.y as usize + 1].contains("## Details"));
+    let border = tuicore::border_chars(tuicore::preset().border());
+    for y in dialog_area.y + 1..dialog_area.bottom() {
+        for x in [dialog_area.x, dialog_area.right() - 1] {
+            assert_eq!(
+                terminal.backend().buffer().cell((x, y)).unwrap().symbol(),
+                border.vertical
+            );
+        }
+    }
 
     let mobile = Rect::new(0, 0, 60, 30);
     let mut layout = LayoutCtx::new();
@@ -3028,6 +3048,7 @@ fn v_opens_a_focused_description_snackbar() {
         .find(|entry| entry.layer == tuicore::OverlayLayer::Modal)
         .expect("description dialog should stay visible after resize");
     assert_eq!(description.area.width, 60);
+    let mobile_dialog_area = description.area;
     let mut terminal = Terminal::new(TestBackend::new(mobile.width, mobile.height)).unwrap();
     terminal
         .draw(|frame| {
@@ -3041,6 +3062,180 @@ fn v_opens_a_focused_description_snackbar() {
             .concat()
             .contains("WRAPPED-END")
     );
+    assert_eq!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((0, mobile_dialog_area.y + 1))
+            .unwrap()
+            .symbol(),
+        "#"
+    );
+
+    let tabs = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id == FocusId::new("tabs"))
+        .expect("ticket-detail tabs should be focusable");
+    let animation = AnimationSettings {
+        enabled: false,
+        ..AnimationSettings::default()
+    };
+    page.dispatch_focus(tabs, true, &mut FocusCtx::new(animation));
+    let mut event = EventCtx::new(animation);
+    page.dispatch_event(
+        &EventRoute::new(tabs.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Char(']'))),
+        &mut event,
+    );
+    let mut layout = LayoutCtx::new();
+    layout.with_overlay_bounds(mobile, |ctx| page.layout(mobile, ctx));
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            page.render(frame, mobile, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    assert!(
+        rendered_lines(&terminal, mobile)
+            .concat()
+            .contains("First comment")
+    );
+
+    page.dispatch_event(
+        &EventRoute::new(TreePath::from_keys([ChildKey::second()])),
+        &TuiEvent::Key(KeyEvent::from(Key::Esc)),
+        &mut event,
+    );
+    assert!(!page.view_for_test().is_active());
+}
+
+#[test]
+fn comment_bodies_hide_legacy_account_id_mentions() {
+    assert_eq!(
+        strip_legacy_account_id_mentions("[~accountid:557058:5a74] Nested comment"),
+        "Nested comment"
+    );
+}
+
+#[test]
+fn comment_bodies_use_markdown_viewer_styles_and_preserve_layout() {
+    tuicore::init();
+    let source = "## Heading\n\n**Important** and `code`\n\n- Parent\n  - Child\n\n```rust\n    let value = 1;\n```";
+    let comments = Rc::new(RefCell::new(TicketComments {
+        total: 1,
+        complete: true,
+        comments: vec![TicketComment {
+            id: "1".into(),
+            parent_id: None,
+            author: "Marlo Vlietstra".into(),
+            created: String::new(),
+            body: source.into(),
+        }],
+    }));
+    let mut pane = TicketCommentsPane::new(comments, |_| {});
+    let area = Rect::new(0, 0, 80, 12);
+    pane.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            pane.render(frame, area, &mut RenderCtx::new());
+        })
+        .unwrap();
+    let lines = rendered_lines(&terminal, area);
+    for (index, line) in source.lines().enumerate() {
+        assert_eq!(lines[index + 1].trim_end(), line);
+    }
+
+    let expected =
+        tuicore::SyntaxHighlighter::new(source, tuicore::Language::Markdown).highlighted_text();
+    let mut reference = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    reference
+        .draw(|frame| {
+            frame.render_widget(ratatui::widgets::Paragraph::new(expected.clone()), area);
+        })
+        .unwrap();
+    for y in 0..source.lines().count() as u16 {
+        for x in 0..area.width {
+            let actual = terminal.backend().buffer().cell((x, y + 1)).unwrap();
+            let expected = reference.backend().buffer().cell((x, y)).unwrap();
+            assert_eq!(actual.fg, expected.fg, "foreground at ({x}, {y})");
+            assert_eq!(
+                actual.modifier, expected.modifier,
+                "modifiers at ({x}, {y})"
+            );
+        }
+    }
+}
+
+#[test]
+fn comment_tree_renders_replies_and_opens_the_activated_comment() {
+    tuicore::init();
+    let comments = Rc::new(RefCell::new(TicketComments {
+        total: 3,
+        complete: true,
+        comments: vec![
+            TicketComment {
+                id: "10047".into(),
+                parent_id: None,
+                author: "Marlo Vlietstra".into(),
+                created: String::new(),
+                body: "Root body".into(),
+            },
+            TicketComment {
+                id: "10080".into(),
+                parent_id: Some("10047".into()),
+                author: "Marlo Vlietstra".into(),
+                created: String::new(),
+                body: "First reply".into(),
+            },
+            TicketComment {
+                id: "10081".into(),
+                parent_id: Some("10047".into()),
+                author: "Marlo Vlietstra".into(),
+                created: String::new(),
+                body: "Second reply".into(),
+            },
+        ],
+    }));
+    let (opened, receiver) = mpsc::channel();
+    let mut pane = TicketCommentsPane::new(comments, move |id| {
+        opened.send(id).unwrap();
+    });
+    let area = Rect::new(0, 0, 80, 6);
+    pane.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            pane.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let lines = rendered_lines(&terminal, area);
+    let root_indent = cell_position(&lines[1], "Root body").unwrap();
+
+    assert!(cell_position(&lines[3], "First reply").unwrap() > root_indent);
+    assert!(cell_position(&lines[5], "Second reply").unwrap() > root_indent);
+
+    pane.focus(None, true, &mut FocusCtx::new(AnimationSettings::default()));
+    let mut ctx = EventCtx::new(AnimationSettings {
+        enabled: false,
+        ..AnimationSettings::default()
+    });
+    let route = EventRoute::new(TreePath::default());
+    pane.dispatch_event(&route, &TuiEvent::Key(KeyEvent::from(Key::Left)), &mut ctx);
+    pane.dispatch_event(&route, &TuiEvent::Key(KeyEvent::from(Key::Right)), &mut ctx);
+    assert!(receiver.try_recv().is_err());
+    pane.dispatch_event(&route, &TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
+    assert_eq!(receiver.try_recv().unwrap(), "10047");
+    pane.dispatch_event(&route, &TuiEvent::Key(KeyEvent::from(Key::Down)), &mut ctx);
+    assert!(receiver.try_recv().is_err());
+    pane.dispatch_event(&route, &TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
+    assert_eq!(receiver.try_recv().unwrap(), "10080");
+    assert!(receiver.try_recv().is_err());
 }
 
 #[test]
@@ -3123,6 +3318,7 @@ fn successful_direct_rank_keeps_the_optimistic_order_without_reconciliation() {
         warnings: Vec::new(),
         runway: None,
         velocity: None,
+        ticket_comments: Default::default(),
     };
     let final_order = vec!["FIN-3".into(), "FIN-1".into(), "FIN-2".into()];
     let mut optimistic = rollback.clone();
@@ -3897,6 +4093,7 @@ fn stale_rank_refresh_keeps_the_optimistic_order() {
         warnings: Vec::new(),
         runway: None,
         velocity: None,
+        ticket_comments: Default::default(),
     };
     let mut optimistic = rollback.clone();
     optimistic.work_items.swap(0, 1);

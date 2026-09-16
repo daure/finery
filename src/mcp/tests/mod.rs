@@ -516,6 +516,7 @@ fn workspace_compacts_backlog_and_change_set_payloads() {
                     },
                 ],
             }),
+            ticket_comments: Default::default(),
         },
         Versioned {
             revision: 7,
@@ -628,6 +629,7 @@ fn workspace_caps_velocity_projection_at_ten_sprints() {
                     })
                     .collect(),
             }),
+            ticket_comments: Default::default(),
         },
         Versioned {
             revision: 1,
@@ -772,6 +774,7 @@ fn backlog_bottom_ranks_after_hidden_epics() {
         warnings: Vec::new(),
         runway: None,
         velocity: None,
+        ticket_comments: Default::default(),
     };
     let order = section_order(&snapshot, JiraSection::Backlog).unwrap();
     let final_order = final_order(&order, &["FIN-2".into()], &JiraPosition::Bottom).unwrap();
@@ -796,6 +799,7 @@ fn embedded_backlog_subtasks_are_rejected_before_ranking_or_swapping() {
         warnings: Vec::new(),
         runway: None,
         velocity: None,
+        ticket_comments: Default::default(),
     };
 
     let error = validate_issue_keys(&["FIN-2".into()], &issue_sections(&snapshot)).unwrap_err();

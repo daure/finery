@@ -793,18 +793,6 @@ impl TicketEditor {
     }
 
     #[cfg(test)]
-    pub(super) fn wide_panel_focus(&self) -> (bool, bool, bool) {
-        self.view
-            .base()
-            .base()
-            .base()
-            .base()
-            .second()
-            .second()
-            .wide_panel_focus()
-    }
-
-    #[cfg(test)]
     pub(super) fn create_kind_menu_is_open(&self) -> bool {
         self.view
             .base()
@@ -2544,6 +2532,13 @@ impl TuiNode for TicketEditor {
                 },
             )
             .merge(number_jump)
+    }
+    fn take_pending_focus_request(&mut self) -> Option<FocusRequest> {
+        if self.opening_loading {
+            self.loading_view.take_pending_focus_request()
+        } else {
+            self.view.take_pending_focus_request()
+        }
     }
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
         if self.opening_loading {

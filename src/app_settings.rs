@@ -857,6 +857,13 @@ impl AppSettings {
         (!base_url.is_empty() && !key.trim().is_empty()).then(|| format!("{base_url}/browse/{key}"))
     }
 
+    pub(crate) fn jira_comment_url(&self, key: &str, comment_id: &str) -> Option<String> {
+        let issue_url = self.jira_issue_url(key)?;
+        let comment_id = comment_id.trim();
+        (!comment_id.is_empty())
+            .then(|| format!("{issue_url}?focusedCommentId={comment_id}#comment-{comment_id}"))
+    }
+
     pub(crate) fn normalize_jira_ticket_query(&self, query: &str) -> String {
         let query = query.trim();
         let base_url = self.jira_base_url.trim().trim_end_matches('/');

@@ -14,11 +14,10 @@ use ratatui::{
     widgets::Paragraph as RatatuiParagraph,
 };
 use tuicore::{
-    AnimationSettings, AxisProposal, BorderKind, ChildKey, EventCtx, EventOutcome, EventRoute,
-    Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, Image, ImageProtocol, LayoutCtx,
-    LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, Panel, PanelHost, RenderCtx,
-    SeasonalEmptyState, Split, Tab, Tabs, TabsBodyBorderStyle, TabsVariant, TickResult, TuiEvent,
-    TuiNode, theme,
+    AnimationSettings, AxisProposal, ChildKey, EventCtx, EventOutcome, EventRoute, Flex, FlexItem,
+    FocusCtx, FocusId, FocusRequest, FocusTarget, Image, ImageProtocol, LayoutCtx, LayoutProposal,
+    LayoutResult, LayoutSizeHint, LifecycleCtx, RenderCtx, SeasonalEmptyState, Split, Tab, Tabs,
+    TabsBodyBorderStyle, TabsVariant, TickResult, TuiEvent, TuiNode, theme,
 };
 
 use crate::{
@@ -38,12 +37,8 @@ use super::metadata::JiraMetadata;
 use super::property_fields::PropertyFields;
 
 type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
-type SharedDescription = SharedNode<BoundDescription>;
-type SharedProperties = SharedNode<PropertyFields>;
-type SharedMetadata = SharedNode<JiraMetadata>;
-type WideDescription = PanelHost<SharedDescription, ()>;
-type WideProperties = PanelHost<SharedProperties, ()>;
-type WideMetadata = PanelHost<SharedMetadata, ()>;
+type WideDescription = Tabs<()>;
+type WideSecondaryDetails = Tabs<()>;
 type TicketFields = Split<BoundTextField, ResponsiveDetails>;
 type TicketDetail = Split<Flex<()>, TicketFields>;
 type FileFields = Split<AttachmentFilename, Tabs<()>>;
@@ -61,6 +56,8 @@ struct ResponsiveDetails {
     property_keys: Vec<String>,
     focus_path: tuicore::TreePath,
     is_wide: bool,
+    is_focused: bool,
+    pending_focus: Option<FocusRequest>,
     description_focus_key: String,
     description_editor_key: String,
     description_reader_key: String,
@@ -78,11 +75,9 @@ struct PanelBody<C> {
 
 struct WideDetails {
     description: WideDescription,
-    properties: WideProperties,
-    metadata: WideMetadata,
+    secondary: WideSecondaryDetails,
     description_area: Rect,
-    properties_area: Rect,
-    metadata_area: Rect,
+    secondary_area: Rect,
 }
 
 impl<C> SharedNode<C> {
@@ -121,18 +116,12 @@ impl<C> PanelBody<C> {
 }
 
 impl WideDetails {
-    fn new(
-        description: WideDescription,
-        properties: WideProperties,
-        metadata: WideMetadata,
-    ) -> Self {
+    fn new(description: WideDescription, secondary: WideSecondaryDetails) -> Self {
         Self {
             description,
-            properties,
-            metadata,
+            secondary,
             description_area: Rect::default(),
-            properties_area: Rect::default(),
-            metadata_area: Rect::default(),
+            secondary_area: Rect::default(),
         }
     }
 
@@ -140,30 +129,52 @@ impl WideDetails {
     fn child_areas(&self) -> (Rect, Rect, Rect) {
         (
             self.description_area,
-            self.properties_area,
-            self.metadata_area,
+            self.secondary_area,
+            self.secondary_area,
         )
     }
 
     fn set_focused_section(&mut self, section: Option<usize>, settings: AnimationSettings) {
-        self.description
-            .panel_mut()
-            .set_focused(section == Some(0), settings);
-        self.properties
-            .panel_mut()
-            .set_focused(section == Some(1), settings);
-        self.metadata
-            .panel_mut()
-            .set_focused(section == Some(2), settings);
+        self.description.set_focused(section == Some(0), settings);
+        if let Some(section @ 1..=2) = section {
+            self.secondary.select_index(section - 1);
+        }
+        self.secondary
+            .set_focused(matches!(section, Some(1 | 2)), settings);
     }
 
-    #[cfg(test)]
-    fn panel_focus(&self) -> (bool, bool, bool) {
-        (
-            self.description.panel().is_focused(),
-            self.properties.panel().is_focused(),
-            self.metadata.panel().is_focused(),
-        )
+    fn focused_section(target: &FocusTarget) -> Option<usize> {
+        if target.for_child(&ChildKey::new("description")).is_some() {
+            return Some(0);
+        }
+        let target = target.for_child(&ChildKey::new("secondary"))?;
+        if target.for_child(&ChildKey::new("tab-0")).is_some() {
+            Some(1)
+        } else if target.for_child(&ChildKey::new("tab-1")).is_some() {
+            Some(2)
+        } else {
+            None
+        }
+    }
+
+    fn narrow_focused_section(target: &FocusTarget) -> Option<usize> {
+        (0..=2).find(|index| {
+            target
+                .for_child(&ChildKey::new(format!("tab-{index}")))
+                .is_some()
+        })
+    }
+
+    fn section_for_route(&self, route: &EventRoute) -> Option<usize> {
+        let description = ChildKey::new("description");
+        if route.path.without_first_if(&description).is_some() {
+            return Some(0);
+        }
+        let secondary = ChildKey::new("secondary");
+        route
+            .path
+            .without_first_if(&secondary)
+            .map(|_| self.secondary.selected_index() + 1)
     }
 }
 
@@ -321,49 +332,34 @@ where
 impl TuiNode for WideDetails {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
         let description = self.description.measure(proposal);
-        let properties = self.properties.measure(proposal);
-        let metadata = self.metadata.measure(proposal);
+        let secondary = self.secondary.measure(proposal);
         LayoutSizeHint::content(
             description
                 .preferred
                 .width
-                .saturating_add(properties.preferred.width)
-                .saturating_add(metadata.preferred.width),
-            description
-                .preferred
-                .height
-                .max(properties.preferred.height)
-                .max(metadata.preferred.height),
+                .saturating_add(secondary.preferred.width),
+            description.preferred.height.max(secondary.preferred.height),
         )
         .normalized(proposal)
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        let [description, properties, metadata] = Layout::horizontal([
-            Constraint::Ratio(6, 10),
-            Constraint::Ratio(2, 10),
-            Constraint::Ratio(2, 10),
-        ])
-        .areas(area);
+        let [description, secondary] =
+            Layout::horizontal([Constraint::Ratio(6, 10), Constraint::Ratio(4, 10)]).areas(area);
         self.description_area = description;
-        self.properties_area = properties;
-        self.metadata_area = metadata;
-        ctx.push_slot(ChildKey::new("tab-0"), description, |ctx| {
+        self.secondary_area = secondary;
+        ctx.push_slot(ChildKey::new("description"), description, |ctx| {
             self.description.layout(description, ctx);
         });
-        ctx.push_slot(ChildKey::new("tab-1"), properties, |ctx| {
-            self.properties.layout(properties, ctx);
-        });
-        ctx.push_slot(ChildKey::new("tab-2"), metadata, |ctx| {
-            self.metadata.layout(metadata, ctx);
+        ctx.push_slot(ChildKey::new("secondary"), secondary, |ctx| {
+            self.secondary.layout(secondary, ctx);
         });
         LayoutResult::new(area)
     }
 
     fn render<'a>(&'a self, frame: &mut Frame, _area: Rect, ctx: &mut RenderCtx<'a>) {
         self.description.render(frame, self.description_area, ctx);
-        self.properties.render(frame, self.properties_area, ctx);
-        self.metadata.render(frame, self.metadata_area, ctx);
+        self.secondary.render(frame, self.secondary_area, ctx);
     }
 
     fn dispatch_event(
@@ -372,23 +368,17 @@ impl TuiNode for WideDetails {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        for (key, child) in [
-            (
-                ChildKey::new("tab-0"),
-                &mut self.description as &mut dyn TuiNode<()>,
-            ),
-            (
-                ChildKey::new("tab-1"),
-                &mut self.properties as &mut dyn TuiNode<()>,
-            ),
-            (
-                ChildKey::new("tab-2"),
-                &mut self.metadata as &mut dyn TuiNode<()>,
-            ),
-        ] {
-            if let Some(path) = route.path.without_first_if(&key) {
-                return child.dispatch_event(&EventRoute::new(path), event, ctx);
-            }
+        let description = ChildKey::new("description");
+        if let Some(path) = route.path.without_first_if(&description) {
+            return self
+                .description
+                .dispatch_event(&EventRoute::new(path), event, ctx);
+        }
+        let secondary = ChildKey::new("secondary");
+        if let Some(path) = route.path.without_first_if(&secondary) {
+            return self
+                .secondary
+                .dispatch_event(&EventRoute::new(path), event, ctx);
         }
         EventOutcome::Ignored
     }
@@ -396,41 +386,34 @@ impl TuiNode for WideDetails {
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         self.description
             .tick(dt, settings)
-            .merge(self.properties.tick(dt, settings))
-            .merge(self.metadata.tick(dt, settings))
+            .merge(self.secondary.tick(dt, settings))
     }
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
-        if let Some(target) = target.for_child(&ChildKey::new("tab-0")) {
+        if let Some(target) = target.for_child(&ChildKey::new("description")) {
             self.description.dispatch_focus(&target, focused, ctx);
-        } else if let Some(target) = target.for_child(&ChildKey::new("tab-1")) {
-            self.properties.dispatch_focus(&target, focused, ctx);
-        } else if let Some(target) = target.for_child(&ChildKey::new("tab-2")) {
-            self.metadata.dispatch_focus(&target, focused, ctx);
+        } else if let Some(target) = target.for_child(&ChildKey::new("secondary")) {
+            self.secondary.dispatch_focus(&target, focused, ctx);
         }
     }
 
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.description.init(ctx);
-        self.properties.init(ctx);
-        self.metadata.init(ctx);
+        self.secondary.init(ctx);
     }
 
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.description.mount(ctx);
-        self.properties.mount(ctx);
-        self.metadata.mount(ctx);
+        self.secondary.mount(ctx);
     }
 
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
-        self.metadata.unmount(ctx);
-        self.properties.unmount(ctx);
+        self.secondary.unmount(ctx);
         self.description.unmount(ctx);
     }
 
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
-        self.metadata.destroy(ctx);
-        self.properties.destroy(ctx);
+        self.secondary.destroy(ctx);
         self.description.destroy(ctx);
     }
 }
@@ -548,49 +531,69 @@ impl DetailPane {
                 pending_shortcuts.borrow_mut().push(sequence.clone());
             });
         }
-        let wide_description = Panel::new()
-            .top_left("Description")
-            .action_hotkey(
-                keys.description_focus.sequence(),
-                panel_description_action(
-                    Rc::clone(&state),
-                    Rc::clone(&description_actions),
-                    DescriptionTabAction::Focus,
-                ),
+        let wide_description = Tabs::new(vec![
+            Tab::new(
+                "Description",
+                PanelBody::new(SharedNode::reference(Rc::clone(&description))),
             )
-            .action_hotkey(
-                keys.description_editor.sequence(),
-                panel_description_action(
-                    Rc::clone(&state),
-                    Rc::clone(&description_actions),
-                    DescriptionTabAction::Editor,
-                ),
+            .hotkey(keys.description_tab.sequence()),
+        ])
+        .action_hotkey(
+            keys.description_tab.sequence(),
+            desktop_description_focus_action(Rc::clone(&state), Rc::clone(&description_actions)),
+        )
+        .action_hotkey(
+            keys.description_focus.sequence(),
+            description_tab_action(
+                Rc::clone(&state),
+                Rc::clone(&description_actions),
+                DescriptionTabAction::Focus,
+            ),
+        )
+        .action_hotkey(
+            keys.description_editor.sequence(),
+            description_tab_action(
+                Rc::clone(&state),
+                Rc::clone(&description_actions),
+                DescriptionTabAction::Editor,
+            ),
+        )
+        .action_hotkey(
+            keys.description_reader.sequence(),
+            description_tab_action(
+                Rc::clone(&state),
+                Rc::clone(&description_actions),
+                DescriptionTabAction::SpeedReader,
+            ),
+        )
+        .variant(TabsVariant::Underline)
+        .bordered(true);
+        let mut wide_description = wide_description;
+        wide_description.set_action_hotkey_visible(keys.description_tab.sequence(), false);
+        let wide_secondary = Tabs::new(vec![
+            Tab::new(
+                "Properties",
+                PanelBody::new(SharedNode::reference(Rc::clone(&properties))),
             )
-            .action_hotkey(
-                keys.description_reader.sequence(),
-                panel_description_action(
-                    Rc::clone(&state),
-                    Rc::clone(&description_actions),
-                    DescriptionTabAction::SpeedReader,
-                ),
+            .hotkey(keys.properties_tab.sequence()),
+            Tab::new(
+                "Metadata",
+                PanelBody::new(SharedNode::reference(Rc::clone(&metadata))),
             )
-            .host(SharedNode::reference(Rc::clone(&description)));
-        let wide_properties = Panel::new()
-            .top_left("Properties")
-            .hotkey(keys.properties_tab.sequence())
-            .host(SharedNode::reference(Rc::clone(&properties)));
-        let wide_metadata = Panel::new()
-            .top_left("Metadata")
-            .hotkey(keys.metadata_tab.sequence())
-            .host(SharedNode::reference(Rc::clone(&metadata)));
+            .hotkey(keys.metadata_tab.sequence()),
+        ])
+        .variant(TabsVariant::Underline)
+        .bordered(true);
         let details = ResponsiveDetails {
             narrow: tabs,
-            wide: WideDetails::new(wide_description, wide_properties, wide_metadata),
+            wide: WideDetails::new(wide_description, wide_secondary),
             properties,
             property_shortcuts,
             property_keys,
             focus_path: tuicore::TreePath::new(),
             is_wide: false,
+            is_focused: false,
+            pending_focus: None,
             description_focus_key: keys.description_focus.sequence().into(),
             description_editor_key: keys.description_editor.sequence().into(),
             description_reader_key: keys.description_reader.sequence().into(),
@@ -858,11 +861,6 @@ impl DetailPane {
     pub(super) fn narrow_selected_index(&self) -> usize {
         self.detail.second().second().narrow_selected_index()
     }
-
-    #[cfg(test)]
-    pub(super) fn wide_panel_focus(&self) -> (bool, bool, bool) {
-        self.detail.second().second().wide_panel_focus()
-    }
 }
 
 impl ResponsiveDetails {
@@ -898,6 +896,33 @@ impl ResponsiveDetails {
         );
     }
 
+    fn sync_wide_selection(&mut self) {
+        if let Some(index) = self.narrow.selected_index().checked_sub(1) {
+            self.wide.secondary.select_index(index);
+        }
+        self.wide.set_focused_section(
+            self.is_focused.then_some(self.narrow.selected_index()),
+            AnimationSettings::default(),
+        );
+    }
+
+    fn focus_request_for_selected_section(&self) -> FocusRequest {
+        let section = self.narrow.selected_index();
+        let path = if self.is_wide {
+            if section == 0 {
+                self.focus_path.child(ChildKey::new("description"))
+            } else {
+                self.focus_path.child(ChildKey::new("secondary"))
+            }
+        } else {
+            self.focus_path.clone()
+        };
+        FocusRequest::TargetAt {
+            path,
+            id: FocusId::new("tabs"),
+        }
+    }
+
     fn process_property_shortcuts(&mut self, ctx: &mut EventCtx<()>) {
         let shortcuts = self
             .property_shortcuts
@@ -928,10 +953,15 @@ impl ResponsiveDetails {
             .set_action_hotkey_enabled(&self.description_editor_key, editor);
         self.narrow
             .set_action_hotkey_enabled(&self.description_reader_key, reader);
-        let description_panel = self.wide.description.panel_mut();
-        description_panel.set_action_hotkey_enabled(&self.description_focus_key, description);
-        description_panel.set_action_hotkey_enabled(&self.description_editor_key, editor);
-        description_panel.set_action_hotkey_enabled(&self.description_reader_key, reader);
+        self.wide
+            .description
+            .set_action_hotkey_enabled(&self.description_focus_key, description);
+        self.wide
+            .description
+            .set_action_hotkey_enabled(&self.description_editor_key, editor);
+        self.wide
+            .description
+            .set_action_hotkey_enabled(&self.description_reader_key, reader);
     }
 
     fn set_dashed(&mut self, dashed: bool) {
@@ -940,14 +970,16 @@ impl ResponsiveDetails {
         } else {
             TabsBodyBorderStyle::Solid
         });
-        let border = if dashed {
-            BorderKind::AsciiDashed
+        self.wide.description.set_body_border_style(if dashed {
+            TabsBodyBorderStyle::Dashed
         } else {
-            tuicore::preset().border()
-        };
-        self.wide.description.panel_mut().set_border(border);
-        self.wide.properties.panel_mut().set_border(border);
-        self.wide.metadata.panel_mut().set_border(border);
+            TabsBodyBorderStyle::Solid
+        });
+        self.wide.secondary.set_body_border_style(if dashed {
+            TabsBodyBorderStyle::Dashed
+        } else {
+            TabsBodyBorderStyle::Solid
+        });
     }
 
     #[cfg(test)]
@@ -963,11 +995,6 @@ impl ResponsiveDetails {
     #[cfg(test)]
     fn narrow_selected_index(&self) -> usize {
         self.narrow.selected_index()
-    }
-
-    #[cfg(test)]
-    fn wide_panel_focus(&self) -> (bool, bool, bool) {
-        self.wide.panel_focus()
     }
 }
 
@@ -1309,13 +1336,16 @@ fn property_sequences(keys: &ComposerKeyBindings) -> Vec<String> {
     .collect()
 }
 
-fn panel_description_action(
+fn desktop_description_focus_action(
     state: Rc<RefCell<ComposerState>>,
     actions: PendingDescriptionActions,
-    action: DescriptionTabAction,
-) -> impl Fn() + 'static {
-    let trigger = description_tab_action(state, actions, action);
-    move || trigger(0)
+) -> impl Fn(usize) + 'static {
+    move |_| {
+        let view_mode = state.borrow().view_mode;
+        actions
+            .borrow_mut()
+            .push(description_focus_action(view_mode, false));
+    }
 }
 
 impl TuiNode for ResponsiveDetails {
@@ -1333,7 +1363,19 @@ impl TuiNode for ResponsiveDetails {
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.focus_path = ctx.current_path();
+        let was_wide = self.is_wide;
         self.is_wide = area.width >= WIDE_BREAKPOINT;
+        if self.is_wide != was_wide {
+            if self.is_wide {
+                self.sync_wide_selection();
+            } else {
+                self.narrow
+                    .set_focused(self.is_focused, AnimationSettings::default());
+            }
+            if self.is_focused {
+                self.pending_focus = Some(self.focus_request_for_selected_section());
+            }
+        }
         let use_tab_shortcuts = !self.is_wide && self.narrow.selected_index() != 1;
         for sequence in &self.property_keys {
             self.narrow
@@ -1360,7 +1402,18 @@ impl TuiNode for ResponsiveDetails {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
+        let is_wide = self.is_wide;
         let outcome = self.active_mut().dispatch_event(route, event, ctx);
+        let section = is_wide
+            .then(|| self.wide.section_for_route(route))
+            .flatten();
+        if let Some(section) = section {
+            self.narrow.select_index(section);
+            if self.is_focused {
+                self.wide
+                    .set_focused_section(Some(section), AnimationSettings::default());
+            }
+        }
         self.process_property_shortcuts(ctx);
         outcome
     }
@@ -1369,28 +1422,28 @@ impl TuiNode for ResponsiveDetails {
         self.active_mut().tick(dt, settings)
     }
 
+    fn take_pending_focus_request(&mut self) -> Option<FocusRequest> {
+        self.pending_focus
+            .take()
+            .or_else(|| self.active_mut().take_pending_focus_request())
+    }
+
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
         self.active_mut().focus(target, focused, ctx);
     }
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
-        let section = if target.for_child(&ChildKey::new("tab-0")).is_some() {
-            Some(0)
-        } else if target.for_child(&ChildKey::new("tab-1")).is_some() {
-            Some(1)
-        } else if target.for_child(&ChildKey::new("tab-2")).is_some() {
-            Some(2)
-        } else {
-            None
-        };
+        let section = WideDetails::focused_section(target)
+            .or_else(|| WideDetails::narrow_focused_section(target));
         if focused && let Some(section) = section {
             self.narrow.select_index(section);
         }
+        self.is_focused = focused;
         if self.is_wide {
-            self.narrow.set_focused(focused, ctx.animation());
-        } else {
             self.wide
                 .set_focused_section(if focused { section } else { None }, ctx.animation());
+        } else {
+            self.narrow.set_focused(focused, ctx.animation());
         }
         self.active_mut().dispatch_focus(target, focused, ctx);
     }
@@ -1559,6 +1612,10 @@ impl TuiNode for DetailPane {
                 .merge(self.file.tick(dt, settings))
                 .merge(self.diagram.tick(dt, settings))
         }
+    }
+
+    fn take_pending_focus_request(&mut self) -> Option<FocusRequest> {
+        self.active_mut().take_pending_focus_request()
     }
 
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {

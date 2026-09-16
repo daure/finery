@@ -15,19 +15,22 @@ use ratatui::{
 };
 use tuicore::{
     AnimationSettings, ChildKey, Column, CrossAlign, DataView, Dialog, DialogBackdrop, DialogHost,
-    DialogLayer, DialogLayerPlacement, DockSpec, EventCtx, EventOutcome, EventRoute, Flex,
-    FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, Language, LayoutCtx, LayoutProposal,
-    LayoutResult, LayoutSizeHint, LifecycleCtx, MainAlign, Paragraph, RenderCtx, ScrollContainer,
-    Spinner, SyntaxHighlighter, TickResult, TreePath, TuiEvent, TuiNode,
+    DialogLayer, DialogLayerPlacement, DockChrome, DockSpec, EventCtx, EventOutcome, EventRoute,
+    Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, Language, LayoutCtx,
+    LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, MainAlign, Paragraph, RelativeDate,
+    RenderCtx, ScrollContainer, Spinner, SyntaxHighlighter, Tab, Tabs, TabsVariant, TickResult,
+    TreeAdapter, TreePath, TuiEvent, TuiNode,
 };
 
 use crate::{
     app_settings::{BacklogKeyBindings, BacklogRunwaySettings},
+    components::avatar::bubble_span,
     jira::{self, JiraAssignee, JiraEpic, JiraFixVersion, JiraOption},
     service::AppService,
     store::work_items::{
-        BacklogSnapshot, RankPlan, Sprint, StatusTransition, VelocityReport, VelocitySprint,
-        WorkItem, apply_capacity, is_done_status, loaded_story_point_average, rank_plan,
+        BacklogSnapshot, RankPlan, Sprint, StatusTransition, TicketComments, VelocityReport,
+        VelocitySprint, WorkItem, apply_capacity, is_done_status, loaded_story_point_average,
+        rank_plan,
     },
 };
 
@@ -40,7 +43,11 @@ use super::velocity_reports::copy_report;
 
 type BacklogQuickMenuLayer = DialogLayer<BacklogTree, BacklogQuickMenu>;
 type BacklogDialog = DialogHost<Flex<()>, ()>;
-type BacklogView = DialogLayer<BacklogQuickMenuLayer, BacklogDialog>;
+pub(super) trait BacklogOverlay: TuiNode<()> + DockChrome {}
+impl<T: TuiNode<()> + DockChrome> BacklogOverlay for T {}
+
+type BacklogView = DialogLayer<BacklogQuickMenuLayer, Box<dyn BacklogOverlay>>;
+type SharedTicketComments = Rc<RefCell<TicketComments>>;
 
 const MOBILE_BACKLOG_WIDTH: u16 = 100;
 
@@ -115,6 +122,11 @@ enum BacklogResult {
         keys: Vec<String>,
         story_points: Option<f64>,
         result: Result<(), String>,
+    },
+    CommentsLoaded {
+        generation: u64,
+        key: String,
+        result: Result<TicketComments, String>,
     },
 }
 
@@ -511,6 +523,10 @@ pub(crate) struct BacklogPage {
     velocity_dialog_close_requested: Rc<Cell<bool>>,
     description_dialog_close_requested: Rc<Cell<bool>>,
     description_dialog_active: bool,
+    description_dialog_key: Option<String>,
+    description_dialog_comments: Option<SharedTicketComments>,
+    comment_load_generation: u64,
+    active_comment_load: Option<(u64, String)>,
     area: Rect,
 }
 
@@ -580,6 +596,10 @@ impl BacklogPage {
             velocity_dialog_close_requested,
             description_dialog_close_requested,
             description_dialog_active: false,
+            description_dialog_key: None,
+            description_dialog_comments: None,
+            comment_load_generation: 0,
+            active_comment_load: None,
             area: Rect::default(),
         }
     }
@@ -782,6 +802,11 @@ impl BacklogPage {
                     story_points,
                     result,
                 } => self.apply_story_points_result(generation, keys, story_points, result),
+                BacklogResult::CommentsLoaded {
+                    generation,
+                    key,
+                    result,
+                } => self.apply_ticket_comments_result(generation, key, result),
             };
         }
         changed
@@ -2261,7 +2286,7 @@ impl BacklogPage {
         self.description_dialog_close_requested.set(false);
         self.description_dialog_active = false;
         self.view.replace_layer(
-            velocity_dialog(
+            Box::new(velocity_dialog(
                 self.snapshot
                     .as_ref()
                     .and_then(|snapshot| snapshot.velocity.as_ref()),
@@ -2269,44 +2294,46 @@ impl BacklogPage {
                 self.snapshot.as_ref().and_then(loaded_story_point_average),
                 Rc::clone(&self.velocity_dialog_close_requested),
                 Some(self.service.clone()),
-            ),
+            )),
             ctx,
         );
         self.view.set_fit_content(true);
         self.view.set_fit_content_max(96, 26);
         self.view.set_placement(DialogLayerPlacement::Center);
-        self.view
-            .layer_mut()
-            .dialog_mut()
-            .set_edge_borders(Borders::ALL);
         self.view.set_active_with_context(true, ctx);
     }
 
     fn open_description_dialog(
         &mut self,
         key: String,
-        title: String,
         description: String,
+        comments: TicketComments,
+        selected_tab: usize,
         ctx: &mut EventCtx<()>,
     ) {
         self.velocity_dialog_close_requested.set(false);
         self.description_dialog_close_requested.set(false);
         self.description_dialog_active = true;
+        self.description_dialog_key = Some(key.clone());
+        let comments = Rc::new(RefCell::new(comments));
+        self.description_dialog_comments = Some(Rc::clone(&comments));
         let close_requested = Rc::clone(&self.description_dialog_close_requested);
-        let content = Flex::column().child(
-            "description",
-            SyntaxHighlighter::new(description, Language::Markdown).wrap(true),
-            FlexItem::fill(1),
-        );
-        let dialog = Dialog::new()
-            .top_left_keyed(key, title)
-            .on_close(move |_| close_requested.set(true))
-            .host(content);
-        self.view.replace_layer(dialog, ctx);
-        self.view.set_docked(
-            DockSpec::bottom(50).cross_percent(description_width_percent(self.area.width)),
-        );
+        let service = self.service.clone();
+        let tabs = ticket_detail_tabs(description, comments, selected_tab, move |comment_id| {
+            service.open_jira_comment(&key, &comment_id);
+        })
+        .on_close(move |_| close_requested.set(true));
+        self.view.replace_layer(Box::new(tabs), ctx);
+        self.dock_description_dialog(self.area.width);
         self.view.set_active_with_context(true, ctx);
+    }
+
+    fn dock_description_dialog(&mut self, width: u16) {
+        let dock = DockSpec::bottom(50).cross_percent(description_width_percent(width));
+        self.view.set_dock(dock);
+        self.view
+            .layer_mut()
+            .set_dock_edge_borders(dock.edge_borders());
     }
 
     fn open_ticket_description(&mut self, key: &str, ctx: &mut EventCtx<()>) {
@@ -2322,10 +2349,79 @@ impl BacklogPage {
                     .chain(&snapshot.work_items)
             })
             .find(|work_item| work_item.key == key);
-        let (title, description) = ticket
-            .map(|work_item| (work_item.title.clone(), work_item.description.clone()))
+        let description = ticket
+            .map(|work_item| work_item.description.clone())
             .unwrap_or_default();
-        self.open_description_dialog(key.to_owned(), title, description, ctx);
+        let comments = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.ticket_comments.get(key))
+            .cloned()
+            .unwrap_or(TicketComments {
+                total: 0,
+                comments: Vec::new(),
+                complete: true,
+            });
+        self.open_description_dialog(key.to_owned(), description, comments.clone(), 0, ctx);
+        if !comments.complete {
+            self.load_ticket_comments(key);
+        }
+    }
+
+    fn load_ticket_comments(&mut self, key: &str) {
+        self.comment_load_generation = self.comment_load_generation.wrapping_add(1);
+        let generation = self.comment_load_generation;
+        let key = key.to_owned();
+        self.active_comment_load = Some((generation, key.clone()));
+        let service = self.service.clone();
+        let sender = self.sender.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("finery-jira-comments".into())
+            .spawn(move || {
+                let result = service.jira_ticket_comments(&key);
+                let _ = sender.send(BacklogResult::CommentsLoaded {
+                    generation,
+                    key,
+                    result,
+                });
+            })
+        {
+            self.active_comment_load = None;
+            self.service
+                .report_error(format!("Could not load Jira comments: {error}"));
+        }
+    }
+
+    fn apply_ticket_comments_result(
+        &mut self,
+        generation: u64,
+        key: String,
+        result: Result<TicketComments, String>,
+    ) -> bool {
+        if self.active_comment_load.as_ref() != Some(&(generation, key.clone())) {
+            return false;
+        }
+        self.active_comment_load = None;
+        match result {
+            Ok(comments) => {
+                if let Some(snapshot) = self.snapshot.as_mut() {
+                    snapshot
+                        .ticket_comments
+                        .insert(key.clone(), comments.clone());
+                }
+                if self.description_dialog_key.as_deref() == Some(key.as_str()) {
+                    if let Some(current) = &self.description_dialog_comments {
+                        *current.borrow_mut() = comments;
+                    }
+                }
+                true
+            }
+            Err(error) => {
+                self.service
+                    .report_error(format!("Could not load comments for {key}: {error}"));
+                false
+            }
+        }
     }
 
     fn copy_jira_url(&self, key: &str, ctx: &mut EventCtx<()>) {
@@ -2348,6 +2444,8 @@ impl BacklogPage {
             || self.description_dialog_close_requested.replace(false)
         {
             self.description_dialog_active = false;
+            self.description_dialog_key = None;
+            self.description_dialog_comments = None;
             self.view.set_active_with_context(false, ctx);
             self.focus_backlog_data(ctx);
         }
@@ -3421,13 +3519,13 @@ fn backlog_view(
     .backdrop(DialogBackdrop::dim().amount(0.55));
     DialogLayer::new(
         quick_menu,
-        velocity_dialog(
+        Box::new(velocity_dialog(
             None,
             &BacklogRunwaySettings::default(),
             None,
             velocity_dialog_close_requested,
             None,
-        ),
+        )) as Box<dyn BacklogOverlay>,
     )
     .active(false)
     .fit_content()
@@ -3517,6 +3615,7 @@ pub(super) fn velocity_dialog(
         .child("table", table, FlexItem::fixed(17));
     Dialog::new()
         .top_left("Velocity")
+        .edge_borders(Borders::ALL)
         .on_close(move |_| close_requested.set(true))
         .host(content)
 }
@@ -3816,7 +3915,265 @@ fn empty_snapshot() -> BacklogSnapshot {
         warnings: Vec::new(),
         runway: None,
         velocity: None,
+        ticket_comments: HashMap::new(),
     }
+}
+
+pub(super) struct TicketCommentsPane {
+    comments: SharedTicketComments,
+    rendered_comments: TicketComments,
+    data_view: DataView<TicketCommentRow, String>,
+    rendered_theme: tuicore::ThemeName,
+    open_comment: Box<dyn Fn(String)>,
+}
+
+impl TicketCommentsPane {
+    pub(super) fn new(
+        comments: SharedTicketComments,
+        open_comment: impl Fn(String) + 'static,
+    ) -> Self {
+        let rendered_comments = comments.borrow().clone();
+        Self {
+            data_view: ticket_comments_data_view(&rendered_comments),
+            comments,
+            rendered_comments,
+            rendered_theme: tuicore::theme().name(),
+            open_comment: Box::new(open_comment),
+        }
+    }
+
+    fn drain_events(&mut self) {
+        for event in self.data_view.take_events() {
+            if let tuicore::DataViewTypedEvent::Activated { row_id } = event {
+                (self.open_comment)(row_id);
+            }
+        }
+    }
+}
+
+impl TuiNode for TicketCommentsPane {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        <DataView<TicketCommentRow, String> as TuiNode<()>>::measure(&self.data_view, proposal)
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        <DataView<TicketCommentRow, String> as TuiNode<()>>::layout(&mut self.data_view, area, ctx)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        <DataView<TicketCommentRow, String> as TuiNode<()>>::render(
+            &self.data_view,
+            frame,
+            area,
+            ctx,
+        );
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        let outcome = <DataView<TicketCommentRow, String> as TuiNode<()>>::event(
+            &mut self.data_view,
+            event,
+            ctx,
+        );
+        self.drain_events();
+        outcome
+    }
+
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> EventOutcome {
+        let outcome = <DataView<TicketCommentRow, String> as TuiNode<()>>::dispatch_event(
+            &mut self.data_view,
+            route,
+            event,
+            ctx,
+        );
+        self.drain_events();
+        outcome
+    }
+
+    fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
+        <DataView<TicketCommentRow, String> as TuiNode<()>>::focus(
+            &mut self.data_view,
+            target,
+            focused,
+            ctx,
+        );
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        <DataView<TicketCommentRow, String> as TuiNode<()>>::dispatch_focus(
+            &mut self.data_view,
+            target,
+            focused,
+            ctx,
+        );
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        let comments = self.comments.borrow().clone();
+        if comments != self.rendered_comments {
+            self.rendered_comments = comments;
+            self.data_view = ticket_comments_data_view(&self.rendered_comments);
+            self.rendered_theme = tuicore::theme().name();
+            return TickResult {
+                changed: true,
+                layout: true,
+                active: false,
+                next_tick: None,
+            };
+        }
+        if self.rendered_theme != tuicore::theme().name() {
+            self.rendered_theme = tuicore::theme().name();
+            self.data_view
+                .set_rows(ticket_comment_rows(&self.rendered_comments));
+            return TickResult {
+                changed: true,
+                layout: true,
+                active: false,
+                next_tick: None,
+            };
+        }
+        <DataView<TicketCommentRow, String> as TuiNode<()>>::tick(&mut self.data_view, dt, settings)
+    }
+}
+
+fn ticket_detail_tabs(
+    description: String,
+    comments: SharedTicketComments,
+    selected_tab: usize,
+    open_comment: impl Fn(String) + 'static,
+) -> Tabs<()> {
+    let comments_total = comments.borrow().total;
+    Tabs::dialog(vec![
+        Tab::new(
+            "Description",
+            SyntaxHighlighter::new(description, Language::Markdown).wrap(true),
+        ),
+        Tab::new(
+            format!("Comments ({comments_total})"),
+            TicketCommentsPane::new(comments, open_comment),
+        ),
+    ])
+    .selected(selected_tab)
+    .variant(TabsVariant::OneRow)
+    .edge_borders(Borders::TOP)
+}
+
+#[derive(Clone)]
+struct TicketCommentRow {
+    comment: crate::store::work_items::TicketComment,
+    body: Text<'static>,
+}
+
+fn ticket_comment_rows(comments: &TicketComments) -> Vec<TicketCommentRow> {
+    comments
+        .comments
+        .iter()
+        .cloned()
+        .map(|comment| {
+            let source = ticket_comment_body_lines(&comment.body).join("\n");
+            let body = if source.trim().is_empty() {
+                Text::from(Span::styled(
+                    "(empty)",
+                    Style::default().fg(tuicore::theme().muted_fg()),
+                ))
+            } else {
+                SyntaxHighlighter::new(source, Language::Markdown).highlighted_text()
+            };
+            TicketCommentRow { comment, body }
+        })
+        .collect()
+}
+
+fn ticket_comments_data_view(comments: &TicketComments) -> DataView<TicketCommentRow, String> {
+    let rows = ticket_comment_rows(comments);
+    let expanded = rows
+        .iter()
+        .filter(|row| {
+            rows.iter().any(|candidate| {
+                candidate.comment.parent_id.as_deref() == Some(row.comment.id.as_str())
+            })
+        })
+        .map(|row| row.comment.id.clone())
+        .collect::<Vec<_>>();
+    DataView::new(rows, |row: &TicketCommentRow| row.comment.id.clone())
+        .activation_mode(tuicore::ActivationMode::OnActivateKey)
+        .headers(false)
+        .columns(vec![Column::multiline(
+            "comment",
+            "Comment",
+            Constraint::Percentage(100),
+            |row: &TicketCommentRow, _| ticket_comment_text(row),
+        )])
+        .tree(TreeAdapter::parent_id(|row: &TicketCommentRow| {
+            row.comment.parent_id.clone()
+        }))
+        .expanded(expanded)
+        .row_height_by(ticket_comment_row_height)
+        .wrap_cells()
+        .empty_message("No comments")
+}
+
+fn ticket_comment_text(row: &TicketCommentRow) -> Text<'static> {
+    let theme = tuicore::theme();
+    let author = if row.comment.author.is_empty() {
+        "Unknown"
+    } else {
+        &row.comment.author
+    };
+    let mut lines = vec![Line::from(vec![
+        bubble_span(author),
+        Span::styled(format!(" ({author})"), Style::default().fg(theme.text_fg())),
+        Span::styled(" · ", Style::default().fg(theme.muted_fg())),
+        Span::styled(
+            ticket_comment_relative_date(&row.comment.created),
+            Style::default().fg(theme.muted_fg()),
+        ),
+    ])];
+    lines.extend(row.body.lines.iter().cloned());
+    Text::from(lines)
+}
+
+fn ticket_comment_body_lines(body: &str) -> Vec<String> {
+    body.lines().map(strip_legacy_account_id_mentions).collect()
+}
+
+pub(super) fn strip_legacy_account_id_mentions(line: &str) -> String {
+    let mut text = line;
+    let mut result = String::new();
+    while let Some(start) = text.find("[~accountid:") {
+        result.push_str(&text[..start]);
+        let remainder = &text[start + "[~accountid:".len()..];
+        let Some(end) = remainder.find(']') else {
+            result.push_str(&text[start..]);
+            return result;
+        };
+        text = &remainder[end + 1..];
+    }
+    result.push_str(text);
+    if line.trim_start().starts_with("[~accountid:") {
+        result.trim_start().to_owned()
+    } else {
+        result
+    }
+}
+
+fn ticket_comment_relative_date(created: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(created)
+        .or_else(|_| chrono::DateTime::parse_from_str(created, "%Y-%m-%dT%H:%M:%S%.f%z"))
+        .ok()
+        .and_then(|created| time::OffsetDateTime::from_unix_timestamp(created.timestamp()).ok())
+        .map(|created| RelativeDate::new(created).text().to_owned())
+        .unwrap_or_else(|| created.to_owned())
+}
+
+fn ticket_comment_row_height(row: &TicketCommentRow) -> u16 {
+    let body_lines = row.body.lines.len().max(1);
+    u16::try_from(body_lines.saturating_add(1)).unwrap_or(u16::MAX)
 }
 
 fn loading_view() -> ScrollContainer<Flex<()>> {
@@ -3852,9 +4209,7 @@ impl TuiNode for BacklogPage {
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.area = area;
         if self.description_dialog_active {
-            self.view.set_docked(
-                DockSpec::bottom(50).cross_percent(description_width_percent(area.width)),
-            );
+            self.dock_description_dialog(area.width);
         }
         if self.shows_initial_loading() {
             ctx.with_focus_fallback(FocusId::new("backlog-loading"), area, |ctx| {
@@ -3938,7 +4293,7 @@ impl TuiNode for BacklogPage {
                 changed: true,
                 layout: true,
                 active: false,
-                next_tick: None,
+                next_tick: Some(Duration::ZERO),
             })
         } else {
             result

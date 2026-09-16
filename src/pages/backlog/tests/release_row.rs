@@ -50,6 +50,7 @@ fn release_snapshot() -> BacklogSnapshot {
         warnings: Vec::new(),
         runway: None,
         velocity: None,
+        ticket_comments: Default::default(),
     };
     apply_capacity(
         &mut snapshot,

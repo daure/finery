@@ -8,16 +8,17 @@ use std::{
 
 use serde_json::json;
 
+mod descriptions;
 mod release_dates;
 
 use super::{
     AgileBoard, AgileIssuePage, BACKLOG_FIELDS, BACKLOG_JQL, COMPOSER_FIELDS, ISSUE_FIELDS,
     JiraIssue, JiraSprint, MAX_VELOCITY_GOAL_LOOKUPS, PublishedMermaidAttachments,
-    SubmitBatchOutcome, ambiguous_create_failure, apply_attachment_changes, apply_mermaid_diagrams,
-    apply_web_link_changes, assign_users, backlog_page_complete, board_backlog,
-    board_backlog_query, board_sprints, commit_order, common_status_transitions, composer_fields,
-    composer_subtask_keys, create_available_statuses_from_value, create_issue_fields,
-    create_issue_type, create_issue_types_from_value, create_response_failure,
+    SubmitBatchOutcome, ambiguous_create_failure, append_ticket_comments, apply_attachment_changes,
+    apply_mermaid_diagrams, apply_web_link_changes, assign_users, backlog_page_complete,
+    board_backlog, board_backlog_query, board_sprints, commit_order, common_status_transitions,
+    composer_fields, composer_subtask_keys, create_available_statuses_from_value,
+    create_issue_fields, create_issue_type, create_issue_types_from_value, create_response_failure,
     created_issue_failure, current_user, discover_story_points, epics, fetch_composer_issues,
     fix_versions, hydrate_mermaid_diagrams, hydrate_sprint_subtasks, is_ticket_number_query,
     issue_fields, issue_key_jql, labels, move_payload, options_from_values, rank_payload,
@@ -318,8 +319,14 @@ fn composer_fetch_fields_combine_ticket_and_presentation_fields() {
     let fields = composer_fields(Some("customfield_10016"));
 
     assert!(ISSUE_FIELDS.iter().all(|field| fields.contains(field)));
-    assert!(BACKLOG_FIELDS.iter().all(|field| fields.contains(field)));
+    assert!(
+        BACKLOG_FIELDS
+            .iter()
+            .filter(|field| **field != "comment")
+            .all(|field| fields.contains(field))
+    );
     assert!(BACKLOG_FIELDS.contains(&"description"));
+    assert!(BACKLOG_FIELDS.contains(&"comment"));
     assert!(COMPOSER_FIELDS.iter().all(|field| fields.contains(field)));
     assert!(fields.contains(&"customfield_10016"));
     assert!(is_ticket_number_query("42"));
@@ -339,6 +346,43 @@ fn composer_subtasks_are_loaded_for_stories_and_tasks_only() {
     assert_eq!(composer_subtask_keys(&issue("Story")), ["FIN-2"]);
     assert_eq!(composer_subtask_keys(&issue("Task")), ["FIN-2"]);
     assert!(composer_subtask_keys(&issue("Epic")).is_empty());
+}
+
+#[test]
+fn comment_pages_preserve_reply_parent_ids() {
+    let comments = super::mapping::ticket_comment_page(&json!({
+        "total": 2,
+        "comments": [
+            { "id": "10047", "body": { "type": "doc", "version": 1, "content": [] } },
+            { "id": "10080", "parentId": 10047, "body": { "type": "doc", "version": 1, "content": [] } }
+        ]
+    }));
+
+    assert_eq!(comments.total, 2);
+    assert_eq!(comments.comments[0].parent_id, None);
+    assert_eq!(comments.comments[1].parent_id.as_deref(), Some("10047"));
+}
+
+#[test]
+fn backlog_comment_summaries_request_full_comment_details() {
+    let issue = JiraIssue {
+        key: "KAN-148".into(),
+        fields: json!({
+            "comment": {
+                "total": 3,
+                "comments": [
+                    { "id": "10047", "body": { "type": "doc", "version": 1, "content": [] } },
+                    { "id": "10080", "body": { "type": "doc", "version": 1, "content": [] } },
+                    { "id": "10081", "body": { "type": "doc", "version": 1, "content": [] } }
+                ]
+            }
+        }),
+    };
+    let mut comments = HashMap::new();
+
+    append_ticket_comments(&issue, &mut comments);
+
+    assert!(!comments["KAN-148"].complete);
 }
 
 #[test]
@@ -1750,6 +1794,7 @@ fn backlog_warns_when_loaded_tickets_lack_story_points() {
         warnings: Vec::new(),
         runway: None,
         velocity: None,
+        ticket_comments: Default::default(),
     };
 
     assert!(

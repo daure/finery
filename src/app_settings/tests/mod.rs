@@ -95,7 +95,7 @@ fn company_managed_url_setting_round_trips_through_settings_values() {
 }
 
 #[test]
-fn jira_issue_url_uses_the_configured_site_and_trims_trailing_slashes() {
+fn jira_browser_urls_use_the_configured_site_and_trim_trailing_slashes() {
     let settings = AppSettings {
         jira_base_url: "https://finery.atlassian.net///".into(),
         ..AppSettings::default()
@@ -104,6 +104,15 @@ fn jira_issue_url_uses_the_configured_site_and_trims_trailing_slashes() {
     assert_eq!(
         settings.jira_issue_url("FIN-42").as_deref(),
         Some("https://finery.atlassian.net/browse/FIN-42")
+    );
+    assert_eq!(
+        settings.jira_comment_url("FIN-42", "10080").as_deref(),
+        Some("https://finery.atlassian.net/browse/FIN-42?focusedCommentId=10080#comment-10080")
+    );
+    assert_eq!(settings.jira_comment_url("FIN-42", ""), None);
+    assert_eq!(
+        AppSettings::default().jira_comment_url("FIN-42", "10080"),
+        None
     );
 }
 

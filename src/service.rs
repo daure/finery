@@ -683,6 +683,18 @@ impl AppService {
         self.with_jira_reorder(|service| service.jira_backlog_while_reorder_locked())
     }
 
+    pub(crate) fn jira_ticket_comments(
+        &self,
+        key: &str,
+    ) -> Result<crate::store::work_items::TicketComments, String> {
+        let settings = self
+            .settings
+            .read()
+            .map_err(|_| "settings lock is unavailable".to_string())?
+            .clone();
+        jira::ticket_comments(&settings, key)
+    }
+
     pub(crate) fn jira_velocity_tickets(
         &self,
         sprint_ids: &[u64],
@@ -955,6 +967,23 @@ impl AppService {
             return;
         }
         self.record_recent_ticket(key);
+    }
+
+    pub(crate) fn open_jira_comment(&self, key: &str, comment_id: &str) {
+        let url = match self.settings.read() {
+            Ok(settings) => settings.jira_comment_url(key, comment_id),
+            Err(_) => {
+                self.report_error(
+                    "Could not open Jira comment: settings lock is unavailable".into(),
+                );
+                return;
+            }
+        };
+        let Some(url) = url else {
+            self.report_error("Could not open Jira comment: URL is unavailable".into());
+            return;
+        };
+        self.open_web_link(&url);
     }
 
     pub(crate) fn open_web_link(&self, url: &str) {

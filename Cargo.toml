@@ -41,6 +41,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "sqlite", "postgres", "migrate", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "net", "signal"] }
+time = "0.3"
 tracing-appender = "0.2"
 tuicore = { path = "../tuicore" }
 

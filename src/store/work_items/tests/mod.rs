@@ -53,6 +53,7 @@ fn snapshot() -> BacklogSnapshot {
         warnings: Vec::new(),
         runway: None,
         velocity: None,
+        ticket_comments: Default::default(),
     }
 }
 

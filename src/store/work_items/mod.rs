@@ -1,4 +1,22 @@
+use std::collections::HashMap;
+
 pub(crate) mod release;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TicketComment {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub author: String,
+    pub created: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TicketComments {
+    pub total: usize,
+    pub comments: Vec<TicketComment>,
+    pub complete: bool,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WorkItem {
@@ -85,6 +103,7 @@ pub(crate) struct BacklogSnapshot {
     pub warnings: Vec<String>,
     pub runway: Option<BacklogRunway>,
     pub velocity: Option<VelocityReport>,
+    pub ticket_comments: HashMap<String, TicketComments>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

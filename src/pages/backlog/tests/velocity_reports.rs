@@ -106,6 +106,7 @@ fn both_report_copy_actions_fetch_only_the_selected_sprint_without_loading_notif
                     warnings: Vec::new(),
                     runway: None,
                     velocity: Some(report),
+                    ticket_comments: Default::default(),
                 },
                 service.clone(),
             ))
