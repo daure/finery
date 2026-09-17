@@ -37,6 +37,12 @@ class ReleaseTests(unittest.TestCase):
 
 class ReleaseGitTests(unittest.TestCase):
     def test_release_pushes_matching_commit_and_tag_without_building(self):
+        self.check_release(refresh_lockfile=True)
+
+    def test_release_refreshes_stale_path_dependency_before_locked_checks(self):
+        self.check_release(refresh_lockfile=False)
+
+    def check_release(self, refresh_lockfile):
         environment = {
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_NOSYSTEM": "1",
@@ -73,8 +79,11 @@ class ReleaseGitTests(unittest.TestCase):
             git("remote", "add", "origin", str(root / "remote.git"))
             git("push", "origin", "main")
             (local / "Cargo.toml").write_text(local_manifest.replace("1.0.0", "2.0.0"))
-            subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=repo, check=True)
-            self.assertIn("Cargo.lock", git("status", "--porcelain"))
+            if refresh_lockfile:
+                subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=repo, check=True)
+                self.assertIn("Cargo.lock", git("status", "--porcelain"))
+            else:
+                self.assertEqual(git("status", "--porcelain"), "")
             real_run = release.run
             calls = []
 
@@ -82,6 +91,8 @@ class ReleaseGitTests(unittest.TestCase):
                 calls.append((args, kwargs))
                 if args[:2] == ("gh", "auth"):
                     return subprocess.CompletedProcess(args, 0)
+                if args[:2] in (("cargo", "clippy"), ("cargo", "test")):
+                    return real_run("cargo", "metadata", "--locked", "--offline", "--format-version", "1", stdout=subprocess.PIPE)
                 if args[0] in ("cargo", "python3") and args[:2] != ("cargo", "update"):
                     return subprocess.CompletedProcess(args, 0)
                 return real_run(*args, **kwargs)
@@ -114,6 +125,7 @@ class ReleaseGitTests(unittest.TestCase):
                             "tools/release-command/Cargo.toml",
                             "--check",
                         ),
+                        ("cargo", "update", "--workspace"),
                         ("cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings"),
                         ("cargo", "test", "--locked"),
                         ("cargo", "update", "--workspace"),

@@ -45,6 +45,7 @@ def preflight():
         "--check",
     )
     run("python3", "-m", "unittest", "discover", "-s", "scripts/tests")
+    run("cargo", "update", "--workspace")
     run("cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings")
     run("cargo", "test", "--locked")
 
