@@ -1501,12 +1501,23 @@ fn submit_requires_confirmation() {
     let source = page.selected_changes();
     page.set_selected_source(source);
 
+    let tickets = focus(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Enter,
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+    assert!(!render_text(&mut page).contains("Commit changes"));
+
     let title = focus(&mut page, "input");
     page.dispatch_event(
         &EventRoute::new(title.path),
         &TuiEvent::Key(KeyEvent {
-            code: Key::Enter,
-            modifiers: KeyModifiers::CONTROL,
+            code: Key::Char('O'),
+            modifiers: KeyModifiers::SHIFT,
         }),
         &mut EventCtx::default(),
     );
@@ -1529,8 +1540,8 @@ fn submit_confirmation_lists_the_effective_scope() {
     page.dispatch_event(
         &EventRoute::new(title.path),
         &TuiEvent::Key(KeyEvent {
-            code: Key::Enter,
-            modifiers: KeyModifiers::CONTROL,
+            code: Key::Char('O'),
+            modifiers: KeyModifiers::SHIFT,
         }),
         &mut EventCtx::default(),
     );
@@ -1652,6 +1663,35 @@ fn ctrl_enter_opens_the_selected_existing_ticket() {
 
     assert_eq!(outcome, EventOutcome::Handled);
     assert_eq!(ctx.propagation(), tuicore::Propagation::Stopped);
+    assert!(!render_text(&mut page).contains("Commit changes"));
+}
+
+#[test]
+fn open_command_uses_the_selected_composer_ticket_without_committing() {
+    tuicore::init();
+    let service = AppService::for_tests();
+    let probe = crate::service::OpenCommandProbe::new(&service);
+    let mut page = ComposerPage::new(
+        ComposerState::demo().change_sets,
+        service.clone(),
+        service.settings(),
+    );
+    page.init(&mut LifecycleCtx::default());
+    page.open_change_set_for_test("CS-1");
+    let key = page.selected_changes().key;
+    let tickets = focus(&mut page, "data-view");
+    let mut ctx = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char(';'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut ctx,
+    );
+    probe.assert_opened(&key);
+    assert_eq!(ctx.propagation(), tuicore::Propagation::Stopped);
+    assert!(!render_text(&mut page).contains("Commit changes"));
 }
 
 #[test]
@@ -2407,10 +2447,7 @@ fn toolbar_hotkeys_run_without_focusing_their_buttons() {
     let mut submit_ctx = EventCtx::default();
     page.dispatch_event(
         &EventRoute::new(tickets.path),
-        &TuiEvent::Key(KeyEvent {
-            code: Key::Enter,
-            modifiers: KeyModifiers::CONTROL,
-        }),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('O'))),
         &mut submit_ctx,
     );
     assert!(submit_ctx.layout_requested());

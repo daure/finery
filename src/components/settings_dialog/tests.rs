@@ -105,3 +105,26 @@ fn excluded_sprint_name_fragments_apply_to_live_settings() {
     let settings = settings.read().unwrap();
     assert_eq!(settings.excluded_sprint_name_fragments, ["abc", "Archive"]);
 }
+
+#[test]
+fn open_command_is_saved_on_edit_and_can_be_cleared() {
+    let service = AppService::for_tests();
+    let settings = service.settings();
+    let dialog = SettingsDialog::new(settings.clone(), service.clone());
+    for value in ["my-ticket-tool \"$FINERY_TICKET_KEY\"", ""] {
+        dialog
+            .changes
+            .borrow_mut()
+            .push(SettingChange::OpenCommand(value.into()));
+        dialog.apply_changes(&mut EventCtx::default());
+        service.flush().unwrap();
+        assert_eq!(settings.read().unwrap().open_command, value);
+        assert!(service.take_errors().is_empty());
+    }
+    dialog
+        .changes
+        .borrow_mut()
+        .push(SettingChange::OpenCommand("bad\0command".into()));
+    dialog.apply_changes(&mut EventCtx::default());
+    assert!(settings.read().unwrap().open_command.is_empty());
+}

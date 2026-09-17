@@ -37,3 +37,72 @@ fn configured_jira_urls_search_by_issue_key() {
     assert_eq!(menu.last_query, "DPP-5263");
     assert_eq!(menu.input.current_value(), "DPP-5263");
 }
+
+#[test]
+fn open_command_closes_search_only_when_a_command_is_triggered() {
+    use crate::store::work_items::WorkItem;
+    use tuicore::{EventRoute, Key, KeyEvent, KeyModifiers, TreePath, TuiEvent, TuiNode};
+
+    let service = AppService::for_tests();
+    let probe = crate::service::OpenCommandProbe::new(&service);
+    let mut menu = JiraSearchMenu::new(service);
+    let ticket = WorkItem {
+        key: "FIN-42".into(),
+        title: "Search result".into(),
+        description: String::new(),
+        kind: "Story".into(),
+        status: "To Do".into(),
+        done: false,
+        priority: String::new(),
+        assignee: String::new(),
+        parent_key: None,
+        parent_title: None,
+        has_children: false,
+        subtask_progress: None,
+        labels: Vec::new(),
+        fix_versions: Vec::new(),
+        releases: Vec::new(),
+        epic_name: None,
+        story_points: None,
+        status_changed_at: None,
+    };
+    menu.list.set_rows(vec![super::jira_search_row(
+        ticket,
+        true,
+        3.0,
+        String::new(),
+        false,
+    )]);
+    menu.list.set_highlighted_id(&"FIN-42".into());
+    let mut ctx = EventCtx::default();
+    menu.dispatch_event(
+        &EventRoute::new(TreePath::default()),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char(';'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut ctx,
+    );
+    probe.assert_opened("FIN-42");
+    assert_eq!(ctx.propagation(), tuicore::Propagation::Stopped);
+    assert!(matches!(
+        menu.take_events().as_slice(),
+        [super::JiraSearchMenuEvent::Closed]
+    ));
+    assert!(menu.input.current_value().is_empty());
+
+    menu.service
+        .settings()
+        .write()
+        .unwrap()
+        .open_command
+        .clear();
+    menu.event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char(';'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+    assert!(menu.take_events().is_empty());
+}

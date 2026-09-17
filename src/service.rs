@@ -29,6 +29,9 @@ use crate::{
 };
 
 mod background_clipboard;
+mod open_command;
+#[cfg(test)]
+pub(crate) use open_command::tests::OpenCommandProbe;
 pub(crate) mod composer_attachments;
 pub(crate) mod composer_service;
 

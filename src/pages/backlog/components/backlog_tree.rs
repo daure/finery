@@ -25,7 +25,7 @@ use tuicore::{
 };
 
 use crate::{
-    app_settings::BacklogKeyBindings,
+    app_settings::{BacklogKeyBindings, ComposerKeyBinding},
     components::{
         avatar::initials,
         ticket_number_jump::{TicketNumberJump, exact_ticket_number_matches},
@@ -91,6 +91,9 @@ pub(in crate::pages::backlog) enum BacklogSectionEvent {
         keys: Vec<String>,
     },
     OpenTicket {
+        key: String,
+    },
+    OpenCommand {
         key: String,
     },
     OpenDescription {
@@ -243,6 +246,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types(
         syncing_ticket_keys,
         issue_types,
         BacklogKeyBindings::default(),
+        crate::app_settings::AppSettings::default().open_command_key,
     )
 }
 
@@ -253,6 +257,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
     syncing_ticket_keys: Rc<RefCell<HashSet<String>>>,
     issue_types: Vec<JiraOption>,
     backlog_keys: BacklogKeyBindings,
+    open_command_key: ComposerKeyBinding,
 ) -> BacklogTree {
     let number_jump = Rc::new(RefCell::new(TicketNumberJump::default()));
     #[cfg(test)]
@@ -455,6 +460,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         #[cfg(test)]
         renderer_calls,
         backlog_keys,
+        open_command_key,
     }
 }
 
@@ -492,6 +498,7 @@ pub(in crate::pages::backlog) struct BacklogTree {
     #[cfg(test)]
     renderer_calls: Rc<Cell<usize>>,
     backlog_keys: BacklogKeyBindings,
+    open_command_key: ComposerKeyBinding,
 }
 
 impl BacklogTree {
@@ -636,6 +643,10 @@ impl BacklogTree {
 
     pub(in crate::pages::backlog) fn set_backlog_keys(&mut self, backlog_keys: BacklogKeyBindings) {
         self.backlog_keys = backlog_keys;
+    }
+
+    pub(in crate::pages::backlog) fn set_open_command_key(&mut self, key: ComposerKeyBinding) {
+        self.open_command_key = key;
     }
 
     pub(in crate::pages::backlog) fn set_loading(&mut self, loading: bool) {
@@ -947,7 +958,9 @@ impl BacklogTree {
     }
 
     fn open_highlighted_ticket(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
-        if !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Enter, KeyModifiers::CONTROL).matches(*key))
+        let custom = matches!(event, TuiEvent::Key(key) if self.open_command_key.matches(*key));
+        if !custom
+            && !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Enter, KeyModifiers::CONTROL).matches(*key))
         {
             return false;
         }
@@ -962,8 +975,11 @@ impl BacklogTree {
         let BacklogRowContent::WorkItem(item) = &row.content else {
             return false;
         };
-        let _ = self.events.send(BacklogSectionEvent::OpenTicket {
-            key: item.item.key.clone(),
+        let key = item.item.key.clone();
+        let _ = self.events.send(if custom {
+            BacklogSectionEvent::OpenCommand { key }
+        } else {
+            BacklogSectionEvent::OpenTicket { key }
         });
         ctx.stop_propagation();
         true
@@ -971,6 +987,7 @@ impl BacklogTree {
 
     fn open_highlighted_description(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
         if self.control.data_view().is_searching()
+            || self.control.is_reordering()
             || !matches!(event, TuiEvent::Key(key) if self.backlog_keys.view_description.matches(*key))
         {
             return false;

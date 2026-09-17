@@ -4,4 +4,5 @@ pub(crate) mod recent_tickets;
 pub(crate) mod settings_dialog;
 pub(crate) mod status_bar;
 pub(crate) mod ticket_number_jump;
+pub(crate) mod ticket_open_command;
 pub(crate) mod work_item_rows;

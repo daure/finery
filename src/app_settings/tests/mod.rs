@@ -15,6 +15,36 @@ use super::{
 };
 
 #[test]
+fn open_command_binding_is_configurable_and_round_trips() {
+    let values = HashMap::from([
+        (
+            super::OPEN_COMMAND_SETTING.into(),
+            "tool \"$FINERY_TICKET_KEY\"".into(),
+        ),
+        (super::OPEN_COMMAND_KEY_SETTING.into(), "alt+;".into()),
+    ]);
+    let settings = AppSettings::resolve(&values).unwrap();
+    assert_eq!(settings.open_command_key.sequence(), "alt+;");
+    assert_eq!(settings.open_command, values[super::OPEN_COMMAND_SETTING]);
+    let stored = settings
+        .values()
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect();
+    assert_eq!(
+        AppSettings::resolve(&stored).unwrap().open_command_key,
+        settings.open_command_key
+    );
+    assert!(
+        AppSettings::resolve(&HashMap::from([(
+            super::OPEN_COMMAND_KEY_SETTING.into(),
+            "ctrl+invalid".into()
+        ),]))
+        .is_err()
+    );
+}
+
+#[test]
 fn persistence_only_includes_changed_settings() {
     let previous = AppSettings {
         jira_api_token: "environment-secret".into(),
@@ -30,7 +60,7 @@ fn persistence_only_includes_changed_settings() {
 }
 
 #[test]
-fn backlog_move_keys_resolve_labels_and_reject_duplicates() {
+fn backlog_keys_resolve_labels_and_reject_duplicates() {
     let settings = AppSettings::resolve(&HashMap::from([
         (BACKLOG_MOVE_TO_TOP_KEY_SETTING.into(), "shift+t".into()),
         (BACKLOG_MOVE_TO_BOTTOM_KEY_SETTING.into(), "alt+b".into()),
@@ -41,6 +71,23 @@ fn backlog_move_keys_resolve_labels_and_reject_duplicates() {
     assert_eq!(settings.backlog_keys.move_to_top.label(), "T");
     assert_eq!(settings.backlog_keys.move_to_bottom.label(), "⌥b");
     assert_eq!(settings.backlog_keys.home.label(), "H");
+    assert_eq!(settings.backlog_keys.view_description.label(), "Enter");
+    let migrated = AppSettings::resolve(&HashMap::from([(
+        super::BACKLOG_VIEW_DESCRIPTION_KEY_SETTING.into(),
+        "v".into(),
+    )]))
+    .unwrap();
+    assert!(
+        migrated
+            .values()
+            .contains(&(super::BACKLOG_VIEW_DESCRIPTION_KEY_SETTING, "enter".into(),))
+    );
+    let custom = AppSettings::resolve(&HashMap::from([(
+        super::BACKLOG_VIEW_DESCRIPTION_KEY_SETTING.into(),
+        "alt+d".into(),
+    )]))
+    .unwrap();
+    assert_eq!(custom.backlog_keys.view_description.sequence(), "alt+d");
     assert!(
         settings
             .values()
@@ -317,11 +364,23 @@ fn composer_keys_resolve_labels_and_reject_active_duplicates() {
 
     let legacy_commit = HashMap::from([(COMPOSER_COMMIT_KEY_SETTING.into(), "shift+m".into())]);
     let migrated = AppSettings::resolve(&legacy_commit).unwrap();
-    assert_eq!(migrated.composer_keys.commit.label(), "⌃Enter");
+    assert_eq!(migrated.composer_keys.commit.label(), "O");
     assert!(
         migrated
             .values()
             .contains(&(COMPOSER_METADATA_TAB_KEY_SETTING, "shift+m".into(),))
+    );
+
+    let saved_commit = HashMap::from([
+        (COMPOSER_COMMIT_KEY_SETTING.into(), "ctrl+enter".into()),
+        (COMPOSER_METADATA_TAB_KEY_SETTING.into(), "shift+m".into()),
+    ]);
+    let migrated = AppSettings::resolve(&saved_commit).unwrap();
+    assert_eq!(migrated.composer_keys.commit.label(), "O");
+    assert!(
+        migrated
+            .values()
+            .contains(&(COMPOSER_COMMIT_KEY_SETTING, "shift+o".into()))
     );
 
     let prefix_across_workspace = HashMap::from([

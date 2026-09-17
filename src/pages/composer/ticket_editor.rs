@@ -1992,6 +1992,27 @@ impl TicketEditor {
         true
     }
 
+    fn handle_open_command(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        if self.view.is_active()
+            || self.view.base().is_active()
+            || self.view.base().base().is_active()
+            || self.view.base().base().base().is_active()
+        {
+            return false;
+        }
+        let state = self.state.borrow();
+        let key = state.selected_existing_ticket_key();
+        let ticket_row =
+            state.selected_attachment().is_none() && state.selected_mermaid_diagram().is_none();
+        crate::components::ticket_open_command::handle(
+            &self.service,
+            event,
+            key.as_deref().filter(|_| ticket_row),
+            ctx,
+        )
+        .is_some()
+    }
+
     fn handle_open_attachment(
         &mut self,
         event: &TuiEvent,
@@ -2345,6 +2366,9 @@ impl TuiNode for TicketEditor {
             return self.loading_view.event(event, ctx);
         }
         self.poll_submission(Some(ctx));
+        if self.handle_open_command(event, ctx) {
+            return EventOutcome::Handled;
+        }
         let create_dialog_open = self.view.base().base().base().is_active();
         let add_menu_open = self.view.base().base().is_active();
         let ticket_dialog_open = self.view.base().is_active();
@@ -2413,6 +2437,9 @@ impl TuiNode for TicketEditor {
             return self.loading_view.dispatch_event(route, event, ctx);
         }
         self.poll_submission(Some(ctx));
+        if self.handle_open_command(event, ctx) {
+            return EventOutcome::Handled;
+        }
         let create_dialog_open = self.view.base().base().base().is_active();
         let add_menu_open = self.view.base().base().is_active();
         let ticket_dialog_open = self.view.base().is_active();

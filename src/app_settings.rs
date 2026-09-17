@@ -32,6 +32,8 @@ pub(crate) const BACKLOG_HOME_KEY_SETTING: &str = "backlog.home_key";
 pub(crate) const SPEED_READER_WPM_SETTING: &str = "reader.wpm";
 pub(crate) const SPEED_READER_BLOCK_DELAY_SETTING: &str = "reader.markdown_block_pause_ms";
 pub(crate) const RECENT_TICKETS_LIMIT_SETTING: &str = "recent_tickets.limit";
+pub(crate) const OPEN_COMMAND_SETTING: &str = "tickets.open_command";
+pub(crate) const OPEN_COMMAND_KEY_SETTING: &str = "tickets.open_command_key";
 pub(crate) const COMPOSER_ADD_SIBLING_KEY_SETTING: &str = "composer.add_sibling_key";
 pub(crate) const COMPOSER_ADD_CHILD_KEY_SETTING: &str = "composer.add_child_key";
 pub(crate) const COMPOSER_NEW_CHANGE_SET_KEY_SETTING: &str = "composer.new_change_set_key";
@@ -220,12 +222,15 @@ impl ComposerKeyBindings {
         };
         let legacy_commit_key = values
             .get(COMPOSER_COMMIT_KEY_SETTING)
-            .is_some_and(|value| value.eq_ignore_ascii_case("shift+m"))
-            && !values.contains_key(COMPOSER_METADATA_TAB_KEY_SETTING);
+            .is_some_and(|value| {
+                value.eq_ignore_ascii_case("ctrl+enter")
+                    || (value.eq_ignore_ascii_case("shift+m")
+                        && !values.contains_key(COMPOSER_METADATA_TAB_KEY_SETTING))
+            });
         let commit = if legacy_commit_key {
-            ComposerKeyBinding::parse("ctrl+enter".into(), COMPOSER_COMMIT_KEY_SETTING)?
+            ComposerKeyBinding::parse("shift+o".into(), COMPOSER_COMMIT_KEY_SETTING)?
         } else {
-            binding(COMPOSER_COMMIT_KEY_SETTING, "ctrl+enter")?
+            binding(COMPOSER_COMMIT_KEY_SETTING, "shift+o")?
         };
         let bindings = Self {
             add_sibling: binding(COMPOSER_ADD_SIBLING_KEY_SETTING, "shift+a")?,
@@ -368,7 +373,14 @@ impl BacklogKeyBindings {
         let bindings = Self {
             move_to_top: binding(BACKLOG_MOVE_TO_TOP_KEY_SETTING, "t")?,
             move_to_bottom: binding(BACKLOG_MOVE_TO_BOTTOM_KEY_SETTING, "b")?,
-            view_description: binding(BACKLOG_VIEW_DESCRIPTION_KEY_SETTING, "v")?,
+            view_description: if values
+                .get(BACKLOG_VIEW_DESCRIPTION_KEY_SETTING)
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("v"))
+            {
+                ComposerKeyBinding::parse("enter".into(), BACKLOG_VIEW_DESCRIPTION_KEY_SETTING)?
+            } else {
+                binding(BACKLOG_VIEW_DESCRIPTION_KEY_SETTING, "enter")?
+            },
             home: binding(BACKLOG_HOME_KEY_SETTING, "shift+h")?,
         };
         ensure_unambiguous(&[
@@ -420,6 +432,8 @@ pub(crate) struct AppSettings {
     pub(crate) backlog_keys: BacklogKeyBindings,
     pub(crate) speed_reader: SpeedReaderSettings,
     pub(crate) recent_tickets_limit: usize,
+    pub(crate) open_command: String,
+    pub(crate) open_command_key: ComposerKeyBinding,
     pub(crate) composer_keys: ComposerKeyBindings,
 }
 
@@ -440,6 +454,9 @@ impl Default for AppSettings {
             backlog_keys: BacklogKeyBindings::default(),
             speed_reader: SpeedReaderSettings::default(),
             recent_tickets_limit: 15,
+            open_command: String::new(),
+            open_command_key: ComposerKeyBinding::parse("ctrl+;".into(), OPEN_COMMAND_KEY_SETTING)
+                .expect("built-in open command key must be valid"),
             composer_keys: ComposerKeyBindings::default(),
         }
     }
@@ -550,11 +567,27 @@ impl AppSettings {
                 .filter(|value| (1..=100).contains(value))
                 .unwrap_or(15),
             composer_keys: ComposerKeyBindings::from_values(values)?,
+            open_command: values
+                .get(OPEN_COMMAND_SETTING)
+                .cloned()
+                .unwrap_or_default(),
+            open_command_key: ComposerKeyBinding::parse(
+                values
+                    .get(OPEN_COMMAND_KEY_SETTING)
+                    .cloned()
+                    .unwrap_or_else(|| defaults.open_command_key.sequence().into()),
+                OPEN_COMMAND_KEY_SETTING,
+            )?,
         })
     }
 
     pub(crate) fn values(&self) -> Vec<(&'static str, String)> {
         vec![
+            (OPEN_COMMAND_SETTING, self.open_command.clone()),
+            (
+                OPEN_COMMAND_KEY_SETTING,
+                self.open_command_key.sequence().into(),
+            ),
             (JIRA_BASE_URL_SETTING, self.jira_base_url.clone()),
             (JIRA_EMAIL_SETTING, self.jira_email.clone()),
             (JIRA_API_TOKEN_SETTING, self.jira_api_token.clone()),

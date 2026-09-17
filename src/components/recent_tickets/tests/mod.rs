@@ -112,3 +112,50 @@ fn work_item(kind: &str) -> WorkItem {
         status_changed_at: None,
     }
 }
+
+#[test]
+fn open_command_closes_recent_tickets_only_when_a_command_is_triggered() {
+    use tuicore::{EventRoute, Key, KeyEvent, KeyModifiers, TreePath, TuiEvent, TuiNode};
+
+    let service = AppService::for_tests();
+    let probe = crate::service::OpenCommandProbe::new(&service);
+    let mut menu = super::RecentTicketsMenu::new(service);
+    menu.list.set_rows(vec![recent_ticket_row(
+        work_item("Story"),
+        true,
+        3.0,
+        false,
+    )]);
+    menu.list.set_highlighted_id(&"FIN-1".into());
+    let mut ctx = EventCtx::default();
+    menu.dispatch_event(
+        &EventRoute::new(TreePath::default()),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char(';'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut ctx,
+    );
+    probe.assert_opened("FIN-1");
+    assert_eq!(ctx.propagation(), tuicore::Propagation::Stopped);
+    assert!(matches!(
+        menu.take_events().as_slice(),
+        [super::RecentTicketsMenuEvent::Closed]
+    ));
+    assert!(menu.input.current_value().is_empty());
+
+    menu.service
+        .settings()
+        .write()
+        .unwrap()
+        .open_command
+        .clear();
+    menu.event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char(';'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
+    assert!(menu.take_events().is_empty());
+}

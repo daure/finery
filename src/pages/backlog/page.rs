@@ -23,7 +23,7 @@ use tuicore::{
 };
 
 use crate::{
-    app_settings::{BacklogKeyBindings, BacklogRunwaySettings},
+    app_settings::{AppSettings, BacklogRunwaySettings},
     components::avatar::bubble_span,
     jira::{self, JiraAssignee, JiraEpic, JiraFixVersion, JiraOption},
     service::AppService,
@@ -539,10 +539,10 @@ impl BacklogPage {
         let velocity_dialog_close_requested = Rc::new(Cell::new(false));
         let description_dialog_close_requested = Rc::new(Cell::new(false));
         let settings_revision = service.settings_revision();
-        let backlog_keys = service
+        let settings = service
             .settings()
             .read()
-            .map(|settings| settings.backlog_keys.clone())
+            .map(|settings| settings.clone())
             .unwrap_or_default();
         Self {
             service,
@@ -556,7 +556,7 @@ impl BacklogPage {
                 Rc::clone(&syncing_ticket_keys),
                 Rc::clone(&velocity_dialog_close_requested),
                 Vec::new(),
-                backlog_keys,
+                &settings,
             ),
             loading_view: loading_view(),
             loading: false,
@@ -1114,6 +1114,9 @@ impl BacklogPage {
                 BacklogSectionEvent::MoveLocked => self.report_move_locked(),
                 BacklogSectionEvent::TicketsSyncing { keys } => self.report_ticket_syncing(&keys),
                 BacklogSectionEvent::OpenTicket { key } => self.service.open_jira_issue(&key),
+                BacklogSectionEvent::OpenCommand { key } => {
+                    self.service.run_open_command(&key);
+                }
                 BacklogSectionEvent::OpenDescription { key } => {
                     self.open_ticket_description(&key, ctx)
                 }
@@ -1332,6 +1335,10 @@ impl BacklogPage {
                 BacklogQuickMenuEvent::ViewDescription { key } => {
                     self.view.base_mut().set_active_with_context(false, ctx);
                     self.open_ticket_description(&key, ctx);
+                }
+                BacklogQuickMenuEvent::OpenCommand { key } => {
+                    self.service.run_open_command(&key);
+                    self.dismiss_quick_menu(ctx);
                 }
                 BacklogQuickMenuEvent::MoveToTop {
                     section_id,
@@ -2409,10 +2416,10 @@ impl BacklogPage {
                         .ticket_comments
                         .insert(key.clone(), comments.clone());
                 }
-                if self.description_dialog_key.as_deref() == Some(key.as_str()) {
-                    if let Some(current) = &self.description_dialog_comments {
-                        *current.borrow_mut() = comments;
-                    }
+                if self.description_dialog_key.as_deref() == Some(key.as_str())
+                    && let Some(current) = &self.description_dialog_comments
+                {
+                    *current.borrow_mut() = comments;
                 }
                 true
             }
@@ -2821,6 +2828,14 @@ impl BacklogPage {
         self.settings_revision = settings_revision;
         if let Ok(settings) = self.service.settings().read() {
             let backlog_keys = settings.backlog_keys.clone();
+            self.view
+                .base_mut()
+                .base_mut()
+                .set_open_command_key(settings.open_command_key.clone());
+            self.view
+                .base_mut()
+                .layer_mut()
+                .set_open_command_key(settings.open_command_key.clone());
             self.view
                 .base_mut()
                 .base_mut()
@@ -3500,7 +3515,7 @@ fn backlog_view(
     syncing_ticket_keys: Rc<RefCell<HashSet<String>>>,
     velocity_dialog_close_requested: Rc<Cell<bool>>,
     issue_types: Vec<JiraOption>,
-    backlog_keys: BacklogKeyBindings,
+    settings: &AppSettings,
 ) -> BacklogView {
     let quick_menu = DialogLayer::new(
         backlog_tree_with_issue_types_and_keys(
@@ -3509,9 +3524,14 @@ fn backlog_view(
             move_locked.clone(),
             syncing_ticket_keys,
             issue_types,
-            backlog_keys.clone(),
+            settings.backlog_keys.clone(),
+            settings.open_command_key.clone(),
         ),
-        BacklogQuickMenu::new_with_keys(move_locked, backlog_keys),
+        BacklogQuickMenu::new_with_keys(
+            move_locked,
+            settings.backlog_keys.clone(),
+            settings.open_command_key.clone(),
+        ),
     )
     .active(false)
     .fit_content()

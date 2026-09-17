@@ -2952,7 +2952,69 @@ fn ctrl_enter_opens_the_highlighted_ticket() {
 }
 
 #[test]
-fn v_opens_a_focused_ticket_detail_dialog() {
+fn open_command_targets_the_highlighted_backlog_ticket() {
+    tuicore::init();
+    let (sender, receiver) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot(), sender, Default::default());
+    tree.highlight("ticket:FIN-8");
+    let mut ctx = EventCtx::default();
+    tree.dispatch_event(
+        &EventRoute::new(TreePath::from_keys([ChildKey::new("data")])),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char(';'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut ctx,
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(super::components::BacklogSectionEvent::OpenCommand { key }) if key == "FIN-8"
+    ));
+    assert_eq!(ctx.propagation(), tuicore::Propagation::Stopped);
+}
+
+#[test]
+fn enter_confirms_backlog_search_and_reordering_before_opening_details() {
+    tuicore::init();
+    for mode in [
+        KeyEvent::from(Key::Char('/')),
+        KeyEvent {
+            code: Key::Char('m'),
+            modifiers: KeyModifiers::CONTROL,
+        },
+    ] {
+        let (sender, receiver) = mpsc::channel();
+        let mut tree = backlog_tree(&snapshot(), sender, Default::default());
+        tree.highlight("ticket:FIN-8");
+        tree.dispatch_focus(&data_focus_target(), true, &mut FocusCtx::default());
+        let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
+        tree.dispatch_event(&route, &TuiEvent::Key(mode), &mut EventCtx::default());
+        if mode.code == Key::Char('m') {
+            assert!(tree.is_reordering_for_test());
+        }
+        tree.dispatch_event(
+            &route,
+            &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+            &mut EventCtx::default(),
+        );
+        assert!(receiver.try_iter().all(|event| !matches!(
+            event,
+            super::components::BacklogSectionEvent::OpenDescription { .. }
+        )));
+        assert!(!tree.is_reordering_for_test());
+        tree.dispatch_event(
+            &route,
+            &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+            &mut EventCtx::default(),
+        );
+        assert!(matches!(receiver.try_recv(),
+            Ok(super::components::BacklogSectionEvent::OpenDescription { key }) if key == "FIN-8"
+        ));
+    }
+}
+
+#[test]
+fn enter_opens_a_focused_ticket_detail_dialog() {
     tuicore::init();
     let mut snapshot = snapshot();
     snapshot.work_items[0].title = "Ticket title".into();
@@ -2989,7 +3051,7 @@ fn v_opens_a_focused_ticket_detail_dialog() {
             ChildKey::first(),
             ChildKey::new("data"),
         ])),
-        &TuiEvent::Key(KeyEvent::from(Key::Char('v'))),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
         &mut event,
     );
 
@@ -3425,6 +3487,7 @@ fn quick_menu_opens_statuses_before_move_actions() {
             "Set epic",
             "Set release",
             "View description",
+            "Open command",
             "Move to top",
             "Move to bottom"
         ]
@@ -3502,7 +3565,8 @@ fn quick_menu_right_aligns_action_hotkeys() {
         ("Set story points (3)", "p"),
         ("Set epic (FIN-42)", "e"),
         ("Set release (v1.4)", "r"),
-        ("View description", "v"),
+        ("View description", "Enter"),
+        ("Open command", "⌃;"),
         ("Move to top", "t"),
         ("Move to bottom", "b"),
     ] {
@@ -3511,6 +3575,58 @@ fn quick_menu_right_aligns_action_hotkeys() {
             .find(|line| line.contains(label))
             .expect("action should be visible");
         assert!(line.trim_end().ends_with(hotkey));
+    }
+}
+
+#[test]
+fn quick_menu_open_command_supports_selection_and_its_configured_shortcut() {
+    tuicore::init();
+    for via_shortcut in [true, false] {
+        let mut menu = BacklogQuickMenu::new(Default::default());
+        let settings =
+            crate::app_settings::AppSettings::resolve(&std::collections::HashMap::from([(
+                crate::app_settings::OPEN_COMMAND_KEY_SETTING.into(),
+                "alt+;".into(),
+            )]))
+            .unwrap();
+        menu.set_open_command_key(settings.open_command_key);
+        let mut ctx = EventCtx::default();
+        assert!(menu.open(
+            "backlog".into(),
+            vec!["FIN-1".into()],
+            vec!["FIN-1".into()],
+            "To Do".into(),
+            "Ada".into(),
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            &mut ctx,
+        ));
+        menu.layout(Rect::new(0, 0, 69, 18), &mut LayoutCtx::new());
+        if via_shortcut {
+            menu.dispatch_event(
+                &EventRoute::new(TreePath::default()),
+                &TuiEvent::Key(KeyEvent {
+                    code: Key::Char(';'),
+                    modifiers: KeyModifiers::ALT,
+                }),
+                &mut ctx,
+            );
+        } else {
+            for character in "Open command".chars() {
+                menu.event(
+                    &TuiEvent::Key(KeyEvent::from(Key::Char(character))),
+                    &mut ctx,
+                );
+            }
+            menu.event(&TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
+        }
+        assert!(matches!(
+            menu.take_events().as_slice(),
+            [BacklogQuickMenuEvent::OpenCommand { key }] if key == "FIN-1"
+        ));
+        assert!(!menu.is_open_for_test());
     }
 }
 

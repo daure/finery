@@ -212,6 +212,17 @@ impl JiraSearchMenu {
     }
 
     fn open_highlighted_ticket(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        if let Some(triggered) = crate::components::ticket_open_command::handle(
+            &self.service,
+            event,
+            self.list.data_view().highlighted_id().as_deref(),
+            ctx,
+        ) {
+            if triggered {
+                self.events.push(JiraSearchMenuEvent::Closed);
+            }
+            return true;
+        }
         if !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Enter, KeyModifiers::NONE).matches(*key))
         {
             return false;

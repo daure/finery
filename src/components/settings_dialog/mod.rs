@@ -39,6 +39,7 @@ enum SettingChange {
     Wpm(String),
     MarkdownBlockPause(String),
     RecentTicketsLimit(String),
+    OpenCommand(String),
 }
 
 pub(crate) struct SettingsDialog {
@@ -68,6 +69,7 @@ impl SettingsDialog {
         let wpm_changes = Rc::clone(&changes);
         let delay_changes = Rc::clone(&changes);
         let recent_tickets_limit_changes = Rc::clone(&changes);
+        let open_command_changes = Rc::clone(&changes);
         let root = Flex::column()
             .child(
                 "jira-base-url",
@@ -80,6 +82,24 @@ impl SettingsDialog {
                         url_changes
                             .borrow_mut()
                             .push(SettingChange::JiraBaseUrl(value));
+                    }),
+                FlexItem::fixed(3),
+            )
+            .child(
+                "open-command",
+                TextInput::new()
+                    .value(values.open_command.clone())
+                    .panel(format!(
+                        "Open command ({})",
+                        values.open_command_key.label()
+                    ))
+                    .placeholder(
+                        "Empty: do nothing; use \"$FINERY_TICKET_KEY\" / \"$FINERY_TICKET_URL\"",
+                    )
+                    .on_edit_end(move |value| {
+                        open_command_changes
+                            .borrow_mut()
+                            .push(SettingChange::OpenCommand(value));
                     }),
                 FlexItem::fixed(3),
             )
@@ -297,6 +317,17 @@ impl SettingsDialog {
         let mut changed = false;
         for change in self.changes.borrow_mut().drain(..) {
             match change {
+                SettingChange::OpenCommand(value) => {
+                    if value.contains('\0') {
+                        ctx.notify(tuicore::Notification::warning(
+                            "Invalid open command",
+                            "The command must not contain NUL characters.",
+                        ));
+                        continue;
+                    }
+                    settings.open_command = value;
+                    changed = true;
+                }
                 SettingChange::JiraBaseUrl(value) => {
                     let value = value.trim().trim_end_matches('/').to_owned();
                     if settings.jira_base_url != value {

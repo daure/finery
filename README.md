@@ -30,6 +30,16 @@ Jira credentials and defaults are configured in the TUI settings and stored in F
 
 Jira description conversion support and its safety contract are documented in [docs/jira-description-support.md](docs/jira-description-support.md).
 
+## Ticket open command
+
+**Open command** in Settings stores a trusted host shell command. Press `Ctrl+;` on a ticket in Jira Search (`Ctrl+F`), Recent Tickets (`Ctrl+E`), Backlog, or change-set detail to run it in the background through `sh -c`. An empty or whitespace-only command does nothing. Saving the setting does not execute it.
+
+The command inherits Finery's working directory and receives `FINERY_TICKET_KEY` and `FINERY_TICKET_URL` as environment variables. Quote these variables, for example `my-ticket-tool "$FINERY_TICKET_KEY"`. The URL is empty when no Jira base URL is configured. Local drafts and non-ticket rows do nothing. Jira Search and Recent Tickets close when a command is triggered; a blank command leaves them open. An **Open command started** notification identifies the ticket after the shell launches. Commands run with your local user privileges; launch and nonzero-exit failures appear in Finery.
+
+The Backlog `.` menu includes **Open command** with its configured shortcut. Choose that action or press `Ctrl+;` from the menu to trigger it for the first selected ticket and close the menu.
+
+The database settings are `tickets.open_command` and `tickets.open_command_key` (default `ctrl+;`). This shortcut requires a terminal that reports Ctrl+; distinctly. In Backlog, Enter opens the highlighted ticket's Description/Comments view; during search or reordering, Enter confirms that operation. Ctrl+Enter opens the ticket in Jira.
+
 ## Composer archives
 
 In the Composer overview, highlight a change set and press `a` to choose **Done**, **Reject**, or **Cancel**. Done archives the set with every unsubmitted item marked **Concluded**; Reject archives it with every unsubmitted item marked **Cancelled**. Cancel dismisses the dialog. Submitted items retain their submission snapshots, and archiving only changes local Composer state.
