@@ -162,11 +162,6 @@ impl WideTextInput {
         }
     }
 
-    pub(super) fn with_prose(mut self, prose: impl Into<String>) -> Self {
-        self.prose = Some(prose.into());
-        self
-    }
-
     pub(super) fn current_value(&self) -> &str {
         self.input.current_value()
     }

@@ -25,10 +25,7 @@ fn archive_dialog(page: &mut ComposerPage) {
     assert_eq!(
         page.dispatch_event(
             &EventRoute::new(list.path),
-            &TuiEvent::Key(KeyEvent {
-                code: Key::Char('c'),
-                modifiers: KeyModifiers::CONTROL
-            }),
+            &TuiEvent::Key(KeyEvent::from(Key::Char('a'))),
             &mut ctx,
         ),
         EventOutcome::Handled

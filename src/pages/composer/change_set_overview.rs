@@ -75,7 +75,6 @@ impl ChangeSetOverview {
                     Rc::clone(&clone_requested),
                     Rc::clone(&clone_dismissed),
                     "",
-                    "",
                 ),
             )
             .active(false)
@@ -438,7 +437,6 @@ impl ChangeSetOverview {
             &self.keys,
             Rc::clone(&self.clone_requested),
             Rc::clone(&self.clone_dismissed),
-            &format!("{} · {}", source.id, source.name),
             &format!("Clone of {}", source.name),
         );
         self.clone_target = Some(source);
@@ -542,7 +540,6 @@ fn clone_dialog(
     keys: &ComposerKeyBindings,
     requested: Rc<RefCell<Option<String>>>,
     dismissed: Rc<RefCell<bool>>,
-    source: &str,
     prefilled: &str,
 ) -> ChangeSetDialog {
     let submit = Rc::clone(&requested);
@@ -564,17 +561,14 @@ fn clone_dialog(
         ])
         .close_on_unfocus_from_descendants(true)
         .on_close(move |_| *close.borrow_mut() = true)
-        .host(
-            WideTextInput::new(
-                TextInput::new()
-                    .style(InputChrome::plain())
-                    .value(prefilled)
-                    .placeholder("Change set title")
-                    .focused(true)
-                    .on_change(move |name| *value.borrow_mut() = name),
-            )
-            .with_prose(format!("Clone {source} with fresh Jira snapshots.")),
-        )
+        .host(WideTextInput::new(
+            TextInput::new()
+                .style(InputChrome::plain())
+                .value(prefilled)
+                .placeholder("Change set title")
+                .focused(true)
+                .on_change(move |name| *value.borrow_mut() = name),
+        ))
 }
 
 fn rename_dialog(

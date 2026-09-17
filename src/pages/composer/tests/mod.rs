@@ -3606,16 +3606,13 @@ fn deleted_ticket_hotkeys_and_escape_return_to_change_sets() {
 }
 
 #[test]
-fn change_set_delete_uses_ctrl_x() {
+fn change_set_delete_uses_x() {
     tuicore::init();
     let mut page = composer_page();
     let change_sets = target(&mut page, "data-view");
     page.dispatch_event(
         &EventRoute::new(change_sets.path),
-        &TuiEvent::Key(KeyEvent {
-            code: Key::Char('x'),
-            modifiers: KeyModifiers::CONTROL,
-        }),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('x'))),
         &mut EventCtx::default(),
     );
 
@@ -3636,10 +3633,7 @@ fn change_set_delete_dialog_dismisses_with_escape_and_ctrl_bracket() {
         let change_sets = target(&mut page, "data-view");
         page.dispatch_event(
             &EventRoute::new(change_sets.path),
-            &TuiEvent::Key(KeyEvent {
-                code: Key::Char('x'),
-                modifiers: KeyModifiers::CONTROL,
-            }),
+            &TuiEvent::Key(KeyEvent::from(Key::Char('x'))),
             &mut EventCtx::default(),
         );
         let dialog = focus(&mut page, "dialog");
@@ -3668,10 +3662,7 @@ fn change_set_delete_warns_before_discarding_submission_recovery_data() {
     let change_sets = target(&mut page, "data-view");
     page.dispatch_event(
         &EventRoute::new(change_sets.path),
-        &TuiEvent::Key(KeyEvent {
-            code: Key::Char('x'),
-            modifiers: KeyModifiers::CONTROL,
-        }),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('x'))),
         &mut EventCtx::default(),
     );
 

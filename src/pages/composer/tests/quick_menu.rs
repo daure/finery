@@ -48,7 +48,7 @@ fn show_archived_change_sets(page: &mut ComposerPage) {
 }
 
 #[test]
-fn dot_menu_matches_backlog_sizing_and_search_opens_archive_confirmation() {
+fn dot_menu_matches_backlog_sizing_and_archive_shortcut_opens_confirmation() {
     tuicore::init();
     let (mut page, service) = overview();
     open_menu(&mut page, TuiEvent::Key(KeyEvent::from(Key::Char('.'))));
@@ -69,11 +69,7 @@ fn dot_menu_matches_backlog_sizing_and_search_opens_archive_confirmation() {
     let popup = layout.overlays().last().unwrap();
     assert_eq!(popup.anchor.width, 54);
     assert!(popup.area.height <= 16);
-    for key in "archive".chars() {
-        popup_key(&mut page, KeyEvent::from(Key::Char(key)));
-    }
-    assert!(!render_text(&mut page).contains("Delete"));
-    popup_key(&mut page, KeyEvent::from(Key::Enter));
+    popup_key(&mut page, KeyEvent::from(Key::Char('a')));
     assert!(render_text(&mut page).contains("Complete change set?"));
     assert!(!service.change_set_for_tests("CS-1").unwrap().closed);
     popup_key(&mut page, KeyEvent::from(Key::Char('r')));
@@ -97,13 +93,7 @@ fn dot_menu_opens_the_prefilled_rename_dialog() {
     let menu = render_text(&mut page);
     assert!(menu.contains("Rename"));
     assert!(menu.contains(&ComposerKeyBindings::default().rename_change_set.label()));
-    popup_key(
-        &mut page,
-        KeyEvent {
-            code: Key::Char('r'),
-            modifiers: KeyModifiers::CONTROL,
-        },
-    );
+    popup_key(&mut page, KeyEvent::from(Key::Char('r')));
     let dialog = render_text(&mut page);
     assert!(dialog.contains("Rename change set"));
     assert!(dialog.contains(&name));
@@ -116,10 +106,7 @@ fn overview_shortcuts_open_rename_and_clone_dialogs() {
     let list = focus(&mut page, "data-view");
     page.dispatch_event(
         &EventRoute::new(list.path),
-        &TuiEvent::Key(KeyEvent {
-            code: Key::Char('r'),
-            modifiers: KeyModifiers::CONTROL,
-        }),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('r'))),
         &mut EventCtx::default(),
     );
     assert!(render_text(&mut page).contains("Rename change set"));
@@ -135,10 +122,7 @@ fn overview_shortcuts_open_rename_and_clone_dialogs() {
     let list = focus(&mut page, "data-view");
     page.dispatch_event(
         &EventRoute::new(list.path),
-        &TuiEvent::Key(KeyEvent {
-            code: Key::Char('o'),
-            modifiers: KeyModifiers::CONTROL,
-        }),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('c'))),
         &mut EventCtx::default(),
     );
     assert!(render_text(&mut page).contains("Clone change set"));
@@ -153,13 +137,7 @@ fn delete_menu_action_uses_confirmation_and_escape_dismisses_the_menu() {
     assert!(!render_text(&mut page).contains("Archive"));
     assert!(service.change_set_for_tests("CS-1").is_some());
     open_menu(&mut page, TuiEvent::Key(KeyEvent::from(Key::Char('.'))));
-    popup_key(
-        &mut page,
-        KeyEvent {
-            code: Key::Char('x'),
-            modifiers: KeyModifiers::CONTROL,
-        },
-    );
+    popup_key(&mut page, KeyEvent::from(Key::Char('x')));
     assert!(render_text(&mut page).contains("Delete change set?"));
     assert!(service.change_set_for_tests("CS-1").is_some());
     popup_key(&mut page, KeyEvent::from(Key::Char('c')));
@@ -237,24 +215,10 @@ fn archived_change_set_menu_opens_a_prefilled_clone_dialog() {
     assert!(menu.contains(&ComposerKeyBindings::default().clone_change_set.label()));
     assert!(menu.contains("Rename"));
     assert!(menu.contains("Delete"));
-    popup_key(
-        &mut page,
-        KeyEvent {
-            code: Key::Char('o'),
-            modifiers: KeyModifiers::CONTROL,
-        },
-    );
+    popup_key(&mut page, KeyEvent::from(Key::Char('c')));
 
     let dialog = render_text(&mut page);
     assert!(dialog.contains("Clone change set"));
-    for text in [
-        "Clone CS-1",
-        "Checkout reliability",
-        "fresh",
-        "Jira snapshots.",
-    ] {
-        assert!(dialog.contains(text), "{dialog}");
-    }
     assert!(dialog.contains("Clone of Checkout reliability"));
 
     let title = last_target(&mut page, "input");
