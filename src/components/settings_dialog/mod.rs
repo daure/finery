@@ -9,7 +9,8 @@ use ratatui::{Frame, layout::Rect};
 use tuicore::{
     AnimationSettings, EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId,
     FocusTarget, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
-    ListControl, PasswordInput, RenderCtx, TextInput, TickResult, Toggle, TuiEvent, TuiNode,
+    ListControl, PasswordInput, RenderCtx, ScrollContainer, ScrollbarConfig, TextInput, TickResult,
+    Toggle, TuiEvent, TuiNode,
 };
 
 use crate::{
@@ -43,7 +44,7 @@ enum SettingChange {
 }
 
 pub(crate) struct SettingsDialog {
-    root: Flex<()>,
+    root: ScrollContainer<Flex<()>>,
     changes: Rc<RefCell<Vec<SettingChange>>>,
     settings: Arc<RwLock<AppSettings>>,
     service: AppService,
@@ -301,7 +302,9 @@ impl SettingsDialog {
                 FlexItem::fixed(3),
             );
         Self {
-            root,
+            root: ScrollContainer::vertical(root)
+                .scrollbars(ScrollbarConfig::default())
+                .focus_reveal(true),
             changes,
             settings,
             service,
@@ -691,3 +694,7 @@ impl TuiNode for SettingsDialog {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/scrolling.rs"]
+mod scrolling_tests;
