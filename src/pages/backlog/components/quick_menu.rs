@@ -399,6 +399,8 @@ impl BacklogQuickMenu {
             return false;
         }
         self.showing_main_actions = true;
+        // Clear retained row identity so each main menu opens at its first action.
+        self.dropdown.set_rows([]);
         self.dropdown.set_rows(
             BacklogQuickAction::main_actions(&status, &assignee, &epic, &release, &story_points)
                 .into_iter()
