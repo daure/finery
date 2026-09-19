@@ -6,3 +6,4 @@ major = ["run", "--quiet", "--manifest-path", "tools/release-command/Cargo.toml"
 
 [env]
 RUST_BACKTRACE = "full"
+RUST_MIN_STACK = "8388608"
