@@ -238,7 +238,7 @@ fn backlog_header_orders_toolbar_focus_and_shows_desktop_labels() {
     tuicore::init();
     let (sender, _) = mpsc::channel();
     let mut view = backlog_tree(&snapshot(), sender, Default::default());
-    let area = Rect::new(0, 0, 100, 16);
+    let area = Rect::new(0, 0, 180, 16);
     let mut layout = LayoutCtx::new();
     view.layout(area, &mut layout);
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
@@ -253,10 +253,16 @@ fn backlog_header_orders_toolbar_focus_and_shows_desktop_labels() {
 
     assert!(cell_position(&header, "Web") < cell_position(&header, "Group by"));
     assert!(cell_position(&header, "Group by") < cell_position(&header, "Estimated"));
+    assert!(header.contains("󰀄 User"));
+    assert!(header.contains("󰡯 Type"));
+    assert!(header.contains(" Status"));
     assert!(cell_position(&header, "Estimated") < cell_position(&header, "User"));
     assert!(cell_position(&header, "User") < cell_position(&header, "Type"));
     assert!(cell_position(&header, "Type") < cell_position(&header, "Status"));
-    assert!(cell_position(&header, "Status") < cell_position(&header, "Velocity"));
+    assert!(cell_position(&header, "Status") < cell_position(&header, " Epic"));
+    assert!(cell_position(&header, " Epic") < cell_position(&header, " Label"));
+    assert!(cell_position(&header, " Label") < cell_position(&header, " Release"));
+    assert!(cell_position(&header, " Release") < cell_position(&header, "Velocity"));
     assert!(cell_position(&header, "Velocity") < cell_position(&header, "Refresh"));
 
     let focus_position = |path| {
@@ -295,6 +301,18 @@ fn backlog_header_orders_toolbar_focus_and_shows_desktop_labels() {
     );
     assert!(
         focus_position(TreePath::from_keys([ChildKey::new("statuses")]))
+            < focus_position(TreePath::from_keys([ChildKey::new("epics")]))
+    );
+    assert!(
+        focus_position(TreePath::from_keys([ChildKey::new("epics")]))
+            < focus_position(TreePath::from_keys([ChildKey::new("labels")]))
+    );
+    assert!(
+        focus_position(TreePath::from_keys([ChildKey::new("labels")]))
+            < focus_position(TreePath::from_keys([ChildKey::new("releases")]))
+    );
+    assert!(
+        focus_position(TreePath::from_keys([ChildKey::new("releases")]))
             < focus_position(TreePath::from_keys([ChildKey::new("velocity")]))
     );
     assert!(
@@ -346,6 +364,9 @@ fn backlog_header_uses_two_rows_for_compact_widths() {
     assert!(lines[1].contains("󰀄"));
     assert!(lines[1].contains("󰡯"));
     assert!(lines[1].contains(""));
+    assert!(lines[1].contains(""));
+    assert!(lines[1].contains(""));
+    assert!(lines[1].contains(""));
     assert!(!lines[1].contains("User"));
     assert!(!lines[1].contains("Type"));
     assert!(lines[1].contains("󰑭"));
@@ -362,6 +383,9 @@ fn backlog_header_uses_two_rows_for_compact_widths() {
     assert!(cell_position(&lines[1], "󰑭") < cell_position(&lines[1], "󰀄"));
     assert!(cell_position(&lines[1], "󰀄") < cell_position(&lines[1], "󰡯"));
     assert!(cell_position(&lines[1], "󰡯") < cell_position(&lines[1], ""));
+    assert!(cell_position(&lines[1], "") < cell_position(&lines[1], ""));
+    assert!(cell_position(&lines[1], "") < cell_position(&lines[1], ""));
+    assert!(cell_position(&lines[1], "") < cell_position(&lines[1], ""));
     let focus_position = |path| {
         layout
             .focus_targets()
@@ -403,6 +427,18 @@ fn backlog_header_uses_two_rows_for_compact_widths() {
     assert!(
         focus_position(TreePath::from_keys([ChildKey::new("issue-types")]))
             < focus_position(TreePath::from_keys([ChildKey::new("statuses")]))
+    );
+    assert!(
+        focus_position(TreePath::from_keys([ChildKey::new("statuses")]))
+            < focus_position(TreePath::from_keys([ChildKey::new("epics")]))
+    );
+    assert!(
+        focus_position(TreePath::from_keys([ChildKey::new("epics")]))
+            < focus_position(TreePath::from_keys([ChildKey::new("labels")]))
+    );
+    assert!(
+        focus_position(TreePath::from_keys([ChildKey::new("labels")]))
+            < focus_position(TreePath::from_keys([ChildKey::new("releases")]))
     );
 }
 
@@ -646,6 +682,56 @@ fn disabling_estimated_only_shows_unestimated_stories_and_tasks() {
     assert!(!text.contains("Unpointed subtask"));
     assert!(!text.contains("Pointed story"));
     assert!(!text.contains("┃"));
+}
+
+#[test]
+fn board_epic_label_and_release_filters_match_selected_values() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    snapshot.sprints.clear();
+    snapshot.work_items = vec![
+        WorkItem {
+            epic_name: Some("Delivery".into()),
+            labels: vec!["ready".into()],
+            fix_versions: vec!["v1.0".into()],
+            ..work_item("FIN-8", "Delivery ticket")
+        },
+        WorkItem {
+            epic_name: Some("Platform".into()),
+            labels: vec!["api".into()],
+            fix_versions: vec!["v2.0".into()],
+            ..work_item("FIN-9", "Platform ticket")
+        },
+    ];
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    let area = Rect::new(0, 0, 100, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+
+    for (selected, apply_filter) in [
+        (
+            "Delivery",
+            BacklogTree::set_epics_filter as fn(&mut BacklogTree, Vec<String>),
+        ),
+        ("ready", BacklogTree::set_labels_filter),
+        ("v1.0", BacklogTree::set_releases_filter),
+    ] {
+        apply_filter(&mut tree, vec![selected.into()]);
+        terminal
+            .draw(|frame| {
+                let mut render = RenderCtx::new();
+                tree.render(frame, area, &mut render);
+                render.flush(frame);
+            })
+            .unwrap();
+        let text = rendered_lines(&terminal, area).concat();
+        assert!(text.contains("Delivery ticket"));
+        assert!(!text.contains("Platform ticket"));
+        tree.set_epics_filter(Vec::new());
+        tree.set_labels_filter(Vec::new());
+        tree.set_releases_filter(Vec::new());
+    }
 }
 
 #[test]
@@ -1021,7 +1107,7 @@ fn backlog_velocity_is_focusable_with_shift_v() {
 }
 
 #[test]
-fn backlog_estimated_toggle_is_focusable_with_shift_e() {
+fn backlog_estimated_toggle_is_focusable_with_shift_d() {
     tuicore::init();
     let (sender, _) = mpsc::channel();
     let mut view = backlog_tree(&snapshot(), sender, Default::default());
@@ -1035,7 +1121,7 @@ fn backlog_estimated_toggle_is_focusable_with_shift_e() {
         .find(|target| target.path == TreePath::from_keys([ChildKey::new("estimated")]))
         .unwrap();
 
-    assert_eq!(estimated.hotkey_sequences, ["shift+e"]);
+    assert_eq!(estimated.hotkey_sequences, ["shift+d"]);
 }
 
 #[test]
@@ -1054,6 +1140,29 @@ fn backlog_status_filter_is_focusable_with_shift_s() {
         .unwrap();
 
     assert_eq!(statuses.hotkey_sequences, ["shift+s"]);
+}
+
+#[test]
+fn backlog_epic_label_and_release_filters_have_unique_hotkeys() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot(), sender, Default::default());
+    let area = Rect::new(0, 0, 100, 16);
+    let mut layout = LayoutCtx::new();
+    view.layout(area, &mut layout);
+
+    for (key, sequence) in [
+        ("epics", "shift+e"),
+        ("labels", "shift+l"),
+        ("releases", "shift+a"),
+    ] {
+        let filter = layout
+            .focus_targets()
+            .iter()
+            .find(|target| target.path == TreePath::from_keys([ChildKey::new(key)]))
+            .unwrap();
+        assert_eq!(filter.hotkey_sequences, [sequence]);
+    }
 }
 
 #[test]
@@ -1078,7 +1187,7 @@ fn estimated_toggle_filters_the_loaded_backlog_without_reloading() {
             ChildKey::new("estimated"),
         ])),
         &TuiEvent::Key(KeyEvent {
-            code: Key::Char('e'),
+            code: Key::Char('d'),
             modifiers: KeyModifiers::SHIFT,
         }),
         &mut EventCtx::new(AnimationSettings::default()),
@@ -1278,6 +1387,9 @@ fn home_reset_restores_the_default_backlog_view() {
     tree.set_estimated(false);
     tree.set_issue_types_filter(vec!["Task".into()]);
     tree.set_users_filter(vec!["Maya".into()]);
+    tree.set_epics_filter(vec!["Delivery".into()]);
+    tree.set_labels_filter(vec!["ready".into()]);
+    tree.set_releases_filter(vec!["v1.0".into()]);
     tree.group_by_release_for_test();
     tree.highlight("ticket:FIN-8");
 

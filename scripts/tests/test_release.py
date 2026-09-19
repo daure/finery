@@ -127,10 +127,19 @@ class ReleaseGitTests(unittest.TestCase):
                         ),
                         ("cargo", "update", "--workspace"),
                         ("cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings"),
-                        ("cargo", "test", "--locked"),
+                        ("cargo", "test", "--locked", "--", "--test-threads=2"),
                         ("cargo", "update", "--workspace"),
                     ],
                 )
+                preflight_cargo_calls = [call for call in calls if call[0][0] == "cargo"][2:5]
+                expected_environment = {
+                    "CARGO_TARGET_DIR": str(repo / "target/release-check"),
+                    "CARGO_BUILD_JOBS": "2",
+                    "CARGO_PROFILE_DEV_DEBUG": "0",
+                    "CARGO_PROFILE_TEST_DEBUG": "0",
+                    "CARGO_INCREMENTAL": "0",
+                }
+                self.assertEqual([kwargs["env"] for _, kwargs in preflight_cargo_calls], [expected_environment] * 3)
                 self.assertIn(
                     (("python3", "-m", "unittest", "discover", "-s", "scripts/tests"), {}),
                     calls,

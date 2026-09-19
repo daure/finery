@@ -12,6 +12,7 @@ use crate::{
     components::{
         self,
         jira_search::{JiraSearchMenu, JiraSearchMenuEvent},
+        open_command_menu::OpenCommandMenu,
         recent_tickets::{RecentTicketsMenu, RecentTicketsMenuEvent},
         settings_dialog::SettingsDialog,
         work_item_rows::TICKET_MENU_WIDTH,
@@ -25,6 +26,7 @@ type SettingsHost = DialogHost<SettingsDialog, ()>;
 type SettingsLayer = DialogLayer<Flex<()>, SettingsHost>;
 type RecentTicketsLayer = DialogLayer<SettingsLayer, RecentTicketsMenu>;
 type AppView = DialogLayer<RecentTicketsLayer, JiraSearchMenu>;
+type OpenCommandLayer = DialogLayer<AppView, OpenCommandMenu>;
 
 struct AppPages {
     tabs: Tabs<()>,
@@ -127,7 +129,7 @@ impl TuiNode for AppPages {
 }
 
 pub(crate) struct App {
-    view: AppView,
+    view: OpenCommandLayer,
     selected_page: Rc<Cell<Option<usize>>>,
     reset_composer_focus: Rc<Cell<bool>>,
     open_settings: Rc<Cell<bool>>,
@@ -187,10 +189,16 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
             .fit_content_max(TICKET_MENU_WIDTH, u16::MAX)
             .base_overlays_visible(true)
             .backdrop(DialogBackdrop::dim().amount(0.55));
-    let view = DialogLayer::new(recent_tickets_view, JiraSearchMenu::new(service.clone()))
+    let app_view = DialogLayer::new(recent_tickets_view, JiraSearchMenu::new(service.clone()))
         .active(false)
         .fit_content()
         .fit_content_max(TICKET_MENU_WIDTH, u16::MAX)
+        .base_overlays_visible(true)
+        .backdrop(DialogBackdrop::dim().amount(0.55));
+    let view = DialogLayer::new(app_view, OpenCommandMenu::new(service.clone()))
+        .active(false)
+        .fit_content()
+        .fit_content_max(69, 18)
         .base_overlays_visible(true)
         .backdrop(DialogBackdrop::dim().amount(0.55));
     App {
@@ -216,32 +224,50 @@ impl App {
             self.view
                 .base_mut()
                 .base_mut()
+                .base_mut()
                 .set_active_with_context(true, ctx);
         }
         if self.close_dialog.replace(false) {
             self.view
                 .base_mut()
                 .base_mut()
+                .base_mut()
                 .set_active_with_context(false, ctx);
         }
-        for event in self.view.base_mut().layer_mut().take_events() {
+        if self.view.layer_mut().take_close_requested() {
+            self.view.set_active_with_context(false, ctx);
+        }
+        if !self.view.is_active()
+            && let Some(request) = self.service.take_open_command_request()
+        {
+            self.view.set_active_with_context(true, ctx);
+            self.view.layer_mut().open(request, ctx);
+        }
+        for event in self.view.base_mut().base_mut().layer_mut().take_events() {
             match event {
                 RecentTicketsMenuEvent::OpenTicket(key) => {
                     self.service.open_jira_issue(&key);
-                    self.view.base_mut().set_active_with_context(false, ctx);
+                    self.view
+                        .base_mut()
+                        .base_mut()
+                        .set_active_with_context(false, ctx);
                 }
-                RecentTicketsMenuEvent::Closed => {
-                    self.view.base_mut().set_active_with_context(false, ctx)
-                }
+                RecentTicketsMenuEvent::Closed => self
+                    .view
+                    .base_mut()
+                    .base_mut()
+                    .set_active_with_context(false, ctx),
             }
         }
-        for event in self.view.layer_mut().take_events() {
+        for event in self.view.base_mut().layer_mut().take_events() {
             match event {
                 JiraSearchMenuEvent::OpenTicket(key) => {
                     self.service.open_jira_issue(&key);
-                    self.view.set_active_with_context(false, ctx);
+                    self.view.base_mut().set_active_with_context(false, ctx);
                 }
-                JiraSearchMenuEvent::Closed => self.view.set_active_with_context(false, ctx),
+                JiraSearchMenuEvent::Closed => {
+                    self.view.base_mut().set_active_with_context(false, ctx)
+                }
             }
         }
         if self.drain_service_notifications() {
@@ -253,12 +279,16 @@ impl App {
     fn open_recent_tickets(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
         if self.view.is_active()
             || self.view.base().is_active()
+            || self.view.base().base().is_active()
             || !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Char('e'), KeyModifiers::CONTROL).matches(*key))
         {
             return false;
         }
-        self.view.base_mut().set_active_with_context(true, ctx);
-        self.view.base_mut().layer_mut().open(ctx);
+        self.view
+            .base_mut()
+            .base_mut()
+            .set_active_with_context(true, ctx);
+        self.view.base_mut().base_mut().layer_mut().open(ctx);
         ctx.stop_propagation();
         true
     }
@@ -266,12 +296,13 @@ impl App {
     fn open_jira_search(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
         if self.view.is_active()
             || self.view.base().is_active()
+            || self.view.base().base().is_active()
             || !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Char('f'), KeyModifiers::CONTROL).matches(*key))
         {
             return false;
         }
-        self.view.set_active_with_context(true, ctx);
-        self.view.layer_mut().open(ctx);
+        self.view.base_mut().set_active_with_context(true, ctx);
+        self.view.base_mut().layer_mut().open(ctx);
         ctx.stop_propagation();
         true
     }
@@ -297,7 +328,13 @@ impl App {
             .base_mut()
             .base_mut()
             .set_active_with_context(false, ctx);
+        self.view
+            .base_mut()
+            .base_mut()
+            .base_mut()
+            .set_active_with_context(false, ctx);
         let composer_route = EventRoute::new(TreePath::from_keys([
+            ChildKey::first(),
             ChildKey::first(),
             ChildKey::first(),
             ChildKey::first(),
@@ -308,6 +345,7 @@ impl App {
         self.reset_composer_focus.set(true);
         self.selected_page.set(Some(0));
         let backlog_route = EventRoute::new(TreePath::from_keys([
+            ChildKey::first(),
             ChildKey::first(),
             ChildKey::first(),
             ChildKey::first(),

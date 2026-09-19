@@ -41,6 +41,7 @@ enum SettingChange {
     MarkdownBlockPause(String),
     RecentTicketsLimit(String),
     OpenCommand(String),
+    OpenCommandEnum(Vec<String>),
 }
 
 pub(crate) struct SettingsDialog {
@@ -103,6 +104,11 @@ impl SettingsDialog {
                             .push(SettingChange::OpenCommand(value));
                     }),
                 FlexItem::fixed(3),
+            )
+            .child(
+                "open-command-enum",
+                OpenCommandEnumList::new(values.open_command_enum.clone(), Rc::clone(&changes)),
+                FlexItem::fixed(7),
             )
             .child(
                 "jira-email",
@@ -331,6 +337,17 @@ impl SettingsDialog {
                     settings.open_command = value;
                     changed = true;
                 }
+                SettingChange::OpenCommandEnum(values) => {
+                    if values.iter().any(|value| value.contains('\0')) {
+                        ctx.notify(tuicore::Notification::warning(
+                            "Invalid open command value",
+                            "Command values must not contain NUL characters.",
+                        ));
+                        continue;
+                    }
+                    settings.open_command_enum = unique_nonempty_strings(values);
+                    changed = true;
+                }
                 SettingChange::JiraBaseUrl(value) => {
                     let value = value.trim().trim_end_matches('/').to_owned();
                     if settings.jira_base_url != value {
@@ -494,6 +511,123 @@ struct SprintExclusionList {
     changes: Rc<RefCell<Vec<SettingChange>>>,
 }
 
+#[derive(Clone)]
+struct OpenCommandEnumRow {
+    id: u64,
+    value: String,
+}
+
+struct OpenCommandEnumList {
+    list: ListControl<OpenCommandEnumRow, u64>,
+    changes: Rc<RefCell<Vec<SettingChange>>>,
+}
+
+impl OpenCommandEnumList {
+    fn new(values: Vec<String>, changes: Rc<RefCell<Vec<SettingChange>>>) -> Self {
+        let rows = values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| OpenCommandEnumRow {
+                id: u64::try_from(index).unwrap_or(u64::MAX),
+                value,
+            })
+            .collect::<Vec<_>>();
+        let mut next_id = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+        let list = ListControl::list(
+            rows,
+            |row: &OpenCommandEnumRow| row.id,
+            |row: &OpenCommandEnumRow| row.value.clone(),
+            move |value, _| {
+                let row = OpenCommandEnumRow { id: next_id, value };
+                next_id = next_id.saturating_add(1);
+                row
+            },
+        )
+        .title("Open command enum")
+        .empty_message("No command values configured.")
+        .max_rows(100)
+        .editable(
+            |row| vec![row.value.clone()],
+            |row, values| row.value.clone_from(&values[0]),
+        );
+        Self { list, changes }
+    }
+
+    fn sync(&mut self) {
+        if self.list.take_events().is_empty() {
+            return;
+        }
+        self.changes
+            .borrow_mut()
+            .push(SettingChange::OpenCommandEnum(
+                self.list
+                    .items()
+                    .iter()
+                    .map(|row| row.value.clone())
+                    .collect(),
+            ));
+    }
+}
+
+impl TuiNode for OpenCommandEnumList {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        self.list.measure(proposal)
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.list.layout(area, ctx)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        self.list.render(frame, area, ctx);
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        let outcome = self.list.event(event, ctx);
+        self.sync();
+        outcome
+    }
+
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> EventOutcome {
+        let outcome = self.list.dispatch_event(route, event, ctx);
+        self.sync();
+        outcome
+    }
+
+    fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.list.dispatch_focus(target, focused, ctx);
+    }
+
+    fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.list.focus(target, focused, ctx);
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.list.tick(dt, settings)
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.list.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.list.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.list.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.list.destroy(ctx);
+    }
+}
+
 impl SprintExclusionList {
     fn new(fragments: Vec<String>, changes: Rc<RefCell<Vec<SettingChange>>>) -> Self {
         let rows = fragments
@@ -619,6 +753,16 @@ fn sprint_name_fragments(value: &str) -> Vec<String> {
             }
             fragments
         })
+}
+
+fn unique_nonempty_strings(values: Vec<String>) -> Vec<String> {
+    values.into_iter().fold(Vec::new(), |mut values, value| {
+        let value = value.trim().to_owned();
+        if !value.is_empty() && !values.contains(&value) {
+            values.push(value);
+        }
+        values
+    })
 }
 
 fn parse_positive_number(value: &str) -> Option<f64> {

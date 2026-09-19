@@ -23,7 +23,7 @@ impl OpenCommandProbe {
         let quoted_path = path.to_string_lossy().replace('\'', "'\\''");
         let mut settings = service.settings().read().unwrap().clone();
         settings.open_command = format!(
-            "printf '%s\\n%s' \"$FINERY_TICKET_KEY\" \"$FINERY_TICKET_URL\" > '{quoted_path}'"
+            "printf '%s\\n%s\\n%s' \"$FINERY_TICKET_KEY\" \"$FINERY_TICKET_URL\" \"$FINERY_CMD_VALUE\" > '{quoted_path}'"
         );
         settings.jira_base_url = "https://jira.example".into();
         service.save_settings(settings);
@@ -31,7 +31,13 @@ impl OpenCommandProbe {
     }
 
     pub(crate) fn assert_opened(&self, key: &str) {
-        self.assert_output(&format!("{key}\nhttps://jira.example/browse/{key}"));
+        self.assert_opened_with_value(key, "");
+    }
+
+    pub(crate) fn assert_opened_with_value(&self, key: &str, value: &str) {
+        self.assert_output(&format!(
+            "{key}\nhttps://jira.example/browse/{key}\n{value}"
+        ));
     }
 
     fn assert_output(&self, expected: &str) {
@@ -127,4 +133,21 @@ fn empty_commands_and_local_drafts_are_noops_and_command_failures_are_visible() 
         );
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn command_values_request_a_menu_instead_of_running_until_selected() {
+    let service = AppService::for_tests();
+    let probe = OpenCommandProbe::new(&service);
+    service.settings().write().unwrap().open_command_enum = vec!["editor".into()];
+
+    assert!(service.open_command("FIN-42"));
+    probe.assert_not_opened();
+    assert_eq!(
+        service.take_open_command_request(),
+        Some(super::OpenCommandRequest {
+            key: "FIN-42".into(),
+            values: vec!["editor".into()],
+        })
+    );
 }

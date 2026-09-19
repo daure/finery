@@ -107,6 +107,28 @@ fn excluded_sprint_name_fragments_apply_to_live_settings() {
 }
 
 #[test]
+fn open_command_enum_changes_apply_to_live_settings() {
+    let service = AppService::for_tests();
+    let settings = service.settings();
+    let dialog = SettingsDialog::new(settings.clone(), service);
+    dialog
+        .changes
+        .borrow_mut()
+        .push(SettingChange::OpenCommandEnum(vec![
+            " browser ".into(),
+            "editor".into(),
+            "browser".into(),
+        ]));
+
+    dialog.apply_changes(&mut EventCtx::default());
+
+    assert_eq!(
+        settings.read().unwrap().open_command_enum,
+        ["browser", "editor"]
+    );
+}
+
+#[test]
 fn open_command_is_saved_on_edit_and_can_be_cleared() {
     let service = AppService::for_tests();
     let settings = service.settings();

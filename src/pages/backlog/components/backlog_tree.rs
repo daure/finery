@@ -80,6 +80,9 @@ pub(in crate::pages::backlog) enum BacklogSectionEvent {
     IssueTypesChanged(Vec<String>),
     UsersChanged(Vec<String>),
     StatusesChanged(Vec<String>),
+    EpicsChanged(Vec<String>),
+    LabelsChanged(Vec<String>),
+    ReleasesChanged(Vec<String>),
     OpenVelocity,
     OpenReports,
     OpenTimeline,
@@ -343,6 +346,9 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
     let issue_type_events = events.clone();
     let user_events = events.clone();
     let status_events = events.clone();
+    let epic_events = events.clone();
+    let label_events = events.clone();
+    let release_events = events.clone();
     let issue_type_labels = Rc::new(RefCell::new(issue_type_labels(&issue_types)));
     let selected_issue_type_labels = Rc::clone(&issue_type_labels);
     BacklogTree {
@@ -359,7 +365,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
             }),
         estimated: Toggle::new("󰑭 Estimated")
             .checked(true)
-            .hotkey("shift+e")
+            .hotkey("shift+d")
             .preserve_focus_on_hotkey(true)
             .on_change(move |estimated| {
                 let _ = estimated_events.send(BacklogSectionEvent::EstimatedChanged(estimated));
@@ -372,7 +378,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         .label_position(DropdownLabelPosition::Inline)
         .alt_style(true)
         .variant(DropdownVariant::Filled)
-        .placeholder("Type")
+        .placeholder("󰡯 Type")
         .field_padding_left(1)
         .hotkey("shift+t")
         .max_popup_width(24)
@@ -391,7 +397,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         .label_position(DropdownLabelPosition::Inline)
         .alt_style(true)
         .variant(DropdownVariant::Filled)
-        .placeholder("User")
+        .placeholder("󰀄 User")
         .field_padding_left(1)
         .selected_label_by(|user| format!("@{}", initials(user)))
         .show_multi_labels(true)
@@ -408,12 +414,57 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         .label_position(DropdownLabelPosition::Inline)
         .alt_style(true)
         .variant(DropdownVariant::Filled)
-        .placeholder("Status")
+        .placeholder(" Status")
         .field_padding_left(1)
         .hotkey("shift+s")
         .max_popup_width(24)
         .on_select(move |selected| {
             let _ = status_events.send(BacklogSectionEvent::StatusesChanged(selected));
+        }),
+        epics: Dropdown::multi(
+            selectable_epics(snapshot),
+            |epic: &String| epic.clone(),
+            |epic| epic.clone(),
+        )
+        .label_position(DropdownLabelPosition::Inline)
+        .alt_style(true)
+        .variant(DropdownVariant::Filled)
+        .placeholder(" Epic")
+        .field_padding_left(1)
+        .hotkey("shift+e")
+        .max_popup_width(24)
+        .on_select(move |selected| {
+            let _ = epic_events.send(BacklogSectionEvent::EpicsChanged(selected));
+        }),
+        labels: Dropdown::multi(
+            selectable_labels(snapshot),
+            |label: &String| label.clone(),
+            |label| label.clone(),
+        )
+        .label_position(DropdownLabelPosition::Inline)
+        .alt_style(true)
+        .variant(DropdownVariant::Filled)
+        .placeholder(" Label")
+        .field_padding_left(1)
+        .hotkey("shift+l")
+        .max_popup_width(24)
+        .on_select(move |selected| {
+            let _ = label_events.send(BacklogSectionEvent::LabelsChanged(selected));
+        }),
+        releases: Dropdown::multi(
+            selectable_releases(snapshot),
+            |release: &String| release.clone(),
+            |release| release.clone(),
+        )
+        .label_position(DropdownLabelPosition::Inline)
+        .alt_style(true)
+        .variant(DropdownVariant::Filled)
+        .placeholder(" Release")
+        .field_padding_left(1)
+        .hotkey("shift+a")
+        .max_popup_width(24)
+        .on_select(move |selected| {
+            let _ = release_events.send(BacklogSectionEvent::ReleasesChanged(selected));
         }),
         group_by: MenuButton::new(
             grouping_label(None, false),
@@ -443,6 +494,9 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         issue_types_area: ratatui::layout::Rect::default(),
         users_area: ratatui::layout::Rect::default(),
         statuses_area: ratatui::layout::Rect::default(),
+        epics_area: ratatui::layout::Rect::default(),
+        labels_area: ratatui::layout::Rect::default(),
+        releases_area: ratatui::layout::Rect::default(),
         group_by_area: ratatui::layout::Rect::default(),
         web_area: ratatui::layout::Rect::default(),
         control_area: ratatui::layout::Rect::default(),
@@ -472,6 +526,9 @@ pub(in crate::pages::backlog) struct BacklogTree {
     issue_types: Dropdown<JiraOption, String>,
     users: Dropdown<String, String>,
     statuses: Dropdown<String, String>,
+    epics: Dropdown<String, String>,
+    labels: Dropdown<String, String>,
+    releases: Dropdown<String, String>,
     group_by: MenuButton<GroupByMenuItem>,
     web: MenuButton<WebMenuItem>,
     loading: bool,
@@ -481,6 +538,9 @@ pub(in crate::pages::backlog) struct BacklogTree {
     issue_types_area: ratatui::layout::Rect,
     users_area: ratatui::layout::Rect,
     statuses_area: ratatui::layout::Rect,
+    epics_area: ratatui::layout::Rect,
+    labels_area: ratatui::layout::Rect,
+    releases_area: ratatui::layout::Rect,
     group_by_area: ratatui::layout::Rect,
     web_area: ratatui::layout::Rect,
     control_area: ratatui::layout::Rect,
@@ -507,6 +567,9 @@ impl BacklogTree {
         self.set_issue_types(issue_types_in_snapshot(snapshot));
         self.users.set_rows(selectable_users(snapshot));
         self.statuses.set_rows(selectable_statuses(snapshot));
+        self.epics.set_rows(selectable_epics(snapshot));
+        self.labels.set_rows(selectable_labels(snapshot));
+        self.releases.set_rows(selectable_releases(snapshot));
         let highlighted = self.control.data_view().highlighted_id();
         let expanded = self.control.data_view().tree_expansion_snapshot();
         let highlighted_parent = highlighted.as_ref().and_then(|id| {
@@ -535,7 +598,12 @@ impl BacklogTree {
             .into_iter()
             .filter(|id| self.is_expandable(id))
             .collect::<HashSet<_>>();
-        if !self.filters.issue_types.is_empty() || !self.filters.statuses.is_empty() {
+        if !self.filters.issue_types.is_empty()
+            || !self.filters.statuses.is_empty()
+            || !self.filters.epics.is_empty()
+            || !self.filters.labels.is_empty()
+            || !self.filters.releases.is_empty()
+        {
             expanded.extend(self.control.items().iter().filter_map(|row| {
                 row.parent_id
                     .as_deref()
@@ -603,6 +671,27 @@ impl BacklogTree {
         self.set_snapshot(&snapshot);
     }
 
+    pub(in crate::pages::backlog) fn set_epics_filter(&mut self, epics: Vec<String>) {
+        self.filters.epics = epics;
+        self.runway_markers_visible.set(self.show_runway_bands());
+        let snapshot = self.snapshot.clone();
+        self.set_snapshot(&snapshot);
+    }
+
+    pub(in crate::pages::backlog) fn set_labels_filter(&mut self, labels: Vec<String>) {
+        self.filters.labels = labels;
+        self.runway_markers_visible.set(self.show_runway_bands());
+        let snapshot = self.snapshot.clone();
+        self.set_snapshot(&snapshot);
+    }
+
+    pub(in crate::pages::backlog) fn set_releases_filter(&mut self, releases: Vec<String>) {
+        self.filters.releases = releases;
+        self.runway_markers_visible.set(self.show_runway_bands());
+        let snapshot = self.snapshot.clone();
+        self.set_snapshot(&snapshot);
+    }
+
     pub(in crate::pages::backlog) fn reset_to_home(&mut self) {
         self.filters = BacklogFilters::default();
         self.estimated.set_value(true);
@@ -612,6 +701,12 @@ impl BacklogTree {
         self.users.clear_selection();
         self.statuses.close();
         self.statuses.clear_selection();
+        self.epics.close();
+        self.epics.clear_selection();
+        self.labels.close();
+        self.labels.clear_selection();
+        self.releases.close();
+        self.releases.clear_selection();
         self.group_by_selection = None;
         self.group_by.set_disabled(true);
         self.group_by.set_disabled(false);
@@ -657,6 +752,9 @@ impl BacklogTree {
         self.issue_types.set_disabled(loading);
         self.users.set_disabled(loading);
         self.statuses.set_disabled(loading);
+        self.epics.set_disabled(loading);
+        self.labels.set_disabled(loading);
+        self.releases.set_disabled(loading);
         self.group_by.set_disabled(loading);
     }
 
@@ -1536,11 +1634,17 @@ impl BacklogTree {
         self.estimated
             .set_label(if compact { "󰑭" } else { "󰑭 Estimated" });
         self.users
-            .set_placeholder(if compact { "󰀄" } else { "User" });
+            .set_placeholder(if compact { "󰀄" } else { "󰀄 User" });
         self.issue_types
-            .set_placeholder(if compact { "󰡯" } else { "Type" });
+            .set_placeholder(if compact { "󰡯" } else { "󰡯 Type" });
         self.statuses
-            .set_placeholder(if compact { "" } else { "Status" });
+            .set_placeholder(if compact { "" } else { " Status" });
+        self.epics
+            .set_placeholder(if compact { "" } else { " Epic" });
+        self.labels
+            .set_placeholder(if compact { "" } else { " Label" });
+        self.releases
+            .set_placeholder(if compact { "" } else { " Release" });
         self.group_by
             .set_label(grouping_label(self.group_by_selection, compact));
         self.web.set_label(if compact { "󰖟" } else { "Web" });
@@ -1564,7 +1668,7 @@ impl TuiNode for BacklogTree {
         self.control.measure(proposal)
     }
     fn layout(&mut self, area: ratatui::layout::Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        let compact_toolbar = area.width < 100;
+        let compact_toolbar = area.width < 160;
         self.configure_toolbar(compact_toolbar);
         let header_height = if area.is_empty() { 0 } else { 1 };
         let button_width = |button: &Button<()>| {
@@ -1640,21 +1744,62 @@ impl TuiNode for BacklogTree {
             );
 
             let row_y = area.y.saturating_add(header_height);
-            let issue_types_width = dropdown_width(area.width, &self.issue_types);
+            let releases_width = users_width(area.width, &self.releases).min(6);
+            let labels_width = users_width(
+                area.width
+                    .saturating_sub(releases_width)
+                    .saturating_sub(u16::from(releases_width > 0)),
+                &self.labels,
+            );
+            let labels_width = labels_width.min(6);
+            let epics_width = users_width(
+                area.width
+                    .saturating_sub(releases_width)
+                    .saturating_sub(labels_width)
+                    .saturating_sub(u16::from(releases_width > 0))
+                    .saturating_sub(u16::from(labels_width > 0)),
+                &self.epics,
+            );
+            let epics_width = epics_width.min(6);
             let statuses_width = users_width(
                 area.width
-                    .saturating_sub(issue_types_width)
-                    .saturating_sub(u16::from(issue_types_width > 0)),
+                    .saturating_sub(releases_width)
+                    .saturating_sub(labels_width)
+                    .saturating_sub(epics_width)
+                    .saturating_sub(u16::from(releases_width > 0))
+                    .saturating_sub(u16::from(labels_width > 0))
+                    .saturating_sub(u16::from(epics_width > 0)),
                 &self.statuses,
             );
+            let statuses_width = statuses_width.min(6);
+            let issue_types_width = dropdown_width(
+                area.width
+                    .saturating_sub(releases_width)
+                    .saturating_sub(labels_width)
+                    .saturating_sub(epics_width)
+                    .saturating_sub(statuses_width)
+                    .saturating_sub(u16::from(releases_width > 0))
+                    .saturating_sub(u16::from(labels_width > 0))
+                    .saturating_sub(u16::from(epics_width > 0))
+                    .saturating_sub(u16::from(statuses_width > 0)),
+                &self.issue_types,
+            );
+            let issue_types_width = issue_types_width.min(6);
             let users_width = users_width(
                 area.width
-                    .saturating_sub(issue_types_width)
+                    .saturating_sub(releases_width)
+                    .saturating_sub(labels_width)
+                    .saturating_sub(epics_width)
                     .saturating_sub(statuses_width)
-                    .saturating_sub(u16::from(issue_types_width > 0))
-                    .saturating_sub(u16::from(statuses_width > 0)),
+                    .saturating_sub(issue_types_width)
+                    .saturating_sub(u16::from(releases_width > 0))
+                    .saturating_sub(u16::from(labels_width > 0))
+                    .saturating_sub(u16::from(epics_width > 0))
+                    .saturating_sub(u16::from(statuses_width > 0))
+                    .saturating_sub(u16::from(issue_types_width > 0)),
                 &self.users,
             );
+            let users_width = users_width.min(6);
             let estimated_width = <Toggle<()> as TuiNode<()>>::measure(
                 &self.estimated,
                 LayoutProposal::at_most(
@@ -1662,9 +1807,15 @@ impl TuiNode for BacklogTree {
                         .saturating_sub(issue_types_width)
                         .saturating_sub(users_width)
                         .saturating_sub(statuses_width)
+                        .saturating_sub(epics_width)
+                        .saturating_sub(labels_width)
+                        .saturating_sub(releases_width)
                         .saturating_sub(u16::from(issue_types_width > 0))
                         .saturating_sub(u16::from(users_width > 0))
-                        .saturating_sub(u16::from(statuses_width > 0)),
+                        .saturating_sub(u16::from(statuses_width > 0))
+                        .saturating_sub(u16::from(epics_width > 0))
+                        .saturating_sub(u16::from(labels_width > 0))
+                        .saturating_sub(u16::from(releases_width > 0)),
                     1,
                 ),
             )
@@ -1675,9 +1826,15 @@ impl TuiNode for BacklogTree {
                     .saturating_sub(issue_types_width)
                     .saturating_sub(users_width)
                     .saturating_sub(statuses_width)
+                    .saturating_sub(epics_width)
+                    .saturating_sub(labels_width)
+                    .saturating_sub(releases_width)
                     .saturating_sub(u16::from(issue_types_width > 0))
                     .saturating_sub(u16::from(users_width > 0))
-                    .saturating_sub(u16::from(statuses_width > 0)),
+                    .saturating_sub(u16::from(statuses_width > 0))
+                    .saturating_sub(u16::from(epics_width > 0))
+                    .saturating_sub(u16::from(labels_width > 0))
+                    .saturating_sub(u16::from(releases_width > 0)),
             );
             self.estimated_area = ratatui::layout::Rect::new(
                 area.x.saturating_add(
@@ -1686,9 +1843,15 @@ impl TuiNode for BacklogTree {
                         .saturating_sub(users_width)
                         .saturating_sub(issue_types_width)
                         .saturating_sub(statuses_width)
+                        .saturating_sub(epics_width)
+                        .saturating_sub(labels_width)
+                        .saturating_sub(releases_width)
                         .saturating_sub(u16::from(users_width > 0))
                         .saturating_sub(u16::from(issue_types_width > 0))
-                        .saturating_sub(u16::from(statuses_width > 0)),
+                        .saturating_sub(u16::from(statuses_width > 0))
+                        .saturating_sub(u16::from(epics_width > 0))
+                        .saturating_sub(u16::from(labels_width > 0))
+                        .saturating_sub(u16::from(releases_width > 0)),
                 ),
                 row_y,
                 estimated_width,
@@ -1721,12 +1884,45 @@ impl TuiNode for BacklogTree {
                 statuses_width,
                 1,
             );
+            self.epics_area = ratatui::layout::Rect::new(
+                self.statuses_area
+                    .x
+                    .saturating_add(statuses_width)
+                    .saturating_add(u16::from(statuses_width > 0)),
+                row_y,
+                epics_width,
+                1,
+            );
+            self.labels_area = ratatui::layout::Rect::new(
+                self.epics_area
+                    .x
+                    .saturating_add(epics_width)
+                    .saturating_add(u16::from(epics_width > 0)),
+                row_y,
+                labels_width,
+                1,
+            );
+            self.releases_area = ratatui::layout::Rect::new(
+                self.labels_area
+                    .x
+                    .saturating_add(labels_width)
+                    .saturating_add(u16::from(labels_width > 0)),
+                row_y,
+                releases_width,
+                1,
+            );
         } else {
             let mut remaining_width = area.width;
             let refresh_width = button_width(&self.refresh).min(remaining_width);
             remaining_width = remaining_width.saturating_sub(refresh_width + 1);
             let velocity_width = button_width(&self.velocity).min(remaining_width);
             remaining_width = remaining_width.saturating_sub(velocity_width + 1);
+            let releases_width = users_width(remaining_width, &self.releases);
+            remaining_width = remaining_width.saturating_sub(releases_width + 1);
+            let labels_width = users_width(remaining_width, &self.labels);
+            remaining_width = remaining_width.saturating_sub(labels_width + 1);
+            let epics_width = users_width(remaining_width, &self.epics);
+            remaining_width = remaining_width.saturating_sub(epics_width + 1);
             let statuses_width = users_width(remaining_width, &self.statuses);
             remaining_width = remaining_width.saturating_sub(statuses_width + 1);
             let issue_types_width = dropdown_width(remaining_width, &self.issue_types);
@@ -1769,10 +1965,43 @@ impl TuiNode for BacklogTree {
             self.statuses_area = ratatui::layout::Rect::new(
                 self.velocity_area
                     .x
+                    .saturating_sub(releases_width)
+                    .saturating_sub(u16::from(releases_width > 0))
+                    .saturating_sub(labels_width)
+                    .saturating_sub(u16::from(labels_width > 0))
+                    .saturating_sub(epics_width)
+                    .saturating_sub(u16::from(epics_width > 0))
                     .saturating_sub(statuses_width)
                     .saturating_sub(u16::from(statuses_width > 0)),
                 area.y,
                 statuses_width,
+                1,
+            );
+            self.epics_area = ratatui::layout::Rect::new(
+                self.statuses_area
+                    .x
+                    .saturating_add(statuses_width)
+                    .saturating_add(u16::from(statuses_width > 0)),
+                area.y,
+                epics_width,
+                1,
+            );
+            self.labels_area = ratatui::layout::Rect::new(
+                self.epics_area
+                    .x
+                    .saturating_add(epics_width)
+                    .saturating_add(u16::from(epics_width > 0)),
+                area.y,
+                labels_width,
+                1,
+            );
+            self.releases_area = ratatui::layout::Rect::new(
+                self.labels_area
+                    .x
+                    .saturating_add(labels_width)
+                    .saturating_add(u16::from(labels_width > 0)),
+                area.y,
+                releases_width,
                 1,
             );
             self.issue_types_area = ratatui::layout::Rect::new(
@@ -1852,6 +2081,23 @@ impl TuiNode for BacklogTree {
                 ctx,
             )
         });
+        ctx.push_slot(ChildKey::new("epics"), self.epics_area, |ctx| {
+            <Dropdown<String, String> as TuiNode<()>>::layout(&mut self.epics, self.epics_area, ctx)
+        });
+        ctx.push_slot(ChildKey::new("labels"), self.labels_area, |ctx| {
+            <Dropdown<String, String> as TuiNode<()>>::layout(
+                &mut self.labels,
+                self.labels_area,
+                ctx,
+            )
+        });
+        ctx.push_slot(ChildKey::new("releases"), self.releases_area, |ctx| {
+            <Dropdown<String, String> as TuiNode<()>>::layout(
+                &mut self.releases,
+                self.releases_area,
+                ctx,
+            )
+        });
         if !compact_toolbar {
             ctx.push_slot(ChildKey::new("velocity"), self.velocity_area, |ctx| {
                 self.velocity.layout(self.velocity_area, ctx)
@@ -1887,6 +2133,9 @@ impl TuiNode for BacklogTree {
         self.users.render(frame, self.users_area, ctx);
         self.issue_types.render(frame, self.issue_types_area, ctx);
         self.statuses.render(frame, self.statuses_area, ctx);
+        self.epics.render(frame, self.epics_area, ctx);
+        self.labels.render(frame, self.labels_area, ctx);
+        self.releases.render(frame, self.releases_area, ctx);
         self.velocity.render(frame, self.velocity_area);
         self.refresh.render(frame, self.refresh_area);
     }
@@ -1899,6 +2148,9 @@ impl TuiNode for BacklogTree {
                 || self.issue_types.event(event, ctx) == EventOutcome::Handled
                 || self.users.event(event, ctx) == EventOutcome::Handled
                 || self.statuses.event(event, ctx) == EventOutcome::Handled
+                || self.epics.event(event, ctx) == EventOutcome::Handled
+                || self.labels.event(event, ctx) == EventOutcome::Handled
+                || self.releases.event(event, ctx) == EventOutcome::Handled
                 || self.group_by.event(event, ctx) == EventOutcome::Handled
                 || self.web.event(event, ctx) == EventOutcome::Handled)
         {
@@ -1971,6 +2223,36 @@ impl TuiNode for BacklogTree {
             let outcome = self
                 .statuses
                 .dispatch_event(&EventRoute::new(statuses_path), event, ctx);
+            return if self.refocus_data_view_after_unfocus(event, ctx) {
+                EventOutcome::Handled
+            } else {
+                outcome
+            };
+        }
+        if let Some(epics_path) = route.path.without_first_if(&ChildKey::new("epics")) {
+            let outcome = self
+                .epics
+                .dispatch_event(&EventRoute::new(epics_path), event, ctx);
+            return if self.refocus_data_view_after_unfocus(event, ctx) {
+                EventOutcome::Handled
+            } else {
+                outcome
+            };
+        }
+        if let Some(labels_path) = route.path.without_first_if(&ChildKey::new("labels")) {
+            let outcome = self
+                .labels
+                .dispatch_event(&EventRoute::new(labels_path), event, ctx);
+            return if self.refocus_data_view_after_unfocus(event, ctx) {
+                EventOutcome::Handled
+            } else {
+                outcome
+            };
+        }
+        if let Some(releases_path) = route.path.without_first_if(&ChildKey::new("releases")) {
+            let outcome = self
+                .releases
+                .dispatch_event(&EventRoute::new(releases_path), event, ctx);
             return if self.refocus_data_view_after_unfocus(event, ctx) {
                 EventOutcome::Handled
             } else {
@@ -2071,6 +2353,21 @@ impl TuiNode for BacklogTree {
                 dt,
                 settings,
             ))
+            .merge(<Dropdown<String, String> as TuiNode<()>>::tick(
+                &mut self.epics,
+                dt,
+                settings,
+            ))
+            .merge(<Dropdown<String, String> as TuiNode<()>>::tick(
+                &mut self.labels,
+                dt,
+                settings,
+            ))
+            .merge(<Dropdown<String, String> as TuiNode<()>>::tick(
+                &mut self.releases,
+                dt,
+                settings,
+            ))
             .merge(self.group_by.tick(dt, settings))
             .merge(self.web.tick(dt, settings))
             .merge(number_jump)
@@ -2105,6 +2402,18 @@ impl TuiNode for BacklogTree {
             self.statuses.dispatch_focus(&statuses_target, focused, ctx);
             return;
         }
+        if let Some(epics_target) = target.for_child(&ChildKey::new("epics")) {
+            self.epics.dispatch_focus(&epics_target, focused, ctx);
+            return;
+        }
+        if let Some(labels_target) = target.for_child(&ChildKey::new("labels")) {
+            self.labels.dispatch_focus(&labels_target, focused, ctx);
+            return;
+        }
+        if let Some(releases_target) = target.for_child(&ChildKey::new("releases")) {
+            self.releases.dispatch_focus(&releases_target, focused, ctx);
+            return;
+        }
         if let Some(group_by_target) = target.for_child(&ChildKey::new("group-by")) {
             self.group_by.dispatch_focus(&group_by_target, focused, ctx);
             return;
@@ -2121,6 +2430,9 @@ impl TuiNode for BacklogTree {
         self.issue_types.init(ctx);
         self.users.init(ctx);
         self.statuses.init(ctx);
+        self.epics.init(ctx);
+        self.labels.init(ctx);
+        self.releases.init(ctx);
         self.group_by.init(ctx);
     }
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
@@ -2129,6 +2441,9 @@ impl TuiNode for BacklogTree {
         self.issue_types.mount(ctx);
         self.users.mount(ctx);
         self.statuses.mount(ctx);
+        self.epics.mount(ctx);
+        self.labels.mount(ctx);
+        self.releases.mount(ctx);
         self.group_by.mount(ctx);
     }
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
@@ -2137,6 +2452,9 @@ impl TuiNode for BacklogTree {
         self.issue_types.unmount(ctx);
         self.users.unmount(ctx);
         self.statuses.unmount(ctx);
+        self.epics.unmount(ctx);
+        self.labels.unmount(ctx);
+        self.releases.unmount(ctx);
         self.group_by.unmount(ctx);
     }
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
@@ -2145,6 +2463,9 @@ impl TuiNode for BacklogTree {
         self.issue_types.destroy(ctx);
         self.users.destroy(ctx);
         self.statuses.destroy(ctx);
+        self.epics.destroy(ctx);
+        self.labels.destroy(ctx);
+        self.releases.destroy(ctx);
         self.group_by.destroy(ctx);
     }
 }
@@ -2154,6 +2475,9 @@ struct BacklogFilters {
     issue_types: Vec<String>,
     users: Vec<String>,
     statuses: Vec<String>,
+    epics: Vec<String>,
+    labels: Vec<String>,
+    releases: Vec<String>,
 }
 
 impl Default for BacklogFilters {
@@ -2163,6 +2487,9 @@ impl Default for BacklogFilters {
             issue_types: Vec::new(),
             users: Vec::new(),
             statuses: Vec::new(),
+            epics: Vec::new(),
+            labels: Vec::new(),
+            releases: Vec::new(),
         }
     }
 }
@@ -2173,6 +2500,9 @@ impl BacklogFilters {
             || !self.issue_types.is_empty()
             || !self.users.is_empty()
             || !self.statuses.is_empty()
+            || !self.epics.is_empty()
+            || !self.labels.is_empty()
+            || !self.releases.is_empty()
     }
 }
 
@@ -2253,6 +2583,54 @@ fn selectable_statuses(snapshot: &BacklogSnapshot) -> Vec<String> {
     statuses.sort_unstable_by_key(|status| status.to_ascii_lowercase());
     statuses.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
     statuses
+}
+
+fn selectable_epics(snapshot: &BacklogSnapshot) -> Vec<String> {
+    let mut epics = snapshot
+        .sprints
+        .iter()
+        .flat_map(|sprint| &sprint.work_items)
+        .chain(&snapshot.work_items)
+        .filter_map(|item| item.epic_name.as_deref())
+        .map(str::trim)
+        .filter(|epic| !epic.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    epics.sort_unstable_by_key(|epic| epic.to_ascii_lowercase());
+    epics.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    epics
+}
+
+fn selectable_labels(snapshot: &BacklogSnapshot) -> Vec<String> {
+    let mut labels = snapshot
+        .sprints
+        .iter()
+        .flat_map(|sprint| &sprint.work_items)
+        .chain(&snapshot.work_items)
+        .flat_map(|item| &item.labels)
+        .map(|label| label.trim())
+        .filter(|label| !label.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    labels.sort_unstable_by_key(|label| label.to_ascii_lowercase());
+    labels.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    labels
+}
+
+fn selectable_releases(snapshot: &BacklogSnapshot) -> Vec<String> {
+    let mut releases = snapshot
+        .sprints
+        .iter()
+        .flat_map(|sprint| &sprint.work_items)
+        .chain(&snapshot.work_items)
+        .flat_map(|item| &item.fix_versions)
+        .map(|release| release.trim())
+        .filter(|release| !release.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    releases.sort_unstable_by(|left, right| version_name_cmp(left, right));
+    releases.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    releases
 }
 
 fn backlog_rows(
@@ -2598,6 +2976,27 @@ fn matches_filters(item: &WorkItem, filters: &BacklogFilters) -> bool {
                 .statuses
                 .iter()
                 .any(|status| item.status.eq_ignore_ascii_case(status)))
+        && (filters.epics.is_empty()
+            || item.epic_name.as_deref().is_some_and(|epic| {
+                filters
+                    .epics
+                    .iter()
+                    .any(|selected| epic.eq_ignore_ascii_case(selected))
+            }))
+        && (filters.labels.is_empty()
+            || item.labels.iter().any(|label| {
+                filters
+                    .labels
+                    .iter()
+                    .any(|selected| label.eq_ignore_ascii_case(selected))
+            }))
+        && (filters.releases.is_empty()
+            || item.fix_versions.iter().any(|release| {
+                filters
+                    .releases
+                    .iter()
+                    .any(|selected| release.eq_ignore_ascii_case(selected))
+            }))
 }
 
 fn initially_expanded_rows(

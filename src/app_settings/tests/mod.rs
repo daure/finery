@@ -45,6 +45,28 @@ fn open_command_binding_is_configurable_and_round_trips() {
 }
 
 #[test]
+fn open_command_enum_round_trips_as_json() {
+    let values = HashMap::from([(
+        super::OPEN_COMMAND_ENUM_SETTING.into(),
+        r#"["browser","editor, preview"]"#.into(),
+    )]);
+
+    let settings = AppSettings::resolve(&values).unwrap();
+
+    assert_eq!(settings.open_command_enum, ["browser", "editor, preview"]);
+    assert_eq!(
+        settings
+            .values()
+            .into_iter()
+            .find(|(key, _)| *key == super::OPEN_COMMAND_ENUM_SETTING),
+        Some((
+            super::OPEN_COMMAND_ENUM_SETTING,
+            r#"["browser","editor, preview"]"#.into()
+        ))
+    );
+}
+
+#[test]
 fn persistence_only_includes_changed_settings() {
     let previous = AppSettings {
         jira_api_token: "environment-secret".into(),

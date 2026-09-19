@@ -30,6 +30,7 @@ use crate::{
 
 mod background_clipboard;
 mod open_command;
+pub(crate) use open_command::OpenCommandRequest;
 #[cfg(test)]
 pub(crate) use open_command::tests::OpenCommandProbe;
 pub(crate) mod composer_attachments;
@@ -47,6 +48,7 @@ pub(crate) struct AppService {
     runtime: Arc<Runtime>,
     errors: Arc<Mutex<Vec<String>>>,
     notifications: Arc<Mutex<Vec<tuicore::Notification>>>,
+    pending_open_command: Arc<Mutex<Option<open_command::OpenCommandRequest>>>,
     background_clipboard: Arc<Mutex<background_clipboard::BackgroundClipboard>>,
     jira_reorder: Arc<Mutex<()>>,
     persistence: Sender<PersistenceCommand>,
@@ -318,6 +320,7 @@ impl AppService {
                 runtime,
                 errors,
                 notifications,
+                pending_open_command: Default::default(),
                 background_clipboard: Default::default(),
                 jira_reorder: Arc::new(Mutex::new(())),
                 persistence,
@@ -356,6 +359,7 @@ impl AppService {
             runtime,
             errors,
             notifications,
+            pending_open_command: Default::default(),
             background_clipboard: Default::default(),
             jira_reorder: Arc::new(Mutex::new(())),
             persistence,

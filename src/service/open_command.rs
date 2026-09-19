@@ -2,8 +2,59 @@ use std::process::{Command, Stdio};
 
 use super::AppService;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OpenCommandRequest {
+    pub(crate) key: String,
+    pub(crate) values: Vec<String>,
+}
+
 impl AppService {
+    pub(crate) fn open_command(&self, key: &str) -> bool {
+        let values = match self.settings.read() {
+            Ok(settings)
+                if !settings.open_command.trim().is_empty()
+                    && !key.is_empty()
+                    && !key.starts_with("NEW-") =>
+            {
+                settings.open_command_enum.clone()
+            }
+            Ok(_) => return false,
+            Err(_) => {
+                self.report_error(
+                    "Could not run open command: settings lock is unavailable".into(),
+                );
+                return false;
+            }
+        };
+        if values.is_empty() {
+            return self.run_open_command(key);
+        }
+        match self.pending_open_command.lock() {
+            Ok(mut request) => {
+                *request = Some(OpenCommandRequest {
+                    key: key.to_owned(),
+                    values,
+                });
+                true
+            }
+            Err(_) => {
+                self.report_error(
+                    "Could not open command menu: pending request lock is unavailable".into(),
+                );
+                false
+            }
+        }
+    }
+
+    pub(crate) fn take_open_command_request(&self) -> Option<OpenCommandRequest> {
+        self.pending_open_command.lock().ok()?.take()
+    }
+
     pub(crate) fn run_open_command(&self, key: &str) -> bool {
+        self.run_open_command_with_value(key, "")
+    }
+
+    pub(crate) fn run_open_command_with_value(&self, key: &str, value: &str) -> bool {
         let (command, url) = match self.settings.read() {
             Ok(settings) => (settings.open_command.clone(), settings.jira_issue_url(key)),
             Err(_) => {
@@ -17,17 +68,23 @@ impl AppService {
             return false;
         }
         let key = key.to_owned();
+        let value = value.to_owned();
         let service = self.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("finery-open-command".into())
             .spawn(move || {
-                let result =
-                    run_command(&command, &key, url.as_deref().unwrap_or_default(), || {
+                let result = run_command(
+                    &command,
+                    &key,
+                    url.as_deref().unwrap_or_default(),
+                    &value,
+                    || {
                         service.report_notification(tuicore::Notification::info(
                             "Open command started",
                             format!("Running open command for {key}"),
                         ));
-                    });
+                    },
+                );
                 if let Err(error) = result {
                     service.report_error(error);
                 }
@@ -44,6 +101,7 @@ fn run_command(
     command: &str,
     key: &str,
     url: &str,
+    value: &str,
     on_started: impl FnOnce(),
 ) -> Result<(), String> {
     let mut child = Command::new("sh")
@@ -51,6 +109,7 @@ fn run_command(
         .arg(command)
         .env("FINERY_TICKET_KEY", key)
         .env("FINERY_TICKET_URL", url)
+        .env("FINERY_CMD_VALUE", value)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

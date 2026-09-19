@@ -1093,6 +1093,21 @@ impl BacklogPage {
                         .set_statuses_filter(statuses);
                     self.focus_backlog_data(ctx);
                 }
+                BacklogSectionEvent::EpicsChanged(epics) => {
+                    self.view.base_mut().base_mut().set_epics_filter(epics);
+                    self.focus_backlog_data(ctx);
+                }
+                BacklogSectionEvent::LabelsChanged(labels) => {
+                    self.view.base_mut().base_mut().set_labels_filter(labels);
+                    self.focus_backlog_data(ctx);
+                }
+                BacklogSectionEvent::ReleasesChanged(releases) => {
+                    self.view
+                        .base_mut()
+                        .base_mut()
+                        .set_releases_filter(releases);
+                    self.focus_backlog_data(ctx);
+                }
                 BacklogSectionEvent::OpenVelocity => self.open_velocity_dialog(ctx),
                 BacklogSectionEvent::OpenReports => {
                     self.service.open_jira_board_page(Some("reports"));
@@ -1115,7 +1130,7 @@ impl BacklogPage {
                 BacklogSectionEvent::TicketsSyncing { keys } => self.report_ticket_syncing(&keys),
                 BacklogSectionEvent::OpenTicket { key } => self.service.open_jira_issue(&key),
                 BacklogSectionEvent::OpenCommand { key } => {
-                    self.service.run_open_command(&key);
+                    self.service.open_command(&key);
                 }
                 BacklogSectionEvent::OpenDescription { key } => {
                     self.open_ticket_description(&key, ctx)
@@ -1337,7 +1352,7 @@ impl BacklogPage {
                     self.open_ticket_description(&key, ctx);
                 }
                 BacklogQuickMenuEvent::OpenCommand { key } => {
-                    self.service.run_open_command(&key);
+                    self.service.open_command(&key);
                     self.dismiss_quick_menu(ctx);
                 }
                 BacklogQuickMenuEvent::MoveToTop {

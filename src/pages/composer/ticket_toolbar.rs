@@ -75,18 +75,6 @@ pub(super) fn toolbar(
     let actions = Flex::row()
         .gap(1)
         .child(
-            "refresh",
-            BoundButton::new(
-                Button::new(format!("Refresh ({})", keys.refresh.label()))
-                    .hotkey(keys.refresh.sequence())
-                    .hotkey_focus_enabled(false)
-                    .on_press(move || refresh_events.borrow_mut().push(ToolbarEvent::Refresh)),
-                can_refresh,
-                Rc::clone(&feedback.refresh),
-            ),
-            FlexItem::fit_content(),
-        )
-        .child(
             "commit",
             BoundButton::new(
                 Button::new(format!("Commit ({})", keys.commit.label()))
@@ -95,6 +83,18 @@ pub(super) fn toolbar(
                     .on_press(move || commit_events.borrow_mut().push(ToolbarEvent::Commit)),
                 can_commit,
                 Rc::new(Cell::new(false)),
+            ),
+            FlexItem::fit_content(),
+        )
+        .child(
+            "refresh",
+            BoundButton::new(
+                Button::new("󰑓 Refresh")
+                    .hotkey(keys.refresh.sequence())
+                    .hotkey_focus_enabled(false)
+                    .on_press(move || refresh_events.borrow_mut().push(ToolbarEvent::Refresh)),
+                can_refresh,
+                Rc::clone(&feedback.refresh),
             ),
             FlexItem::fit_content(),
         );

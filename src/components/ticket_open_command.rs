@@ -18,7 +18,7 @@ pub(crate) fn handle(
     {
         return None;
     }
-    let triggered = ticket_key.is_some_and(|key| service.run_open_command(key));
+    let triggered = ticket_key.is_some_and(|key| service.open_command(key));
     ctx.stop_propagation();
     Some(triggered)
 }

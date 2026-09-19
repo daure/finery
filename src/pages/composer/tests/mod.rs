@@ -503,7 +503,8 @@ fn composer_replaces_change_set_list_with_breadcrumb_and_ticket_detail() {
     assert!(text.contains("Add (A)"));
     assert!(text.contains("Add child"));
     assert!(text.contains("Commit"));
-    assert!(text.contains("Refresh"));
+    assert!(text.contains("󰑓 Refresh"));
+    assert!(text.find("Commit").unwrap() < text.find("󰑓 Refresh").unwrap());
     assert!(text.contains("Source"));
     assert!(text.contains("Changes"));
     assert!(text.contains("Diff"));

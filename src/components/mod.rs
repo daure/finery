@@ -1,5 +1,6 @@
 pub(crate) mod avatar;
 pub(crate) mod jira_search;
+pub(crate) mod open_command_menu;
 pub(crate) mod recent_tickets;
 pub(crate) mod settings_dialog;
 pub(crate) mod status_bar;

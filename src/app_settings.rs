@@ -34,6 +34,7 @@ pub(crate) const SPEED_READER_BLOCK_DELAY_SETTING: &str = "reader.markdown_block
 pub(crate) const RECENT_TICKETS_LIMIT_SETTING: &str = "recent_tickets.limit";
 pub(crate) const OPEN_COMMAND_SETTING: &str = "tickets.open_command";
 pub(crate) const OPEN_COMMAND_KEY_SETTING: &str = "tickets.open_command_key";
+pub(crate) const OPEN_COMMAND_ENUM_SETTING: &str = "tickets.open_command_enum";
 pub(crate) const COMPOSER_ADD_SIBLING_KEY_SETTING: &str = "composer.add_sibling_key";
 pub(crate) const COMPOSER_ADD_CHILD_KEY_SETTING: &str = "composer.add_child_key";
 pub(crate) const COMPOSER_NEW_CHANGE_SET_KEY_SETTING: &str = "composer.new_change_set_key";
@@ -434,6 +435,7 @@ pub(crate) struct AppSettings {
     pub(crate) recent_tickets_limit: usize,
     pub(crate) open_command: String,
     pub(crate) open_command_key: ComposerKeyBinding,
+    pub(crate) open_command_enum: Vec<String>,
     pub(crate) composer_keys: ComposerKeyBindings,
 }
 
@@ -457,6 +459,7 @@ impl Default for AppSettings {
             open_command: String::new(),
             open_command_key: ComposerKeyBinding::parse("ctrl+;".into(), OPEN_COMMAND_KEY_SETTING)
                 .expect("built-in open command key must be valid"),
+            open_command_enum: Vec::new(),
             composer_keys: ComposerKeyBindings::default(),
         }
     }
@@ -578,6 +581,7 @@ impl AppSettings {
                     .unwrap_or_else(|| defaults.open_command_key.sequence().into()),
                 OPEN_COMMAND_KEY_SETTING,
             )?,
+            open_command_enum: open_command_enum_values(values.get(OPEN_COMMAND_ENUM_SETTING)),
         })
     }
 
@@ -587,6 +591,11 @@ impl AppSettings {
             (
                 OPEN_COMMAND_KEY_SETTING,
                 self.open_command_key.sequence().into(),
+            ),
+            (
+                OPEN_COMMAND_ENUM_SETTING,
+                serde_json::to_string(&self.open_command_enum)
+                    .expect("open command enum values must serialize"),
             ),
             (JIRA_BASE_URL_SETTING, self.jira_base_url.clone()),
             (JIRA_EMAIL_SETTING, self.jira_email.clone()),
@@ -970,6 +979,21 @@ fn sprint_name_fragments(value: Option<&String>) -> Vec<String> {
                 fragments.push(fragment.to_owned());
             }
             fragments
+        })
+}
+
+fn open_command_enum_values(value: Option<&String>) -> Vec<String> {
+    value
+        .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty() && !value.contains('\0'))
+        .fold(Vec::new(), |mut values, value| {
+            if !values.contains(&value) {
+                values.push(value);
+            }
+            values
         })
 }
 

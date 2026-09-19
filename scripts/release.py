@@ -35,6 +35,20 @@ def next_version(version, bump):
     return ".".join(map(str, parts))
 
 
+def preflight_cargo(*args):
+    run(
+        "cargo",
+        *args,
+        env={
+            "CARGO_TARGET_DIR": str(Path("target/release-check").resolve()),
+            "CARGO_BUILD_JOBS": "2",
+            "CARGO_PROFILE_DEV_DEBUG": "0",
+            "CARGO_PROFILE_TEST_DEBUG": "0",
+            "CARGO_INCREMENTAL": "0",
+        },
+    )
+
+
 def preflight():
     run("cargo", "fmt", "--all", "--check")
     run(
@@ -45,9 +59,9 @@ def preflight():
         "--check",
     )
     run("python3", "-m", "unittest", "discover", "-s", "scripts/tests")
-    run("cargo", "update", "--workspace")
-    run("cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings")
-    run("cargo", "test", "--locked")
+    preflight_cargo("update", "--workspace")
+    preflight_cargo("clippy", "--locked", "--all-targets", "--", "-D", "warnings")
+    preflight_cargo("test", "--locked", "--", "--test-threads=2")
 
 
 def release(bump):

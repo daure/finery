@@ -77,12 +77,27 @@ fn background_copy_schedules_ticks_and_a_direct_copy_supersedes_it() {
 }
 
 #[test]
+fn configured_command_values_activate_the_global_open_command_menu() {
+    tuicore::init();
+    let service = AppService::for_tests();
+    let _probe = crate::service::OpenCommandProbe::new(&service);
+    service.settings().write().unwrap().open_command_enum = vec!["editor".into()];
+    let mut app = root(service.clone(), Vec::new());
+
+    assert!(service.open_command("FIN-42"));
+    app.apply_dialog_signals(&mut EventCtx::default());
+
+    assert!(app.view.is_active());
+}
+
+#[test]
 fn home_shortcut_closes_global_dialogs() {
     tuicore::init();
     let mut app = root(AppService::for_tests(), Vec::new());
     app.view.set_active(true);
     app.view.base_mut().set_active(true);
     app.view.base_mut().base_mut().set_active(true);
+    app.view.base_mut().base_mut().base_mut().set_active(true);
     let mut ctx = EventCtx::new(AnimationSettings::default());
 
     assert!(app.go_home(
@@ -96,6 +111,7 @@ fn home_shortcut_closes_global_dialogs() {
     assert!(!app.view.is_active());
     assert!(!app.view.base().is_active());
     assert!(!app.view.base().base().is_active());
+    assert!(!app.view.base().base().base().is_active());
     assert_eq!(ctx.propagation(), Propagation::Stopped);
 }
 
@@ -131,6 +147,7 @@ fn home_shortcut_resets_composer_to_its_overview() {
 
     app.layout(area, &mut tuicore::LayoutCtx::new());
     let tabs = tuicore::EventRoute::new(TreePath::from_keys([
+        ChildKey::first(),
         ChildKey::first(),
         ChildKey::first(),
         ChildKey::first(),
