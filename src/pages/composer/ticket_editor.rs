@@ -2001,13 +2001,15 @@ impl TicketEditor {
             return false;
         }
         let state = self.state.borrow();
-        let key = state.selected_existing_ticket_key();
+        let ticket = state.selected_changes();
         let ticket_row =
             state.selected_attachment().is_none() && state.selected_mermaid_diagram().is_none();
         crate::components::ticket_open_command::handle(
             &self.service,
             event,
-            key.as_deref().filter(|_| ticket_row),
+            ticket
+                .filter(|ticket| ticket_row && !ticket.key.starts_with("NEW-"))
+                .map(|ticket| (ticket.key.as_str(), ticket.title.as_str())),
             ctx,
         )
         .is_some()

@@ -23,20 +23,20 @@ impl OpenCommandProbe {
         let quoted_path = path.to_string_lossy().replace('\'', "'\\''");
         let mut settings = service.settings().read().unwrap().clone();
         settings.open_command = format!(
-            "printf '%s\\n%s\\n%s' \"$FINERY_TICKET_KEY\" \"$FINERY_TICKET_URL\" \"$FINERY_CMD_VALUE\" > '{quoted_path}'"
+            "printf '%s\\n%s\\n%s\\n%s' \"$FINERY_TICKET_KEY\" \"$FINERY_TICKET_TITLE\" \"$FINERY_TICKET_URL\" \"$FINERY_CMD_VALUE\" > '{quoted_path}'"
         );
         settings.jira_base_url = "https://jira.example".into();
         service.save_settings(settings);
         Self { path }
     }
 
-    pub(crate) fn assert_opened(&self, key: &str) {
-        self.assert_opened_with_value(key, "");
+    pub(crate) fn assert_opened(&self, key: &str, title: &str) {
+        self.assert_opened_with_value(key, title, "");
     }
 
-    pub(crate) fn assert_opened_with_value(&self, key: &str, value: &str) {
+    pub(crate) fn assert_opened_with_value(&self, key: &str, title: &str, value: &str) {
         self.assert_output(&format!(
-            "{key}\nhttps://jira.example/browse/{key}\n{value}"
+            "{key}\n{title}\nhttps://jira.example/browse/{key}\n{value}"
         ));
     }
 
@@ -79,8 +79,9 @@ fn saved_open_command_passes_literal_ticket_context_without_running_on_save() {
     );
 
     let key = "FIN-42 ' ; $(exit 29)";
-    assert!(service.run_open_command(key));
-    probe.assert_opened(key);
+    let title = "Fix 'quoted' title; $(exit 31)";
+    assert!(service.run_open_command(key, title));
+    probe.assert_opened(key, title);
     assert!(service.take_errors().is_empty());
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -106,18 +107,18 @@ fn saved_open_command_passes_literal_ticket_context_without_running_on_save() {
 fn empty_commands_and_local_drafts_are_noops_and_command_failures_are_visible() {
     let service = AppService::for_tests();
     let probe = OpenCommandProbe::new(&service);
-    assert!(!service.run_open_command("NEW-1"));
-    assert!(!service.run_open_command(""));
+    assert!(!service.run_open_command("NEW-1", "Local draft"));
+    assert!(!service.run_open_command("", "Missing key"));
     probe.assert_not_opened();
     for blank in ["", " \n\t"] {
         service.settings().write().unwrap().open_command = blank.into();
-        assert!(!service.run_open_command("FIN-42"));
+        assert!(!service.run_open_command("FIN-42", "Ticket title"));
     }
     assert!(service.take_errors().is_empty());
     assert!(service.take_notifications().is_empty());
 
     service.settings().write().unwrap().open_command = "exit 23".into();
-    service.run_open_command("FIN-42");
+    service.run_open_command("FIN-42", "Ticket title");
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let errors = service.take_errors();
@@ -141,12 +142,13 @@ fn command_values_request_a_menu_instead_of_running_until_selected() {
     let probe = OpenCommandProbe::new(&service);
     service.settings().write().unwrap().open_command_enum = vec!["editor".into()];
 
-    assert!(service.open_command("FIN-42"));
+    assert!(service.open_command("FIN-42", "Ticket title"));
     probe.assert_not_opened();
     assert_eq!(
         service.take_open_command_request(),
         Some(super::OpenCommandRequest {
             key: "FIN-42".into(),
+            title: "Ticket title".into(),
             values: vec!["editor".into()],
         })
     );

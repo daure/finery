@@ -5,7 +5,7 @@ use crate::service::AppService;
 pub(crate) fn handle(
     service: &AppService,
     event: &TuiEvent,
-    ticket_key: Option<&str>,
+    ticket: Option<(&str, &str)>,
     ctx: &mut EventCtx<()>,
 ) -> Option<bool> {
     let TuiEvent::Key(key) = event else {
@@ -18,7 +18,7 @@ pub(crate) fn handle(
     {
         return None;
     }
-    let triggered = ticket_key.is_some_and(|key| service.open_command(key));
+    let triggered = ticket.is_some_and(|(key, title)| service.open_command(key, title));
     ctx.stop_propagation();
     Some(triggered)
 }

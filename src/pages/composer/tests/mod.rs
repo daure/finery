@@ -1679,7 +1679,9 @@ fn open_command_uses_the_selected_composer_ticket_without_committing() {
     );
     page.init(&mut LifecycleCtx::default());
     page.open_change_set_for_test("CS-1");
-    let key = page.selected_changes().key;
+    let ticket = page.selected_changes();
+    let key = ticket.key;
+    let title = ticket.title;
     let tickets = focus(&mut page, "data-view");
     let mut ctx = EventCtx::default();
     page.dispatch_event(
@@ -1690,7 +1692,7 @@ fn open_command_uses_the_selected_composer_ticket_without_committing() {
         }),
         &mut ctx,
     );
-    probe.assert_opened(&key);
+    probe.assert_opened(&key, &title);
     assert_eq!(ctx.propagation(), tuicore::Propagation::Stopped);
     assert!(!render_text(&mut page).contains("Commit changes"));
 }

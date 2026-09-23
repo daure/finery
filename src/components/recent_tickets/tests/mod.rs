@@ -136,7 +136,7 @@ fn open_command_closes_recent_tickets_only_when_a_command_is_triggered() {
         }),
         &mut ctx,
     );
-    probe.assert_opened("FIN-1");
+    probe.assert_opened("FIN-1", "Example");
     assert_eq!(ctx.propagation(), tuicore::Propagation::Stopped);
     assert!(matches!(
         menu.take_events().as_slice(),

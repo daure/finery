@@ -183,12 +183,16 @@ impl RecentTicketsMenu {
     }
 
     fn open_highlighted_ticket(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
-        if let Some(triggered) = crate::components::ticket_open_command::handle(
-            &self.service,
-            event,
-            self.list.data_view().highlighted_id().as_deref(),
-            ctx,
-        ) {
+        let ticket = self.list.data_view().highlighted_id().and_then(|key| {
+            self.list
+                .items()
+                .iter()
+                .find(|row| row.item.key == key)
+                .map(|row| (row.item.key.as_str(), row.item.title.as_str()))
+        });
+        if let Some(triggered) =
+            crate::components::ticket_open_command::handle(&self.service, event, ticket, ctx)
+        {
             if triggered {
                 self.events.push(RecentTicketsMenuEvent::Closed);
             }

@@ -19,6 +19,7 @@ pub(crate) struct OpenCommandMenu {
     dropdown: Dropdown<String, String>,
     selected: Rc<RefCell<Vec<String>>>,
     key: Option<String>,
+    title: Option<String>,
     area: Rect,
     close_requested: bool,
 }
@@ -48,6 +49,7 @@ impl OpenCommandMenu {
             dropdown,
             selected,
             key: None,
+            title: None,
             area: Rect::default(),
             close_requested: false,
         }
@@ -55,6 +57,7 @@ impl OpenCommandMenu {
 
     pub(crate) fn open(&mut self, request: OpenCommandRequest, ctx: &mut EventCtx<()>) {
         self.key = Some(request.key);
+        self.title = Some(request.title);
         self.close_requested = false;
         self.selected.borrow_mut().clear();
         self.dropdown.clear_selection();
@@ -69,8 +72,12 @@ impl OpenCommandMenu {
 
     fn finish_event(&mut self, was_open: bool) {
         let selected = self.selected.borrow_mut().drain(..).next();
-        if let (Some(key), Some(value)) = (self.key.as_deref(), selected.as_deref()) {
-            self.service.run_open_command_with_value(key, value);
+        if let (Some(key), Some(title), Some(value)) = (
+            self.key.as_deref(),
+            self.title.as_deref(),
+            selected.as_deref(),
+        ) {
+            self.service.run_open_command_with_value(key, title, value);
             self.dropdown.close();
         }
         if was_open && !self.dropdown.is_open() {

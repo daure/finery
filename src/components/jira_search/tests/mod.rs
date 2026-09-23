@@ -83,7 +83,7 @@ fn open_command_closes_search_only_when_a_command_is_triggered() {
         }),
         &mut ctx,
     );
-    probe.assert_opened("FIN-42");
+    probe.assert_opened("FIN-42", "Search result");
     assert_eq!(ctx.propagation(), tuicore::Propagation::Stopped);
     assert!(matches!(
         menu.take_events().as_slice(),

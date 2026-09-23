@@ -1130,7 +1130,8 @@ impl BacklogPage {
                 BacklogSectionEvent::TicketsSyncing { keys } => self.report_ticket_syncing(&keys),
                 BacklogSectionEvent::OpenTicket { key } => self.service.open_jira_issue(&key),
                 BacklogSectionEvent::OpenCommand { key } => {
-                    self.service.open_command(&key);
+                    let title = ticket_title(self.snapshot.as_ref(), &key);
+                    self.service.open_command(&key, title);
                 }
                 BacklogSectionEvent::OpenDescription { key } => {
                     self.open_ticket_description(&key, ctx)
@@ -1352,7 +1353,8 @@ impl BacklogPage {
                     self.open_ticket_description(&key, ctx);
                 }
                 BacklogQuickMenuEvent::OpenCommand { key } => {
-                    self.service.open_command(&key);
+                    let title = ticket_title(self.snapshot.as_ref(), &key);
+                    self.service.open_command(&key, title);
                     self.dismiss_quick_menu(ctx);
                 }
                 BacklogQuickMenuEvent::MoveToTop {
@@ -2351,7 +2353,7 @@ impl BacklogPage {
     }
 
     fn dock_description_dialog(&mut self, width: u16) {
-        let dock = DockSpec::bottom(50).cross_percent(description_width_percent(width));
+        let dock = DockSpec::bottom(80).cross_percent(description_width_percent(width));
         self.view.set_dock(dock);
         self.view
             .layer_mut()
@@ -3103,6 +3105,21 @@ fn ticket_items_by_key(
         .collect()
 }
 
+fn ticket_title<'a>(snapshot: Option<&'a BacklogSnapshot>, key: &str) -> &'a str {
+    snapshot
+        .into_iter()
+        .flat_map(|snapshot| {
+            snapshot.work_items.iter().chain(
+                snapshot
+                    .sprints
+                    .iter()
+                    .flat_map(|sprint| &sprint.work_items),
+            )
+        })
+        .find(|item| item.key == key)
+        .map_or("", |item| item.title.as_str())
+}
+
 fn source_order(snapshot: Option<&BacklogSnapshot>, section_id: &str) -> Vec<String> {
     let Some(snapshot) = snapshot else {
         return Vec::new();
@@ -3572,7 +3589,7 @@ pub(super) fn description_width_percent(width: u16) -> u16 {
     if width < MOBILE_BACKLOG_WIDTH {
         100
     } else {
-        60
+        75
     }
 }
 

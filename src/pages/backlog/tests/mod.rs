@@ -3184,7 +3184,8 @@ fn enter_opens_a_focused_ticket_detail_dialog() {
         .iter()
         .find(|entry| entry.layer == tuicore::OverlayLayer::Modal)
         .expect("description dialog should be visible");
-    assert_eq!(description.area.width, 72);
+    assert_eq!(description.area.width, 90);
+    assert_eq!(description.area.height, 24);
     let dialog_area = description.area;
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
     terminal
@@ -3413,9 +3414,9 @@ fn comment_tree_renders_replies_and_opens_the_activated_comment() {
 }
 
 #[test]
-fn description_snackbar_is_full_width_on_mobile_and_sixty_percent_on_desktop() {
+fn description_snackbar_is_full_width_on_mobile_and_seventy_five_percent_on_desktop() {
     assert_eq!(description_width_percent(99), 100);
-    assert_eq!(description_width_percent(100), 60);
+    assert_eq!(description_width_percent(100), 75);
 }
 
 #[test]

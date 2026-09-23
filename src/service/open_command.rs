@@ -5,11 +5,12 @@ use super::AppService;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OpenCommandRequest {
     pub(crate) key: String,
+    pub(crate) title: String,
     pub(crate) values: Vec<String>,
 }
 
 impl AppService {
-    pub(crate) fn open_command(&self, key: &str) -> bool {
+    pub(crate) fn open_command(&self, key: &str, title: &str) -> bool {
         let values = match self.settings.read() {
             Ok(settings)
                 if !settings.open_command.trim().is_empty()
@@ -27,12 +28,13 @@ impl AppService {
             }
         };
         if values.is_empty() {
-            return self.run_open_command(key);
+            return self.run_open_command(key, title);
         }
         match self.pending_open_command.lock() {
             Ok(mut request) => {
                 *request = Some(OpenCommandRequest {
                     key: key.to_owned(),
+                    title: title.to_owned(),
                     values,
                 });
                 true
@@ -50,11 +52,11 @@ impl AppService {
         self.pending_open_command.lock().ok()?.take()
     }
 
-    pub(crate) fn run_open_command(&self, key: &str) -> bool {
-        self.run_open_command_with_value(key, "")
+    pub(crate) fn run_open_command(&self, key: &str, title: &str) -> bool {
+        self.run_open_command_with_value(key, title, "")
     }
 
-    pub(crate) fn run_open_command_with_value(&self, key: &str, value: &str) -> bool {
+    pub(crate) fn run_open_command_with_value(&self, key: &str, title: &str, value: &str) -> bool {
         let (command, url) = match self.settings.read() {
             Ok(settings) => (settings.open_command.clone(), settings.jira_issue_url(key)),
             Err(_) => {
@@ -68,6 +70,7 @@ impl AppService {
             return false;
         }
         let key = key.to_owned();
+        let title = title.to_owned();
         let value = value.to_owned();
         let service = self.clone();
         if let Err(error) = std::thread::Builder::new()
@@ -76,6 +79,7 @@ impl AppService {
                 let result = run_command(
                     &command,
                     &key,
+                    &title,
                     url.as_deref().unwrap_or_default(),
                     &value,
                     || {
@@ -100,6 +104,7 @@ impl AppService {
 fn run_command(
     command: &str,
     key: &str,
+    title: &str,
     url: &str,
     value: &str,
     on_started: impl FnOnce(),
@@ -108,6 +113,7 @@ fn run_command(
         .arg("-c")
         .arg(command)
         .env("FINERY_TICKET_KEY", key)
+        .env("FINERY_TICKET_TITLE", title)
         .env("FINERY_TICKET_URL", url)
         .env("FINERY_CMD_VALUE", value)
         .stdin(Stdio::null())

@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use tuicore::{
-    AnimationSettings, ChildKey, EventCtx, FocusRequest, Key, KeyEvent, KeyModifiers, Propagation,
-    RenderCtx, TreePath, TuiEvent, TuiNode,
+    AnimationSettings, ChildKey, EventCtx, FocusManager, FocusRequest, Key, KeyEvent, KeyModifiers,
+    Propagation, RenderCtx, TreePath, TuiEvent, TuiNode,
 };
 
 use crate::{service::AppService, store::composer::ComposerState};
@@ -83,11 +83,18 @@ fn configured_command_values_activate_the_global_open_command_menu() {
     let _probe = crate::service::OpenCommandProbe::new(&service);
     service.settings().write().unwrap().open_command_enum = vec!["editor".into()];
     let mut app = root(service.clone(), Vec::new());
+    app.layout(Rect::new(0, 0, 96, 30), &mut tuicore::LayoutCtx::new());
 
-    assert!(service.open_command("FIN-42"));
-    app.apply_dialog_signals(&mut EventCtx::default());
+    assert!(service.open_command("FIN-42", "Ticket title"));
+    let mut ctx = EventCtx::default();
+    app.apply_dialog_signals(&mut ctx);
+    let mut layout = tuicore::LayoutCtx::new();
+    app.layout(Rect::new(0, 0, 96, 30), &mut layout);
+    let mut focus = FocusManager::new();
+    focus.apply_request(ctx.focus_request().unwrap(), layout.focus_targets());
 
     assert!(app.view.is_active());
+    assert_eq!(focus.current().unwrap().id, tuicore::FocusId::new("input"));
 }
 
 #[test]

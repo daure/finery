@@ -240,8 +240,8 @@ impl App {
         if !self.view.is_active()
             && let Some(request) = self.service.take_open_command_request()
         {
-            self.view.set_active_with_context(true, ctx);
             self.view.layer_mut().open(request, ctx);
+            self.view.set_active_with_context(true, ctx);
         }
         for event in self.view.base_mut().base_mut().layer_mut().take_events() {
             match event {

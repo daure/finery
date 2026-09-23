@@ -96,7 +96,7 @@ impl SettingsDialog {
                         values.open_command_key.label()
                     ))
                     .placeholder(
-                        "Empty: do nothing; use \"$FINERY_TICKET_KEY\" / \"$FINERY_TICKET_URL\"",
+                        "Use $FINERY_TICKET_KEY / $FINERY_TICKET_TITLE / $FINERY_TICKET_URL",
                     )
                     .on_edit_end(move |value| {
                         open_command_changes
