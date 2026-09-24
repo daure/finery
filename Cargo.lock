@@ -3148,7 +3148,7 @@ checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
 
 [[package]]
 name = "finery"
-version = "0.27.10"
+version = "0.27.11"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -10597,7 +10597,7 @@ dependencies = [
 
 [[package]]
 name = "tuicore"
-version = "0.40.9"
+version = "0.40.10"
 dependencies = [
  "ansi-to-tui",
  "base64 0.22.1",
