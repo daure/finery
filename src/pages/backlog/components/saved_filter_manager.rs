@@ -16,7 +16,9 @@ use tuicore::{
     Toggle, TuiEvent, TuiNode,
 };
 
-use super::filter_values::{SavedFilterField, option_id, option_value};
+use super::filter_values::{
+    SavedFilterField, option_id, option_value, saved_filter_label, sorted_saved_filters,
+};
 use crate::store::work_items::saved_filter::{BacklogFilterOptions, SavedBacklogFilter};
 use crate::{
     app_settings::{BacklogKeyBindings, ComposerKeyBinding},
@@ -266,8 +268,10 @@ impl FilterValueList {
         field: SavedFilterField,
         sender: Sender<SavedFilterManagerEvent>,
     ) -> Self {
-        let values = field.selection(values);
-        let available = field.options(available);
+        let mut values = field.selection(values);
+        field.sort_values(&mut values);
+        let mut available = field.options(available);
+        field.sort_values(&mut available);
         let rows = value_rows(&values, &available);
         let available_for_creator = available.clone();
         let mut list = ListControl::new_fields(
@@ -334,13 +338,14 @@ impl FilterValueList {
         if self.list.take_events().is_empty() {
             return;
         }
-        let values = unique_values(
+        let mut values = unique_values(
             self.list
                 .items()
                 .iter()
                 .map(|row| row.value.clone())
                 .collect(),
         );
+        self.field.sort_values(&mut values);
         self.list.set_rows(value_rows(&values, &self.available));
         self.refresh_dropdown_options();
         if let Some(id) = self.filter_id {
@@ -441,19 +446,14 @@ pub(in crate::pages::backlog) fn saved_filter_dialog(
     let selected = selected_id.and_then(|id| filters.iter().find(|filter| filter.id == id));
     let selector_sender = sender.clone();
     let mut selector = Dropdown::single(
-        filters.to_vec(),
+        sorted_saved_filters(filters),
         |filter: &SavedBacklogFilter| filter.id,
-        |filter| {
-            if filter.name.trim().is_empty() {
-                "New filter".into()
-            } else {
-                filter.name.clone()
-            }
-        },
+        |filter| saved_filter_label(filter).into(),
     )
     .label_position(DropdownLabelPosition::Inline)
     .variant(DropdownVariant::Filled)
     .placeholder("Select filter")
+    .search_placeholder("Search...")
     .hotkey("shift+f")
     .on_select(move |ids| {
         if let Some(id) = ids.first().copied() {
@@ -501,13 +501,15 @@ pub(in crate::pages::backlog) fn saved_filter_dialog(
 
     let estimated_sender = sender.clone();
     let estimated_id = selected.map(|filter| filter.id);
-    let estimated = Toggle::new("Include estimated tickets")
-        .checked(selected.is_none_or(|filter| filter.criteria.estimated))
+    let estimated = Toggle::new("Only unestimated tickets")
+        .checked(selected.is_some_and(|filter| !filter.criteria.estimated))
         .disabled(estimated_id.is_none())
-        .on_change(move |estimated| {
+        .on_change(move |unestimated_only| {
             if let Some(id) = estimated_id {
-                let _ =
-                    estimated_sender.send(SavedFilterManagerEvent::SetEstimated { id, estimated });
+                let _ = estimated_sender.send(SavedFilterManagerEvent::SetEstimated {
+                    id,
+                    estimated: !unestimated_only,
+                });
             }
         });
 
@@ -516,6 +518,7 @@ pub(in crate::pages::backlog) fn saved_filter_dialog(
         .child(
             "toolbar",
             Flex::row()
+                .gap(1)
                 .align(CrossAlign::Center)
                 .child("selector", selector, FlexItem::fill(1))
                 .child("new", create, FlexItem::fit_content())

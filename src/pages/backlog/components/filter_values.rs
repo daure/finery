@@ -1,5 +1,21 @@
 use ratatui::style::Style;
 
+use crate::store::work_items::saved_filter::SavedBacklogFilter;
+
+pub(super) fn saved_filter_label(filter: &SavedBacklogFilter) -> &str {
+    if filter.name.trim().is_empty() {
+        "New filter"
+    } else {
+        &filter.name
+    }
+}
+
+pub(super) fn sorted_saved_filters(filters: &[SavedBacklogFilter]) -> Vec<SavedBacklogFilter> {
+    let mut filters = filters.to_vec();
+    filters.sort_by_cached_key(|filter| saved_filter_label(filter).to_lowercase());
+    filters
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::pages::backlog) enum SavedFilterField {
     IssueTypes,
@@ -66,6 +82,10 @@ impl SavedFilterField {
         } else {
             value.into()
         }
+    }
+
+    pub(super) fn sort_values(self, values: &mut [String]) {
+        values.sort_by_cached_key(|value| self.label(value).to_lowercase());
     }
 
     pub(super) fn style(self, value: &str) -> Option<Style> {

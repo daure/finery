@@ -1728,7 +1728,35 @@ fn y_opens_the_composer_ticket_yank_menu_and_shortcuts_copy_values() {
     );
     assert_eq!(
         slack.clipboard_request(),
-        Some(format!(":ticket: {} - {}", ticket.key, ticket.title).as_str())
+        Some(
+            format!(
+                ":ticket: https://jira.example/browse/{} - {}",
+                ticket.key, ticket.title
+            )
+            .as_str()
+        )
+    );
+
+    page.dispatch_event(
+        &EventRoute::new(tickets.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('y'))),
+        &mut EventCtx::default(),
+    );
+    let mut full = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(tickets.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('f'))),
+        &mut full,
+    );
+    assert_eq!(
+        full.clipboard_request(),
+        Some(
+            format!(
+                "https://jira.example/browse/{} - {}",
+                ticket.key, ticket.title
+            )
+            .as_str()
+        )
     );
 
     page.dispatch_event(

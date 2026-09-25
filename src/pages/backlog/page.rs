@@ -27,6 +27,7 @@ use crate::{
         avatar::bubble_span,
         text_entry_paths::TextEntryPaths,
         ticket_content::{TicketContent, TicketDocument, image_scroll_container},
+        ticket_yank_menu::{TicketYankAction, TicketYankTarget},
     },
     jira::{self, JiraAssignee, JiraEpic, JiraFixVersion, JiraOption},
     service::AppService,
@@ -1220,8 +1221,8 @@ impl BacklogPage {
                 BacklogSectionEvent::OpenDescription { key } => {
                     self.open_ticket_description(&key, ctx)
                 }
-                BacklogSectionEvent::YankTicketUrl { key } => {
-                    self.copy_jira_url(&key, ctx);
+                BacklogSectionEvent::YankTicket { action, target } => {
+                    self.copy_ticket(action, &target, ctx);
                 }
                 BacklogSectionEvent::YankSprintGoal { goal } => {
                     ctx.copy_to_clipboard(goal);
@@ -2821,15 +2822,20 @@ impl BacklogPage {
         }
     }
 
-    fn copy_jira_url(&self, key: &str, ctx: &mut EventCtx<()>) {
+    fn copy_ticket(
+        &self,
+        action: TicketYankAction,
+        target: &TicketYankTarget,
+        ctx: &mut EventCtx<()>,
+    ) {
         let url = self
             .service
             .settings()
             .read()
             .ok()
-            .and_then(|settings| settings.jira_issue_url(key));
-        if let Some(url) = url {
-            ctx.copy_to_clipboard(url);
+            .and_then(|settings| settings.jira_issue_url(&target.key));
+        if let Some(value) = action.text(target, url.as_deref()) {
+            ctx.copy_to_clipboard(value);
         } else {
             self.service
                 .report_error("Could not copy Jira URL: Jira URL is not configured".into());

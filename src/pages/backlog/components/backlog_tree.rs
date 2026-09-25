@@ -8,6 +8,8 @@ use std::{
 
 #[path = "release_row.rs"]
 mod release_row;
+#[path = "tree_expansion.rs"]
+mod tree_expansion;
 
 use ratatui::{
     Frame,
@@ -46,7 +48,7 @@ use crate::{
     },
 };
 
-use super::filter_values::SavedFilterField;
+use super::filter_values::{SavedFilterField, saved_filter_label, sorted_saved_filters};
 
 const FILTER_POPUP_MAX_WIDTH: u16 = u16::MAX;
 
@@ -116,8 +118,9 @@ pub(in crate::pages::backlog) enum BacklogSectionEvent {
     OpenDescription {
         key: String,
     },
-    YankTicketUrl {
-        key: String,
+    YankTicket {
+        action: TicketYankAction,
+        target: TicketYankTarget,
     },
     YankSprintGoal {
         goal: String,
@@ -378,11 +381,12 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_settings(
             let _ = velocity_events.send(BacklogSectionEvent::OpenVelocity);
         }),
         estimated: Toggle::new("󰑭")
-            .checked(true)
+            .checked(false)
             .hotkey("shift+d")
             .preserve_focus_on_hotkey(true)
-            .on_change(move |estimated| {
-                let _ = estimated_events.send(BacklogSectionEvent::EstimatedChanged(estimated));
+            .on_change(move |unestimated_only| {
+                let _ =
+                    estimated_events.send(BacklogSectionEvent::EstimatedChanged(!unestimated_only));
             }),
         saved_filter: Dropdown::single(
             saved_filter_choices(&settings.saved_backlog_filters),
@@ -393,6 +397,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_settings(
         .alt_style(true)
         .variant(DropdownVariant::Filled)
         .placeholder("󰈲")
+        .search_placeholder("Search...")
         .no_selection_text("None")
         .field_padding_left(1)
         .hotkey("shift+f")
@@ -697,7 +702,7 @@ impl BacklogTree {
     pub(in crate::pages::backlog) fn set_estimated(&mut self, estimated: bool) {
         self.saved_filter.clear_selection();
         self.filters.estimated = estimated;
-        self.estimated.set_value(estimated);
+        self.estimated.set_value(!estimated);
         self.runway_markers_visible.set(self.show_runway_bands());
         let snapshot = self.snapshot.clone();
         self.set_snapshot(&snapshot);
@@ -755,7 +760,7 @@ impl BacklogTree {
         self.filters = BacklogFilters::default();
         self.saved_filter.close();
         self.saved_filter.clear_selection();
-        self.estimated.set_value(true);
+        self.estimated.set_value(false);
         self.issue_types.close();
         self.issue_types.clear_selection();
         self.users.close();
@@ -818,7 +823,7 @@ impl BacklogTree {
 
     fn apply_filter_criteria(&mut self, criteria: &BacklogFilterCriteria) {
         self.filters = BacklogFilters::from(criteria);
-        self.estimated.set_value(criteria.estimated);
+        self.estimated.set_value(!criteria.estimated);
         let issue_type_ids = self
             .issue_type_labels
             .borrow()
@@ -1370,12 +1375,12 @@ impl BacklogTree {
         let Some((action, target)) = self.yank_menu.take_selection() else {
             return;
         };
-        if action == TicketYankAction::Url {
+        if let Some(value) = action.text(&target, None) {
+            ctx.copy_to_clipboard(value);
+        } else {
             let _ = self
                 .events
-                .send(BacklogSectionEvent::YankTicketUrl { key: target.key });
-        } else if let Some(value) = action.text(&target) {
-            ctx.copy_to_clipboard(value);
+                .send(BacklogSectionEvent::YankTicket { action, target });
         }
     }
 
@@ -1554,6 +1559,9 @@ impl BacklogTree {
         dispatch: impl FnOnce(&mut ListControl<BacklogRow, String>, &mut EventCtx<()>) -> EventOutcome,
     ) -> EventOutcome {
         if self.handle_yank(event, ctx) {
+            return EventOutcome::Handled;
+        }
+        if self.handle_bulk_expansion(event, ctx) {
             return EventOutcome::Handled;
         }
         if self.handle_ticket_number_jump(event, ctx) {
@@ -2705,15 +2713,15 @@ impl From<&BacklogFilterCriteria> for BacklogFilters {
 }
 
 fn saved_filter_choices(filters: &[SavedBacklogFilter]) -> Vec<SavedFilterChoice> {
-    filters
+    sorted_saved_filters(filters)
         .iter()
         .map(|filter| SavedFilterChoice {
             id: format!("filter:{}", filter.id),
-            label: filter.name.clone(),
+            label: saved_filter_label(filter).into(),
         })
         .chain(std::iter::once(SavedFilterChoice {
             id: "manage".into(),
-            label: "Manage filters…".into(),
+            label: "Manage filters...".into(),
         }))
         .collect()
 }
@@ -3469,6 +3477,9 @@ struct StatusSummary {
 fn status_summaries(items: &[&WorkItem]) -> Vec<StatusSummary> {
     let mut summaries = Vec::<StatusSummary>::new();
     for item in items {
+        if is_subtask(item) {
+            continue;
+        }
         let category = if item.status_category == StatusCategory::Unknown && item.done {
             StatusCategory::Done
         } else {

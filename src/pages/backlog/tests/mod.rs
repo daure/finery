@@ -1,5 +1,7 @@
 mod missing_filter_values;
 mod saved_filter_runtime;
+mod tree_expansion;
+mod yank;
 
 use std::{
     cell::{Cell, RefCell},
@@ -699,6 +701,20 @@ fn backlog_groups_all_ticket_types_by_user_with_estimation_and_status_summaries(
         parent_key: Some("FIN-8".into()),
         ..work_item("FIN-11", "Finish the work")
     };
+    let in_progress_subtask = WorkItem {
+        kind: "SUBTASK".into(),
+        status: "Work In Progress".into(),
+        status_category: crate::store::work_items::StatusCategory::InProgress,
+        parent_key: Some("FIN-8".into()),
+        ..work_item("FIN-14", "Implement part of the work")
+    };
+    let done_bug = WorkItem {
+        kind: "Bug".into(),
+        status: "Done".into(),
+        status_category: crate::store::work_items::StatusCategory::Done,
+        done: true,
+        ..work_item("FIN-15", "Resolve the defect")
+    };
     let todo_bug = WorkItem {
         kind: "Bug".into(),
         status: "TODO Grooming".into(),
@@ -709,7 +725,16 @@ fn backlog_groups_all_ticket_types_by_user_with_estimation_and_status_summaries(
         assignee: "Unassigned".into(),
         ..work_item("FIN-12", "Assign the work")
     };
-    snapshot.work_items = vec![task, in_progress_story, bug, subtask, todo_bug, unassigned];
+    snapshot.work_items = vec![
+        task,
+        in_progress_story,
+        bug,
+        subtask,
+        in_progress_subtask,
+        done_bug,
+        todo_bug,
+        unassigned,
+    ];
 
     let (sender, _) = mpsc::channel();
     let mut tree = backlog_tree(&snapshot, sender, Default::default());
@@ -726,7 +751,7 @@ fn backlog_groups_all_ticket_types_by_user_with_estimation_and_status_summaries(
         .unwrap();
 
     let lines = rendered_lines(&terminal, area);
-    assert!(lines[2].contains("󰀆 Ada • 󰄰 2/3 est • 6 items"));
+    assert!(lines[2].contains("󰀆 Ada • 󰄰 2/3 est • 8 items"));
     assert_eq!(
         lines[3].trim(),
         "1 Product Backlog • 1 Team To Do Queue • 1 TODO Grooming • 1 Work In Progress • 1 QA Review • 1 Done"
@@ -1343,6 +1368,32 @@ fn estimated_toggle_filters_the_loaded_backlog_without_reloading() {
     let text = rendered_lines(&terminal, area).concat();
     assert!(!text.contains("Estimated story"));
     assert!(text.contains("Unestimated story"));
+    assert!(text.contains("──● 󰑭"));
+
+    page.dispatch_event(
+        &EventRoute::new(TreePath::from_keys([
+            ChildKey::first(),
+            ChildKey::first(),
+            ChildKey::new("estimated"),
+        ])),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('d'),
+            modifiers: KeyModifiers::SHIFT,
+        }),
+        &mut EventCtx::default(),
+    );
+    page.layout(area, &mut LayoutCtx::new());
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            page.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(text.contains("Estimated story"));
+    assert!(text.contains("Unestimated story"));
+    assert!(text.contains("○── 󰑭"));
 }
 
 #[test]
@@ -2494,8 +2545,12 @@ fn saved_filter_dialog_shows_every_filter_and_marks_unavailable_values() {
         id: 1,
         name: "Release readiness".into(),
         criteria: BacklogFilterCriteria {
-            users: vec!["Ada".into(), "Former contractor".into()],
-            releases: vec!["4.8".into()],
+            issue_types: vec!["Task".into(), "Bug".into()],
+            users: vec!["Former contractor".into(), "Ada".into()],
+            statuses: vec!["To Do".into(), "in progress".into()],
+            epics: vec!["Platform".into(), "delivery".into()],
+            labels: vec!["ready".into(), "backend".into()],
+            releases: vec!["4.9".into(), "4.8".into()],
             ..BacklogFilterCriteria::default()
         },
     };
@@ -2516,7 +2571,7 @@ fn saved_filter_dialog_shows_every_filter_and_marks_unavailable_values() {
         Rc::new(Cell::new(false)),
         None,
     );
-    let area = Rect::new(0, 0, 90, 46);
+    let area = Rect::new(0, 0, 180, 70);
     dialog.layout(area, &mut LayoutCtx::new());
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
     terminal
@@ -2531,6 +2586,18 @@ fn saved_filter_dialog_shows_every_filter_and_marks_unavailable_values() {
     let text = lines.join("\n");
     for title in ["Types", "Users", "Statuses", "Epics", "Labels", "Releases"] {
         assert!(text.contains(title), "missing {title} filter");
+    }
+    for (first, second) in [
+        ("Bug", "Task"),
+        ("Ada", "Former contractor"),
+        ("in progress", "To Do"),
+        ("delivery", "Platform"),
+        ("backend", "ready"),
+        ("4.8", "4.9"),
+    ] {
+        let first_row = lines.iter().position(|line| line.contains(first)).unwrap();
+        let second_row = lines.iter().position(|line| line.contains(second)).unwrap();
+        assert!(first_row < second_row, "{first} must sort before {second}");
     }
     let unavailable_y = lines
         .iter()
@@ -2694,8 +2761,9 @@ fn saved_filter_delete_confirmation_keeps_the_manager_underneath() {
 fn saved_filter_selector_popup_is_visible_inside_the_right_dock() {
     tuicore::init();
     let filters = [
-        SavedBacklogFilter::new(1, "First filter"),
-        SavedBacklogFilter::new(2, "Second filter"),
+        SavedBacklogFilter::new(1, "Zulu filter"),
+        SavedBacklogFilter::new(2, "alpha filter"),
+        SavedBacklogFilter::new(3, "Bravo filter"),
     ];
     let (sender, _) = mpsc::channel();
     let mut manager = saved_filter_dialog(
@@ -2706,7 +2774,7 @@ fn saved_filter_selector_popup_is_visible_inside_the_right_dock() {
         Rc::new(Cell::new(false)),
         None,
     );
-    let area = Rect::new(0, 0, 100, 30);
+    let area = Rect::new(0, 0, 180, 30);
     let mut layout = LayoutCtx::new();
     manager.layout(area, &mut layout);
     let selector = layout
@@ -2721,6 +2789,18 @@ fn saved_filter_selector_popup_is_visible_inside_the_right_dock() {
         })
         .unwrap()
         .clone();
+    let new = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.hotkey_sequences == ["shift+n"])
+        .unwrap();
+    let delete = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.hotkey_sequences == ["shift+d"])
+        .unwrap();
+    assert_eq!(new.area.x, selector.area.right() + 1);
+    assert_eq!(delete.area.x, new.area.right() + 1);
     manager.dispatch_event(
         &EventRoute::new(selector.path),
         &TuiEvent::Key(KeyEvent::from(Key::Enter)),
@@ -2736,11 +2816,11 @@ fn saved_filter_selector_popup_is_visible_inside_the_right_dock() {
         })
         .unwrap();
 
-    assert!(
-        rendered_lines(&terminal, area)
-            .iter()
-            .any(|line| line.contains("Second filter"))
-    );
+    let lines = rendered_lines(&terminal, area);
+    let positions = ["alpha filter", "Bravo filter", "Zulu filter"]
+        .map(|name| lines.iter().rposition(|line| line.contains(name)).unwrap());
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(lines.iter().any(|line| line.contains("Search...")));
 }
 
 #[test]
@@ -2748,7 +2828,7 @@ fn saved_filter_value_popup_is_visible_inside_the_right_dock() {
     tuicore::init();
     let filter = SavedBacklogFilter::new(1, "Filter");
     let options = BacklogFilterOptions {
-        users: vec!["Ada".into(), "Grace".into(), "Linus".into()],
+        users: vec!["Linus".into(), "Ada".into(), "Grace".into()],
         ..BacklogFilterOptions::default()
     };
     let (sender, _) = mpsc::channel();
@@ -2994,7 +3074,11 @@ fn saved_filter_is_selectable_in_the_backlog_toolbar_and_applies_locally() {
     };
     let (sender, _) = mpsc::channel();
     let mut tree = backlog_tree(&backlog_snapshot, sender, Default::default());
-    tree.set_saved_filters(std::slice::from_ref(&filter));
+    tree.set_saved_filters(&[
+        SavedBacklogFilter::new(2, "Zulu filter"),
+        filter.clone(),
+        SavedBacklogFilter::new(3, "beta filter"),
+    ]);
     tree.apply_saved_filter(&filter);
     let area = Rect::new(0, 0, 180, 20);
     tree.layout(area, &mut LayoutCtx::new());
@@ -3011,6 +3095,46 @@ fn saved_filter_is_selectable_in_the_backlog_toolbar_and_applies_locally() {
     assert!(text.contains("Ada only"));
     assert!(text.contains("Ada backlog work"));
     assert!(!text.contains("Plan next sprint"));
+    assert!(text.contains("○── 󰑭"));
+
+    let mut layout = LayoutCtx::new();
+    layout.with_overlay_bounds(area, |ctx| tree.layout(area, ctx));
+    let selector = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.path == TreePath::from_keys([ChildKey::new("saved-filter")]))
+        .unwrap();
+    tree.dispatch_focus(selector, true, &mut FocusCtx::default());
+    tree.dispatch_event(
+        &EventRoute::new(TreePath::from_keys([ChildKey::new("saved-filter")])),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::default(),
+    );
+    let mut layout = LayoutCtx::new();
+    layout.with_overlay_bounds(area, |ctx| tree.layout(area, ctx));
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let lines = rendered_lines(&terminal, area);
+    let positions = [
+        "None",
+        "Ada only",
+        "beta filter",
+        "Zulu filter",
+        "Manage filters...",
+    ]
+    .map(|name| {
+        lines
+            .iter()
+            .rposition(|line| line.contains(name))
+            .unwrap_or_else(|| panic!("missing {name}: {lines:?}"))
+    });
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(lines.iter().any(|line| line.contains("Search...")));
 }
 
 #[test]
@@ -4201,7 +4325,7 @@ fn y_opens_the_backlog_ticket_yank_menu_with_immediate_navigation() {
     );
     assert!(matches!(
         receiver.try_recv(),
-        Ok(super::components::BacklogSectionEvent::YankTicketUrl { key: copied }) if copied == key
+        Ok(super::components::BacklogSectionEvent::YankTicket { action: crate::components::ticket_yank_menu::TicketYankAction::Url, target }) if target.key == key
     ));
 
     tree.highlight("section:backlog");

@@ -14,27 +14,35 @@ fn target() -> TicketYankTarget {
 #[test]
 fn yank_formats_each_ticket_value() {
     let target = target();
+    let url = Some("https://jira.example/browse/FIN-42");
 
-    assert_eq!(TicketYankAction::Url.text(&target), None);
+    for action in [
+        TicketYankAction::Url,
+        TicketYankAction::Full,
+        TicketYankAction::Slack,
+    ] {
+        assert_eq!(action.text(&target, None), None);
+    }
+    assert_eq!(TicketYankAction::Url.text(&target, url).as_deref(), url);
     assert_eq!(
-        TicketYankAction::Title.text(&target).as_deref(),
+        TicketYankAction::Title.text(&target, None).as_deref(),
         Some("Copy this ticket")
     );
     assert_eq!(
-        TicketYankAction::Description.text(&target).as_deref(),
+        TicketYankAction::Description.text(&target, None).as_deref(),
         Some("Ticket details")
     );
     assert_eq!(
-        TicketYankAction::Key.text(&target).as_deref(),
+        TicketYankAction::Key.text(&target, None).as_deref(),
         Some("FIN-42")
     );
     assert_eq!(
-        TicketYankAction::Full.text(&target).as_deref(),
-        Some("FIN-42 - Copy this ticket")
+        TicketYankAction::Full.text(&target, url).as_deref(),
+        Some("https://jira.example/browse/FIN-42 - Copy this ticket")
     );
     assert_eq!(
-        TicketYankAction::Slack.text(&target).as_deref(),
-        Some(":ticket: FIN-42 - Copy this ticket")
+        TicketYankAction::Slack.text(&target, url).as_deref(),
+        Some(":ticket: https://jira.example/browse/FIN-42 - Copy this ticket")
     );
 
     let image = crate::store::work_items::content::ticket_image_marker(
@@ -50,7 +58,7 @@ fn yank_formats_each_ticket_value() {
         ..target
     };
     assert_eq!(
-        TicketYankAction::Description.text(&target).as_deref(),
+        TicketYankAction::Description.text(&target, None).as_deref(),
         Some("Before\n\n![cart.png](<https://jira.example/attachment/42>)\n\nAfter")
     );
 }

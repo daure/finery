@@ -219,11 +219,6 @@ fn saved_filter_editor_adds_and_removes_missing_values() {
         .unwrap();
     let route = EventRoute::new(input.path.clone());
     manager.dispatch_focus(input, true, &mut FocusCtx::default());
-    manager.dispatch_event(
-        &route,
-        &TuiEvent::Key(ctrl(Key::Char('j'))),
-        &mut EventCtx::default(),
-    );
     let terminal = render(&mut manager);
     let lines = rendered_lines(&terminal, AREA);
     let y = lines
@@ -235,7 +230,7 @@ fn saved_filter_editor_adds_and_removes_missing_values() {
         terminal.backend().buffer()[(x, y as u16)].fg,
         tuicore::theme().muted_fg()
     );
-    for key in [ctrl(Key::Char('k')), KeyEvent::from(Key::Enter)] {
+    for key in [ctrl(Key::Char('j')), KeyEvent::from(Key::Enter)] {
         manager.dispatch_event(&route, &TuiEvent::Key(key), &mut EventCtx::default());
     }
     assert_eq!(

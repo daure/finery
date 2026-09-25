@@ -23,7 +23,7 @@ use crate::{
     app_settings::{AppSettings, ComposerKeyBinding, ComposerKeyBindings},
     components::{
         ticket_number_jump::{TicketNumberJump, exact_ticket_number_matches},
-        ticket_yank_menu::{TicketYankAction, TicketYankMenu, TicketYankTarget},
+        ticket_yank_menu::{TicketYankMenu, TicketYankTarget},
     },
     service::{AppService, ComposerSearchTicket},
     speed_reader_settings::SpeedReaderSettings,
@@ -1147,7 +1147,9 @@ impl TicketEditor {
         let Some((action, target)) = self.yank_menu.take_selection() else {
             return;
         };
-        if action == TicketYankAction::Url {
+        if let Some(value) = action.text(&target, None) {
+            ctx.copy_to_clipboard(value);
+        } else {
             if target.key.starts_with("NEW-") {
                 self.service
                     .report_error("Could not copy Jira URL for a local draft".into());
@@ -1158,14 +1160,12 @@ impl TicketEditor {
                 .read()
                 .ok()
                 .and_then(|settings| settings.jira_issue_url(&target.key));
-            if let Some(url) = url {
-                ctx.copy_to_clipboard(url);
+            if let Some(value) = action.text(&target, url.as_deref()) {
+                ctx.copy_to_clipboard(value);
             } else {
                 self.service
                     .report_error("Could not copy Jira URL: Jira URL is not configured".into());
             }
-        } else if let Some(value) = action.text(&target) {
-            ctx.copy_to_clipboard(value);
         }
     }
 

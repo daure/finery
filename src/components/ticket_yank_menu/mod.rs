@@ -61,14 +61,14 @@ impl TicketYankAction {
         }
     }
 
-    pub(crate) fn text(self, target: &TicketYankTarget) -> Option<String> {
+    pub(crate) fn text(self, target: &TicketYankTarget, url: Option<&str>) -> Option<String> {
         match self {
-            Self::Url => None,
+            Self::Url => url.map(str::to_owned),
             Self::Title => Some(target.title.clone()),
             Self::Description => Some(ticket_content_markdown(&target.description)),
             Self::Key => Some(target.key.clone()),
-            Self::Full => Some(format!("{} - {}", target.key, target.title)),
-            Self::Slack => Some(format!(":ticket: {} - {}", target.key, target.title)),
+            Self::Full => Some(format!("{} - {}", url?, target.title)),
+            Self::Slack => Some(format!(":ticket: {} - {}", url?, target.title)),
         }
     }
 }
