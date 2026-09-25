@@ -1,6 +1,6 @@
 [package]
 name = "finery"
-version = "0.27.11"
+version = "0.27.12"
 edition = "2024"
 default-run = "finery"
 description = "Keyboard-first Jira backlog and Composer with optional MCP access"
