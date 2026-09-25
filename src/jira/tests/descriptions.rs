@@ -118,7 +118,7 @@ fn backlog_and_sprint_descriptions_use_composer_markdown() {
         serde_json::from_str(lookups[0].split_once("\r\n\r\n").unwrap().1).unwrap();
     assert_eq!(
         payload,
-        json!({"issueIdsOrKeys":["FIN-1","FIN-2"],"fields":["description"]})
+        json!({"issueIdsOrKeys":["FIN-1","FIN-2"],"fields":["description","attachment"]})
     );
 }
 

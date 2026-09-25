@@ -11,26 +11,29 @@ use ratatui::{
     layout::{Constraint, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Borders, Paragraph as RatatuiParagraph, Wrap},
+    widgets::{Block, Borders, Paragraph as RatatuiParagraph, Wrap},
 };
 use tuicore::{
     AnimationSettings, ChildKey, Column, CrossAlign, DataView, Dialog, DialogBackdrop, DialogHost,
     DialogLayer, DialogLayerPlacement, DockChrome, DockSpec, EventCtx, EventOutcome, EventRoute,
-    Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, Language, LayoutCtx,
-    LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx, MainAlign, Paragraph, RelativeDate,
-    RenderCtx, ScrollContainer, Spinner, SyntaxHighlighter, Tab, Tabs, TabsVariant, TickResult,
-    TreeAdapter, TreePath, TuiEvent, TuiNode,
+    Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, LayoutCtx, LayoutProposal,
+    LayoutResult, LayoutSizeHint, LifecycleCtx, MainAlign, Paragraph, RelativeDate, RenderCtx,
+    ScrollContainer, ScrollbarConfig, Spinner, Tab, Tabs, TabsVariant, TickResult, TreePath,
+    TuiEvent, TuiNode,
 };
 
 use crate::{
     app_settings::{AppSettings, BacklogRunwaySettings},
-    components::avatar::bubble_span,
+    components::{
+        avatar::bubble_span,
+        ticket_content::{DIRECT_KITTY_SCROLL_PAUSE, TicketContent, TicketDocument},
+    },
     jira::{self, JiraAssignee, JiraEpic, JiraFixVersion, JiraOption},
     service::AppService,
     store::work_items::{
-        BacklogSnapshot, RankPlan, Sprint, StatusTransition, TicketComments, VelocityReport,
-        VelocitySprint, WorkItem, apply_capacity, is_done_status, loaded_story_point_average,
-        rank_plan,
+        BacklogSnapshot, RankPlan, Sprint, StatusTransition, TicketComment, TicketComments,
+        VelocityReport, VelocitySprint, WorkItem, apply_capacity, is_done_status,
+        loaded_story_point_average, rank_plan,
     },
 };
 
@@ -2342,10 +2345,14 @@ impl BacklogPage {
         let comments = Rc::new(RefCell::new(comments));
         self.description_dialog_comments = Some(Rc::clone(&comments));
         let close_requested = Rc::clone(&self.description_dialog_close_requested);
-        let service = self.service.clone();
-        let tabs = ticket_detail_tabs(description, comments, selected_tab, move |comment_id| {
-            service.open_jira_comment(&key, &comment_id);
-        })
+        let open_service = self.service.clone();
+        let tabs = ticket_detail_tabs(
+            description,
+            comments,
+            selected_tab,
+            self.service.clone(),
+            move |comment_id| open_service.open_jira_comment(&key, &comment_id),
+        )
         .on_close(move |_| close_requested.set(true));
         self.view.replace_layer(Box::new(tabs), ctx);
         self.dock_description_dialog(self.area.width);
@@ -3974,61 +3981,152 @@ fn empty_snapshot() -> BacklogSnapshot {
 pub(super) struct TicketCommentsPane {
     comments: SharedTicketComments,
     rendered_comments: TicketComments,
-    data_view: DataView<TicketCommentRow, String>,
-    rendered_theme: tuicore::ThemeName,
+    service: AppService,
+    content: ScrollContainer<Flex<()>>,
+    ordered_comments: Vec<TicketComment>,
+    selected: Rc<Cell<usize>>,
     open_comment: Box<dyn Fn(String)>,
+    focused: bool,
 }
 
 impl TicketCommentsPane {
     pub(super) fn new(
         comments: SharedTicketComments,
+        service: AppService,
         open_comment: impl Fn(String) + 'static,
     ) -> Self {
         let rendered_comments = comments.borrow().clone();
+        let selected = Rc::new(Cell::new(0));
+        let (document, ordered_comments) =
+            ticket_comments_document(&rendered_comments, service.clone(), Rc::clone(&selected));
         Self {
-            data_view: ticket_comments_data_view(&rendered_comments),
+            content: ScrollContainer::vertical(document)
+                .pause_direct_kitty_while_scrolling(DIRECT_KITTY_SCROLL_PAUSE)
+                .scrollbars(ScrollbarConfig::default()),
             comments,
             rendered_comments,
-            rendered_theme: tuicore::theme().name(),
+            service,
+            ordered_comments,
+            selected,
             open_comment: Box::new(open_comment),
+            focused: false,
         }
     }
 
-    fn drain_events(&mut self) {
-        for event in self.data_view.take_events() {
-            if let tuicore::DataViewTypedEvent::Activated { row_id } = event {
-                (self.open_comment)(row_id);
-            }
+    fn rebuild(&mut self) {
+        let selected = self
+            .selected
+            .get()
+            .min(self.rendered_comments.comments.len().saturating_sub(1));
+        self.selected.set(selected);
+        let (document, ordered_comments) = ticket_comments_document(
+            &self.rendered_comments,
+            self.service.clone(),
+            Rc::clone(&self.selected),
+        );
+        self.content = ScrollContainer::vertical(document)
+            .pause_direct_kitty_while_scrolling(DIRECT_KITTY_SCROLL_PAUSE)
+            .scrollbars(ScrollbarConfig::default());
+        self.content.set_focused(self.focused);
+        self.ordered_comments = ordered_comments;
+    }
+
+    fn select_relative(&mut self, delta: isize, ctx: &mut EventCtx<()>) -> bool {
+        if self.ordered_comments.is_empty() {
+            return false;
+        }
+        let current = self.selected.get();
+        let next = current
+            .saturating_add_signed(delta)
+            .min(self.ordered_comments.len().saturating_sub(1));
+        if next == current {
+            return false;
+        }
+        self.selected.set(next);
+        self.reveal_selected(ctx.animation());
+        ctx.request_redraw();
+        ctx.request_layout();
+        ctx.request_tick();
+        true
+    }
+
+    fn reveal_selected(&mut self, settings: AnimationSettings) {
+        let Some(comment) = self.ordered_comments.get(self.selected.get()) else {
+            return;
+        };
+        let Some(area) = self
+            .content
+            .child()
+            .child_rect(&ChildKey::new(format!("comment-{}", comment.id)))
+        else {
+            return;
+        };
+        let geometry = self.content.scroll_geometry();
+        let offset = self.content.target_offset();
+        let top = usize::from(area.y);
+        let bottom = usize::from(area.bottom());
+        let visible_bottom = offset.y.saturating_add(geometry.viewport.height);
+        let y = if top < offset.y {
+            top
+        } else if bottom > visible_bottom {
+            bottom.saturating_sub(geometry.viewport.height)
+        } else {
+            offset.y
+        };
+        self.content
+            .scroll_to(tuicore::ScrollOffset::new(offset.x, y), settings);
+    }
+
+    fn activate_selected(&self) -> bool {
+        let Some(comment) = self.ordered_comments.get(self.selected.get()) else {
+            return false;
+        };
+        (self.open_comment)(comment.id.clone());
+        true
+    }
+
+    fn handle_key(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> Option<EventOutcome> {
+        let TuiEvent::Key(key) = event else {
+            return None;
+        };
+        let keys = tuicore::keybindings();
+        let handled = if keys.line_up_matches(*key) {
+            self.select_relative(-1, ctx)
+        } else if keys.line_down_matches(*key) {
+            self.select_relative(1, ctx)
+        } else if keys.data_view().activate_matches(*key) {
+            self.activate_selected()
+        } else {
+            return None;
+        };
+        if handled {
+            ctx.stop_propagation();
+            Some(EventOutcome::Handled)
+        } else {
+            Some(EventOutcome::Ignored)
         }
     }
 }
 
 impl TuiNode for TicketCommentsPane {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
-        <DataView<TicketCommentRow, String> as TuiNode<()>>::measure(&self.data_view, proposal)
+        self.content.measure(proposal)
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        <DataView<TicketCommentRow, String> as TuiNode<()>>::layout(&mut self.data_view, area, ctx)
+        ctx.register_focusable(FocusId::new("ticket-comments"), area, true);
+        self.content.layout(area, ctx)
     }
 
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
-        <DataView<TicketCommentRow, String> as TuiNode<()>>::render(
-            &self.data_view,
-            frame,
-            area,
-            ctx,
-        );
+        self.content.render(frame, area, ctx);
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        let outcome = <DataView<TicketCommentRow, String> as TuiNode<()>>::event(
-            &mut self.data_view,
-            event,
-            ctx,
-        );
-        self.drain_events();
-        outcome
+        self.handle_key(event, ctx).unwrap_or_else(|| {
+            self.content
+                .dispatch_event(&EventRoute::new(TreePath::new()), event, ctx)
+        })
     }
 
     fn dispatch_event(
@@ -4037,40 +4135,25 @@ impl TuiNode for TicketCommentsPane {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        let outcome = <DataView<TicketCommentRow, String> as TuiNode<()>>::dispatch_event(
-            &mut self.data_view,
-            route,
-            event,
-            ctx,
-        );
-        self.drain_events();
-        outcome
+        self.handle_key(event, ctx)
+            .unwrap_or_else(|| self.content.dispatch_event(route, event, ctx))
     }
 
-    fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
-        <DataView<TicketCommentRow, String> as TuiNode<()>>::focus(
-            &mut self.data_view,
-            target,
-            focused,
-            ctx,
-        );
+    fn focus(&mut self, _target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
+        self.focused = focused;
+        self.content.set_focused(focused);
+        ctx.request_redraw();
     }
 
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
-        <DataView<TicketCommentRow, String> as TuiNode<()>>::dispatch_focus(
-            &mut self.data_view,
-            target,
-            focused,
-            ctx,
-        );
+        self.focus(Some(&target.id), focused, ctx);
     }
 
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         let comments = self.comments.borrow().clone();
         if comments != self.rendered_comments {
             self.rendered_comments = comments;
-            self.data_view = ticket_comments_data_view(&self.rendered_comments);
-            self.rendered_theme = tuicore::theme().name();
+            self.rebuild();
             return TickResult {
                 changed: true,
                 layout: true,
@@ -4078,18 +4161,23 @@ impl TuiNode for TicketCommentsPane {
                 next_tick: None,
             };
         }
-        if self.rendered_theme != tuicore::theme().name() {
-            self.rendered_theme = tuicore::theme().name();
-            self.data_view
-                .set_rows(ticket_comment_rows(&self.rendered_comments));
-            return TickResult {
-                changed: true,
-                layout: true,
-                active: false,
-                next_tick: None,
-            };
-        }
-        <DataView<TicketCommentRow, String> as TuiNode<()>>::tick(&mut self.data_view, dt, settings)
+        self.content.tick(dt, settings)
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.content.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.content.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.content.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.content.destroy(ctx);
     }
 }
 
@@ -4097,17 +4185,18 @@ fn ticket_detail_tabs(
     description: String,
     comments: SharedTicketComments,
     selected_tab: usize,
+    service: AppService,
     open_comment: impl Fn(String) + 'static,
 ) -> Tabs<()> {
     let comments_total = comments.borrow().total;
     Tabs::dialog(vec![
         Tab::new(
             "Description",
-            SyntaxHighlighter::new(description, Language::Markdown).wrap(true),
+            TicketContent::new(description, service.clone()),
         ),
         Tab::new(
             format!("Comments ({comments_total})"),
-            TicketCommentsPane::new(comments, open_comment),
+            TicketCommentsPane::new(comments, service, open_comment),
         ),
     ])
     .selected(selected_tab)
@@ -4115,79 +4204,219 @@ fn ticket_detail_tabs(
     .edge_borders(Borders::TOP)
 }
 
-#[derive(Clone)]
-struct TicketCommentRow {
-    comment: crate::store::work_items::TicketComment,
-    body: Text<'static>,
+struct TicketCommentCard {
+    comment: TicketComment,
+    body: TicketDocument,
+    depth: usize,
+    index: usize,
+    selected: Rc<Cell<usize>>,
 }
 
-fn ticket_comment_rows(comments: &TicketComments) -> Vec<TicketCommentRow> {
-    comments
-        .comments
-        .iter()
-        .cloned()
-        .map(|comment| {
-            let source = ticket_comment_body_lines(&comment.body).join("\n");
-            let body = if source.trim().is_empty() {
-                Text::from(Span::styled(
-                    "(empty)",
-                    Style::default().fg(tuicore::theme().muted_fg()),
-                ))
-            } else {
-                SyntaxHighlighter::new(source, Language::Markdown).highlighted_text()
-            };
-            TicketCommentRow { comment, body }
-        })
-        .collect()
+impl TicketCommentCard {
+    fn new(
+        comment: TicketComment,
+        depth: usize,
+        index: usize,
+        selected: Rc<Cell<usize>>,
+        service: AppService,
+    ) -> Self {
+        let mut source = ticket_comment_body_lines(&comment.body).join("\n");
+        if source.trim().is_empty() {
+            source = "*(empty)*".into();
+        }
+        Self {
+            comment,
+            body: TicketDocument::new(source, service),
+            depth,
+            index,
+            selected,
+        }
+    }
+
+    fn indent(&self, width: u16) -> u16 {
+        u16::try_from(self.depth.saturating_mul(2))
+            .unwrap_or(u16::MAX)
+            .min(width.saturating_sub(1))
+    }
+
+    fn body_area(&self, area: Rect) -> Rect {
+        let indent = self.indent(area.width);
+        Rect::new(
+            area.x.saturating_add(indent),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(indent),
+            area.height.saturating_sub(1),
+        )
+    }
 }
 
-fn ticket_comments_data_view(comments: &TicketComments) -> DataView<TicketCommentRow, String> {
-    let rows = ticket_comment_rows(comments);
-    let expanded = rows
-        .iter()
-        .filter(|row| {
-            rows.iter().any(|candidate| {
-                candidate.comment.parent_id.as_deref() == Some(row.comment.id.as_str())
-            })
-        })
-        .map(|row| row.comment.id.clone())
-        .collect::<Vec<_>>();
-    DataView::new(rows, |row: &TicketCommentRow| row.comment.id.clone())
-        .activation_mode(tuicore::ActivationMode::OnActivateKey)
-        .headers(false)
-        .columns(vec![Column::multiline(
-            "comment",
-            "Comment",
-            Constraint::Percentage(100),
-            |row: &TicketCommentRow, _| ticket_comment_text(row),
-        )])
-        .tree(TreeAdapter::parent_id(|row: &TicketCommentRow| {
-            row.comment.parent_id.clone()
-        }))
-        .expanded(expanded)
-        .row_height_by(ticket_comment_row_height)
-        .wrap_cells()
-        .empty_message("No comments")
+impl TuiNode for TicketCommentCard {
+    fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
+        let indent = match proposal.width {
+            tuicore::AxisProposal::Unbounded => self.indent(u16::MAX),
+            tuicore::AxisProposal::AtMost(width) | tuicore::AxisProposal::Exact(width) => {
+                self.indent(width)
+            }
+        };
+        let body = self.body.measure(LayoutProposal {
+            width: match proposal.width {
+                tuicore::AxisProposal::Unbounded => tuicore::AxisProposal::Unbounded,
+                tuicore::AxisProposal::AtMost(width) => {
+                    tuicore::AxisProposal::AtMost(width.saturating_sub(indent))
+                }
+                tuicore::AxisProposal::Exact(width) => {
+                    tuicore::AxisProposal::Exact(width.saturating_sub(indent))
+                }
+            },
+            height: proposal.height,
+        });
+        LayoutSizeHint::content(
+            body.preferred.width.saturating_add(indent),
+            body.preferred.height.saturating_add(1),
+        )
+        .normalized(proposal)
+    }
+
+    fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
+        self.body.layout(self.body_area(area), ctx);
+        LayoutResult::new(area)
+    }
+
+    fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        let indent = self.indent(area.width);
+        let header = Rect::new(
+            area.x.saturating_add(indent),
+            area.y,
+            area.width.saturating_sub(indent),
+            1,
+        );
+        if self.selected.get() == self.index {
+            frame.render_widget(
+                Block::default().style(Style::default().bg(tuicore::theme().selected_bg())),
+                header,
+            );
+        }
+        frame.render_widget(
+            RatatuiParagraph::new(ticket_comment_header(&self.comment)),
+            header,
+        );
+        self.body.render(frame, self.body_area(area), ctx);
+    }
+
+    fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
+        self.body.tick(dt, settings)
+    }
+
+    fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.body.init(ctx);
+    }
+
+    fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.body.mount(ctx);
+    }
+
+    fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.body.unmount(ctx);
+    }
+
+    fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
+        self.body.destroy(ctx);
+    }
 }
 
-fn ticket_comment_text(row: &TicketCommentRow) -> Text<'static> {
+fn ticket_comment_header(comment: &TicketComment) -> Line<'static> {
     let theme = tuicore::theme();
-    let author = if row.comment.author.is_empty() {
+    let author = if comment.author.is_empty() {
         "Unknown"
     } else {
-        &row.comment.author
+        &comment.author
     };
-    let mut lines = vec![Line::from(vec![
+    Line::from(vec![
         bubble_span(author),
         Span::styled(format!(" ({author})"), Style::default().fg(theme.text_fg())),
         Span::styled(" · ", Style::default().fg(theme.muted_fg())),
         Span::styled(
-            ticket_comment_relative_date(&row.comment.created),
+            ticket_comment_relative_date(&comment.created),
             Style::default().fg(theme.muted_fg()),
         ),
-    ])];
-    lines.extend(row.body.lines.iter().cloned());
-    Text::from(lines)
+    ])
+}
+
+fn ticket_comments_document(
+    comments: &TicketComments,
+    service: AppService,
+    selected: Rc<Cell<usize>>,
+) -> (Flex<()>, Vec<TicketComment>) {
+    let ordered = ordered_ticket_comments(&comments.comments);
+    if ordered.is_empty() {
+        return (
+            Flex::column().child("empty", Paragraph::new("No comments"), FlexItem::fixed(1)),
+            Vec::new(),
+        );
+    }
+    let mut document = Flex::column();
+    let mut ordered_comments = Vec::with_capacity(ordered.len());
+    for (index, (comment, depth)) in ordered.into_iter().enumerate() {
+        let key = format!("comment-{}", comment.id);
+        ordered_comments.push(comment.clone());
+        document = document.child(
+            key,
+            TicketCommentCard::new(comment, depth, index, Rc::clone(&selected), service.clone()),
+            FlexItem::fit_content().shrink(0),
+        );
+    }
+    (document, ordered_comments)
+}
+
+fn ordered_ticket_comments(comments: &[TicketComment]) -> Vec<(TicketComment, usize)> {
+    fn append_children(
+        comments: &[TicketComment],
+        parent: Option<&str>,
+        depth: usize,
+        visited: &mut HashSet<String>,
+        ordered: &mut Vec<(TicketComment, usize)>,
+    ) {
+        for comment in comments
+            .iter()
+            .filter(|comment| comment.parent_id.as_deref() == parent)
+        {
+            if !visited.insert(comment.id.clone()) {
+                continue;
+            }
+            ordered.push((comment.clone(), depth));
+            append_children(
+                comments,
+                Some(&comment.id),
+                depth.saturating_add(1),
+                visited,
+                ordered,
+            );
+        }
+    }
+
+    let known = comments
+        .iter()
+        .map(|comment| comment.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut visited = HashSet::new();
+    let mut ordered = Vec::with_capacity(comments.len());
+    for comment in comments.iter().filter(|comment| {
+        comment
+            .parent_id
+            .as_deref()
+            .is_none_or(|parent| !known.contains(parent))
+    }) {
+        if visited.insert(comment.id.clone()) {
+            ordered.push((comment.clone(), 0));
+            append_children(comments, Some(&comment.id), 1, &mut visited, &mut ordered);
+        }
+    }
+    for comment in comments {
+        if visited.insert(comment.id.clone()) {
+            ordered.push((comment.clone(), 0));
+        }
+    }
+    ordered
 }
 
 fn ticket_comment_body_lines(body: &str) -> Vec<String> {
@@ -4221,11 +4450,6 @@ fn ticket_comment_relative_date(created: &str) -> String {
         .and_then(|created| time::OffsetDateTime::from_unix_timestamp(created.timestamp()).ok())
         .map(|created| RelativeDate::new(created).text().to_owned())
         .unwrap_or_else(|| created.to_owned())
-}
-
-fn ticket_comment_row_height(row: &TicketCommentRow) -> u16 {
-    let body_lines = row.body.lines.len().max(1);
-    u16::try_from(body_lines.saturating_add(1)).unwrap_or(u16::MAX)
 }
 
 fn loading_view() -> ScrollContainer<Flex<()>> {

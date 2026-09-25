@@ -7,7 +7,9 @@ use crate::store::{
         jira_adf::{adf_is_safe_to_overwrite, adf_overwrite_warning, adf_to_markdown},
     },
     work_items::{
-        BacklogSnapshot, SubtaskProgress, TicketComment, TicketComments, WorkItem, is_done_status,
+        BacklogSnapshot, SubtaskProgress, TicketComment, TicketComments, WorkItem,
+        content::{TicketImage, ticket_image_marker},
+        is_done_status,
     },
 };
 
@@ -196,7 +198,7 @@ pub(super) fn to_work_item_with_subtasks(
     (work_item, subtasks)
 }
 
-pub(super) fn ticket_comment_page(value: &Value) -> TicketComments {
+pub(super) fn ticket_comment_page(value: &Value, attachments: &Value) -> TicketComments {
     let comments = value
         .get("comments")
         .or_else(|| value.get("values"))
@@ -219,7 +221,10 @@ pub(super) fn ticket_comment_page(value: &Value) -> TicketComments {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned(),
-                body: adf_to_markdown(comment.get("body").unwrap_or(&Value::Null)),
+                body: adf_to_display_markdown(
+                    comment.get("body").unwrap_or(&Value::Null),
+                    attachments,
+                ),
             })
         })
         .collect::<Vec<_>>();
@@ -242,7 +247,7 @@ fn to_work_item_fields(key: &str, fields: &Value, story_points_field_id: Option<
     WorkItem {
         key: key.into(),
         title: field("summary").as_str().unwrap_or(key).into(),
-        description: adf_to_markdown(field("description")),
+        description: adf_to_display_markdown(field("description"), field("attachment")),
         kind: named_field(field("issuetype")).unwrap_or_else(|| "Issue".into()),
         status: named_field(field("status")).unwrap_or_default(),
         done: named_field(field("status")).is_some_and(|status| is_done_status(&status)),
@@ -360,6 +365,89 @@ fn attachments(value: &Value) -> Vec<TicketAttachment> {
             })
         })
         .collect()
+}
+
+pub(super) fn adf_to_display_markdown(value: &Value, attachments: &Value) -> String {
+    const UNSUPPORTED_MEDIA: &str = "<!-- unsupported Jira media -->";
+
+    let markdown = adf_to_markdown(value);
+    let mut replacements = media_replacements(value, attachments).into_iter();
+    let mut parts = markdown.split(UNSUPPORTED_MEDIA);
+    let mut rendered = parts.next().unwrap_or_default().to_owned();
+    for part in parts {
+        rendered.push_str(
+            &replacements
+                .next()
+                .unwrap_or_else(|| UNSUPPORTED_MEDIA.to_owned()),
+        );
+        rendered.push_str(part);
+    }
+    rendered
+}
+
+fn media_replacements(value: &Value, attachments: &Value) -> Vec<String> {
+    let Some(node) = value.as_object() else {
+        return value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|value| media_replacements(value, attachments))
+            .collect();
+    };
+    let node_type = node.get("type").and_then(Value::as_str);
+    if matches!(node_type, Some("mediaSingle" | "mediaGroup")) {
+        let images = node
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|media| media_image(media, value, attachments))
+            .map(|image| ticket_image_marker(&image))
+            .collect::<Vec<_>>();
+        return vec![if images.is_empty() {
+            "<!-- unsupported Jira media -->".into()
+        } else {
+            images.join("\n\n")
+        }];
+    }
+    node.get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|value| media_replacements(value, attachments))
+        .collect()
+}
+
+fn media_image(media: &Value, container: &Value, attachments: &Value) -> Option<TicketImage> {
+    (media.get("type").and_then(Value::as_str) == Some("media")).then_some(())?;
+    let attrs = media.get("attrs")?;
+    (attrs.get("type").and_then(Value::as_str) == Some("file")).then_some(())?;
+    let alt = attrs.get("alt").and_then(Value::as_str)?;
+    let attachment = attachments.as_array()?.iter().find(|attachment| {
+        attachment.get("filename").and_then(Value::as_str) == Some(alt)
+            && attachment
+                .get("mimeType")
+                .and_then(Value::as_str)
+                .is_some_and(|mime_type| mime_type.starts_with("image/"))
+    })?;
+    let url = attachment.get("content").and_then(Value::as_str)?;
+    let width = media_dimension(attrs, "width")
+        .or_else(|| media_dimension(container.get("attrs").unwrap_or(&Value::Null), "width"))
+        .unwrap_or(320);
+    let height = media_dimension(attrs, "height").unwrap_or_else(|| width.saturating_div(2).max(1));
+    Some(TicketImage {
+        url: url.to_owned(),
+        alt: alt.to_owned(),
+        width,
+        height,
+    })
+}
+
+fn media_dimension(attrs: &Value, name: &str) -> Option<u16> {
+    attrs
+        .get(name)
+        .and_then(Value::as_u64)
+        .map(|value| value.clamp(1, u64::from(u16::MAX)) as u16)
 }
 
 fn epic_name(parent: &Value) -> Option<String> {

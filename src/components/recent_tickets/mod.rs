@@ -382,6 +382,7 @@ fn recent_ticket_text(row: &RecentTicketRow) -> Text<'static> {
             fix_versions: &row.fix_versions,
             epic_name: row.epic_name.as_deref(),
             annotation: None,
+            comment_count: None,
         },
     )
 }

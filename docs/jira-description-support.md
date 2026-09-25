@@ -19,6 +19,10 @@ Finery rejects a Composer patch atomically when any changed description contains
 
 Escape a literal `{{` as `\{\{`. Escape any literal canonical inline opening (`@date(`, `@status(`, `@mention(`, `@card(`, `:short_name:`, `++`, `{color:`, or `{highlight:`) with a leading backslash. Emoji syntax needs both colons, and content in inline code spans is literal. ADF rendering adds these escapes for literal source text. The old `{{jira:mention ... /}}` and `{{jira:inline-card ... /}}` forms are rejected.
 
+## Display-Only Media
+
+The ticket detail viewer displays Jira image attachments inline at their ADF position in descriptions and comments. This read-only rendering does not make media safe to edit or round-trip through Composer.
+
 ## Guarded ADF
 
 - Images, attachments, embeds, and other media.

@@ -427,6 +427,7 @@ fn add_item_text(item: &AddItem, query: &str, _mode: DropdownSearchMode) -> Text
             fix_versions: &ticket.work_item.fix_versions,
             epic_name: ticket.work_item.epic_name.as_deref(),
             annotation: None,
+            comment_count: None,
         },
     )
 }

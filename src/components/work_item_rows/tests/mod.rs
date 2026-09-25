@@ -166,7 +166,7 @@ fn average_derived_story_points_show_one_decimal_place() {
 }
 
 #[test]
-fn ticket_annotations_extend_composer_metadata_without_hiding_change_state() {
+fn ticket_metadata_keeps_comments_last_and_omits_empty_comment_counts() {
     tuicore::init();
     let row = WorkItemRow {
         id: "FIN-123".into(),
@@ -197,6 +197,7 @@ fn ticket_annotations_extend_composer_metadata_without_hiding_change_state() {
             fix_versions: &["v0.5".into()],
             epic_name: Some("Ticket metadata"),
             annotation: Some("FIN-100 → FIN-200"),
+            comment_count: Some(2),
         },
     );
     let metadata = text.lines[1]
@@ -211,6 +212,29 @@ fn ticket_annotations_extend_composer_metadata_without_hiding_change_state() {
     assert!(metadata.find("Ticket metadata") < metadata.find("v0.5"));
     assert!(metadata.contains("Submitted"));
     assert!(metadata.contains("FIN-100 → FIN-200"));
+    assert!(metadata.ends_with(" • 2 "));
+
+    for comment_count in [Some(0), None] {
+        let text = ticket_summary_text(
+            &row,
+            None,
+            None,
+            TicketRowDetails {
+                subtask_progress: None,
+                fix_versions: &[],
+                epic_name: None,
+                annotation: None,
+                comment_count,
+            },
+        );
+        let metadata = text.lines[1]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(!metadata.contains(''));
+    }
 
     let title = &text.lines[0].spans;
     assert_eq!(title[0].style.fg, Some(tuicore::theme().accent_fg()));
@@ -265,6 +289,7 @@ fn long_labels_use_a_tight_chip_with_an_overflow_count_after_status() {
             fix_versions: &[],
             epic_name: None,
             annotation: None,
+            comment_count: None,
         },
     );
     let metadata = text.lines[1]

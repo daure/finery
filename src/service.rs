@@ -1106,9 +1106,17 @@ impl AppService {
             .settings
             .read()
             .map_err(|_| "settings lock is unavailable".to_string())?;
-        let (_, email, token) = settings.configured_jira().ok_or_else(|| {
+        let (base_url, email, token) = settings.configured_jira().ok_or_else(|| {
             "Jira is not configured; add URL, email, and API token in Settings".to_string()
         })?;
+        let base_url = reqwest::Url::parse(base_url).map_err(|error| error.to_string())?;
+        let content_url = reqwest::Url::parse(content_url).map_err(|error| error.to_string())?;
+        if content_url.scheme() != base_url.scheme()
+            || content_url.host_str() != base_url.host_str()
+            || content_url.port_or_known_default() != base_url.port_or_known_default()
+        {
+            return Err("Jira attachment URL does not match the configured Jira site".into());
+        }
         tuicore::Image::from_url_with_basic_auth(content_url, email, token)
             .map_err(|error| error.to_string())
     }

@@ -477,6 +477,7 @@ fn issue_link_ticket_text(
             fix_versions: &[],
             epic_name: None,
             annotation: None,
+            comment_count: None,
         },
     )
 }
@@ -519,6 +520,7 @@ fn ticket_summary_for_search_result(ticket: &ComposerSearchTicket) -> Text<'stat
             fix_versions: &ticket.work_item.fix_versions,
             epic_name: ticket.work_item.epic_name.as_deref(),
             annotation: None,
+            comment_count: None,
         },
     )
 }

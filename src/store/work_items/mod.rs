@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+pub(crate) mod content;
 pub(crate) mod release;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

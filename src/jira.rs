@@ -50,7 +50,7 @@ const ISSUE_FIELDS: [&str; 17] = [
 ];
 const MERMAID_SOURCE_BYTES_LIMIT: usize = 5 * 1024 * 1024;
 
-const BACKLOG_FIELDS: [&str; 12] = [
+const BACKLOG_FIELDS: [&str; 13] = [
     "summary",
     "description",
     "issuetype",
@@ -63,6 +63,7 @@ const BACKLOG_FIELDS: [&str; 12] = [
     "fixVersions",
     "statuscategorychangedate",
     "comment",
+    "attachment",
 ];
 const COMPOSER_FIELDS: [&str; 17] = [
     "summary",
@@ -1237,8 +1238,10 @@ fn hydrate_sprint_subtasks_with_comments(
         .issues
         .into_iter()
         .map(|issue| {
-            let comments =
-                ticket_comment_summary(issue.fields.get("comment").unwrap_or(&Value::Null));
+            let comments = ticket_comment_summary(
+                issue.fields.get("comment").unwrap_or(&Value::Null),
+                issue.fields.get("attachment").unwrap_or(&Value::Null),
+            );
             let work_item = to_work_item(issue, story_points_field_id);
             (work_item.key.clone(), (work_item, comments))
         })
@@ -1350,9 +1353,13 @@ fn board_backlog(
 }
 
 fn append_ticket_comments(issue: &JiraIssue, summaries: &mut HashMap<String, TicketComments>) {
+    let attachments = issue.fields.get("attachment").unwrap_or(&Value::Null);
     summaries.insert(
         issue.key.clone(),
-        ticket_comment_summary(issue.fields.get("comment").unwrap_or(&Value::Null)),
+        ticket_comment_summary(
+            issue.fields.get("comment").unwrap_or(&Value::Null),
+            attachments,
+        ),
     );
     for subtask in issue
         .fields
@@ -1367,13 +1374,16 @@ fn append_ticket_comments(issue: &JiraIssue, summaries: &mut HashMap<String, Tic
         let fields = subtask.get("fields").unwrap_or(&Value::Null);
         summaries.insert(
             key.to_owned(),
-            ticket_comment_summary(fields.get("comment").unwrap_or(&Value::Null)),
+            ticket_comment_summary(
+                fields.get("comment").unwrap_or(&Value::Null),
+                fields.get("attachment").unwrap_or(&Value::Null),
+            ),
         );
     }
 }
 
-fn ticket_comment_summary(value: &Value) -> TicketComments {
-    let mut comments = ticket_comment_page(value);
+fn ticket_comment_summary(value: &Value, attachments: &Value) -> TicketComments {
+    let mut comments = ticket_comment_page(value, attachments);
     comments.complete = comments.total == 0;
     comments
 }
@@ -1480,6 +1490,18 @@ pub(crate) fn ticket_comments(settings: &AppSettings, key: &str) -> Result<Ticke
     const PAGE_SIZE: usize = 500;
 
     let (client, base_url, email, token) = configured_client(settings)?;
+    let attachment_response = client
+        .get(format!("{base_url}/rest/api/3/issue/{key}"))
+        .basic_auth(&email, Some(&token))
+        .query(&[("fields", "attachment")])
+        .send()
+        .map_err(|error| error.to_string())?;
+    let attachment_issue = response_json::<JiraIssue>(attachment_response)?;
+    let attachments = attachment_issue
+        .fields
+        .get("attachment")
+        .cloned()
+        .unwrap_or(Value::Null);
     let mut start_at = 0usize;
     let mut comments = Vec::new();
     loop {
@@ -1493,7 +1515,7 @@ pub(crate) fn ticket_comments(settings: &AppSettings, key: &str) -> Result<Ticke
             .send()
             .map_err(|error| error.to_string())?;
         let page = response_json::<Value>(response)?;
-        let loaded = ticket_comment_page(&page);
+        let loaded = ticket_comment_page(&page, &attachments);
         let page_len = loaded.comments.len();
         let total = loaded.total;
         comments.extend(loaded.comments);

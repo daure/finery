@@ -29,6 +29,7 @@ use crate::{
     components::{
         avatar::initials,
         ticket_number_jump::{TicketNumberJump, exact_ticket_number_matches},
+        ticket_yank_menu::{TicketYankAction, TicketYankMenu, TicketYankTarget},
         work_item_rows::{
             TicketRowDetails, WorkItemKind, WorkItemRow, ticket_summary_text,
             work_item_title_prefix_width,
@@ -40,6 +41,8 @@ use crate::{
         SubtaskProgress, WorkItem, release,
     },
 };
+
+const FILTER_POPUP_MAX_WIDTH: u16 = u16::MAX;
 
 #[derive(Clone)]
 struct BacklogRow {
@@ -64,6 +67,7 @@ enum BacklogRowContent {
 #[derive(Clone)]
 struct BacklogWorkItem {
     item: WorkItemRow,
+    description: String,
     section: String,
     rankable_root: bool,
     runway: Option<RunwayTicket>,
@@ -71,6 +75,7 @@ struct BacklogWorkItem {
     subtask_progress: Option<SubtaskProgress>,
     fix_versions: Vec<String>,
     epic_name: Option<String>,
+    comment_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,15 +195,6 @@ fn grouping_icon(grouping: Option<BacklogGroupBy>) -> &'static str {
         Some(BacklogGroupBy::Release) => "",
         Some(BacklogGroupBy::Epic) => "",
         None => "󰑮",
-    }
-}
-
-fn grouping_label(grouping: Option<BacklogGroupBy>, compact: bool) -> String {
-    let icon = grouping_icon(grouping);
-    if compact {
-        icon.to_owned()
-    } else {
-        format!("{icon} Group by")
     }
 }
 
@@ -353,17 +349,13 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
     let selected_issue_type_labels = Rc::clone(&issue_type_labels);
     BacklogTree {
         control,
-        refresh: Button::new("󰑓 Refresh")
-            .hotkey("shift+r")
-            .on_press(move || {
-                let _ = refresh_events.send(BacklogSectionEvent::Refresh);
-            }),
-        velocity: Button::new("󰓅 Velocity")
-            .hotkey("shift+v")
-            .on_press(move || {
-                let _ = velocity_events.send(BacklogSectionEvent::OpenVelocity);
-            }),
-        estimated: Toggle::new("󰑭 Estimated")
+        refresh: Button::new("󰑓").hotkey("shift+r").on_press(move || {
+            let _ = refresh_events.send(BacklogSectionEvent::Refresh);
+        }),
+        velocity: Button::new("󰓅").hotkey("shift+v").on_press(move || {
+            let _ = velocity_events.send(BacklogSectionEvent::OpenVelocity);
+        }),
+        estimated: Toggle::new("󰑭")
             .checked(true)
             .hotkey("shift+d")
             .preserve_focus_on_hotkey(true)
@@ -378,10 +370,10 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         .label_position(DropdownLabelPosition::Inline)
         .alt_style(true)
         .variant(DropdownVariant::Filled)
-        .placeholder("󰡯 Type")
+        .placeholder("󰡯")
         .field_padding_left(1)
         .hotkey("shift+t")
-        .max_popup_width(24)
+        .max_popup_width(FILTER_POPUP_MAX_WIDTH)
         .on_select(move |selected| {
             let issue_types = selected
                 .into_iter()
@@ -397,12 +389,12 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         .label_position(DropdownLabelPosition::Inline)
         .alt_style(true)
         .variant(DropdownVariant::Filled)
-        .placeholder("󰀄 User")
+        .placeholder("󰀄")
         .field_padding_left(1)
         .selected_label_by(|user| format!("@{}", initials(user)))
         .show_multi_labels(true)
         .hotkey("shift+u")
-        .max_popup_width(24)
+        .max_popup_width(FILTER_POPUP_MAX_WIDTH)
         .on_select(move |selected| {
             let _ = user_events.send(BacklogSectionEvent::UsersChanged(selected));
         }),
@@ -414,10 +406,10 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         .label_position(DropdownLabelPosition::Inline)
         .alt_style(true)
         .variant(DropdownVariant::Filled)
-        .placeholder(" Status")
+        .placeholder("")
         .field_padding_left(1)
         .hotkey("shift+s")
-        .max_popup_width(24)
+        .max_popup_width(FILTER_POPUP_MAX_WIDTH)
         .on_select(move |selected| {
             let _ = status_events.send(BacklogSectionEvent::StatusesChanged(selected));
         }),
@@ -429,10 +421,10 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         .label_position(DropdownLabelPosition::Inline)
         .alt_style(true)
         .variant(DropdownVariant::Filled)
-        .placeholder(" Epic")
+        .placeholder("")
         .field_padding_left(1)
         .hotkey("shift+e")
-        .max_popup_width(24)
+        .max_popup_width(FILTER_POPUP_MAX_WIDTH)
         .on_select(move |selected| {
             let _ = epic_events.send(BacklogSectionEvent::EpicsChanged(selected));
         }),
@@ -444,10 +436,10 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         .label_position(DropdownLabelPosition::Inline)
         .alt_style(true)
         .variant(DropdownVariant::Filled)
-        .placeholder(" Label")
+        .placeholder("")
         .field_padding_left(1)
         .hotkey("shift+l")
-        .max_popup_width(24)
+        .max_popup_width(FILTER_POPUP_MAX_WIDTH)
         .on_select(move |selected| {
             let _ = label_events.send(BacklogSectionEvent::LabelsChanged(selected));
         }),
@@ -459,15 +451,15 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         .label_position(DropdownLabelPosition::Inline)
         .alt_style(true)
         .variant(DropdownVariant::Filled)
-        .placeholder(" Release")
+        .placeholder("")
         .field_padding_left(1)
         .hotkey("shift+a")
-        .max_popup_width(24)
+        .max_popup_width(FILTER_POPUP_MAX_WIDTH)
         .on_select(move |selected| {
             let _ = release_events.send(BacklogSectionEvent::ReleasesChanged(selected));
         }),
         group_by: MenuButton::new(
-            grouping_label(None, false),
+            grouping_icon(None),
             [
                 MenuItem::new(GroupByMenuItem::Ungroup, "󰑮 Sprint"),
                 MenuItem::new(GroupByMenuItem::Release, " Release"),
@@ -477,7 +469,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         .min_popup_width(12)
         .hotkey("shift+p"),
         web: MenuButton::new(
-            "Web",
+            "󰖟",
             [
                 MenuItem::new(WebMenuItem::Board, "Board"),
                 MenuItem::new(WebMenuItem::Timeline, "Timeline"),
@@ -487,6 +479,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         )
         .min_popup_width(12)
         .hotkey("shift+w"),
+        yank_menu: TicketYankMenu::new(),
         loading: false,
         refresh_area: ratatui::layout::Rect::default(),
         velocity_area: ratatui::layout::Rect::default(),
@@ -506,7 +499,6 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         runway_markers_visible,
         filters,
         group_by_selection: None,
-        compact_toolbar: false,
         issue_type_labels,
         snapshot: snapshot.clone(),
         number_jump,
@@ -531,6 +523,7 @@ pub(in crate::pages::backlog) struct BacklogTree {
     releases: Dropdown<String, String>,
     group_by: MenuButton<GroupByMenuItem>,
     web: MenuButton<WebMenuItem>,
+    yank_menu: TicketYankMenu,
     loading: bool,
     refresh_area: ratatui::layout::Rect,
     velocity_area: ratatui::layout::Rect,
@@ -550,7 +543,6 @@ pub(in crate::pages::backlog) struct BacklogTree {
     runway_markers_visible: Rc<Cell<bool>>,
     filters: BacklogFilters,
     group_by_selection: Option<BacklogGroupBy>,
-    compact_toolbar: bool,
     issue_type_labels: Rc<RefCell<HashMap<String, String>>>,
     snapshot: BacklogSnapshot,
     number_jump: Rc<RefCell<TicketNumberJump>>,
@@ -710,8 +702,7 @@ impl BacklogTree {
         self.group_by_selection = None;
         self.group_by.set_disabled(true);
         self.group_by.set_disabled(false);
-        self.group_by
-            .set_label(grouping_label(None, self.compact_toolbar));
+        self.group_by.set_label(grouping_icon(None));
         self.web.set_disabled(true);
         self.web.set_disabled(false);
         self.number_jump.borrow_mut().clear();
@@ -1155,22 +1146,30 @@ impl BacklogTree {
         true
     }
 
-    fn handle_yank(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
-        if matches!(event, TuiEvent::Yank) {
-            if let Some(key) = self
-                .control
-                .data_view()
-                .highlighted_id()
-                .and_then(|id| self.control.items().iter().find(|row| row.id == id))
-                .and_then(|row| match &row.content {
-                    BacklogRowContent::WorkItem(item) => Some(item.item.key.clone()),
-                    BacklogRowContent::Section { .. } | BacklogRowContent::Group { .. } => None,
-                })
-            {
-                ctx.copy_to_clipboard(key);
+    fn handle_yank(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        if self.yank_menu.is_open() {
+            self.yank_menu.event(event, ctx);
+            self.finish_yank(ctx);
+            if !self.yank_menu.is_open() {
+                ctx.focus(FocusRequest::Target(FocusId::new("data-view")));
             }
             ctx.stop_propagation();
             return true;
+        }
+        let open_requested = matches!(event, TuiEvent::Yank)
+            || matches!(event, TuiEvent::Key(key) if key.code == Key::Char('y') && key.modifiers == KeyModifiers::NONE)
+            || matches!(event, TuiEvent::Hotkey(HotkeyEvent::Pending(sequence)) if sequence == "y");
+        if open_requested {
+            if let Some(target) = self.selected_yank_target() {
+                self.yank_menu.open(target, ctx);
+                ctx.stop_propagation();
+                return true;
+            }
+            if matches!(event, TuiEvent::Yank) {
+                ctx.stop_propagation();
+                return true;
+            }
+            return false;
         }
         let TuiEvent::Hotkey(HotkeyEvent::Commit(sequence)) = event else {
             return false;
@@ -1179,37 +1178,6 @@ impl BacklogTree {
             return false;
         };
         let event = match sequence.as_str() {
-            "yp" => {
-                let mut ids = self.control.transient_selected_ids();
-                if ids.is_empty() {
-                    ids.push(id);
-                }
-                if let Some(value) = crate::components::work_item_rows::prepare_references(
-                    ids.iter()
-                        .filter_map(|id| self.control.items().iter().find(|row| &row.id == id))
-                        .filter_map(|row| match &row.content {
-                            BacklogRowContent::WorkItem(item) => Some(&item.item),
-                            BacklogRowContent::Section { .. } | BacklogRowContent::Group { .. } => {
-                                None
-                            }
-                        }),
-                ) {
-                    ctx.copy_to_clipboard(value);
-                }
-                ctx.stop_propagation();
-                return true;
-            }
-            "yu" => self
-                .control
-                .items()
-                .iter()
-                .find(|row| row.id == id)
-                .and_then(|row| match &row.content {
-                    BacklogRowContent::WorkItem(item) => Some(BacklogSectionEvent::YankTicketUrl {
-                        key: item.item.key.clone(),
-                    }),
-                    BacklogRowContent::Section { .. } | BacklogRowContent::Group { .. } => None,
-                }),
             "yg" => self.sprint_for_section(&id).and_then(|sprint| {
                 sprint
                     .goal
@@ -1231,6 +1199,34 @@ impl BacklogTree {
         let _ = self.events.send(event);
         ctx.stop_propagation();
         true
+    }
+
+    fn selected_yank_target(&self) -> Option<TicketYankTarget> {
+        self.control
+            .data_view()
+            .highlighted_id()
+            .and_then(|id| self.control.items().iter().find(|row| row.id == id))
+            .and_then(|row| match &row.content {
+                BacklogRowContent::WorkItem(item) => Some(TicketYankTarget {
+                    key: item.item.key.clone(),
+                    title: item.item.title.clone(),
+                    description: item.description.clone(),
+                }),
+                BacklogRowContent::Section { .. } | BacklogRowContent::Group { .. } => None,
+            })
+    }
+
+    fn finish_yank(&mut self, ctx: &mut EventCtx<()>) {
+        let Some((action, target)) = self.yank_menu.take_selection() else {
+            return;
+        };
+        if action == TicketYankAction::Url {
+            let _ = self
+                .events
+                .send(BacklogSectionEvent::YankTicketUrl { key: target.key });
+        } else if let Some(value) = action.text(&target) {
+            ctx.copy_to_clipboard(value);
+        }
     }
 
     fn sprint_for_section(&self, id: &str) -> Option<&Sprint> {
@@ -1612,42 +1608,13 @@ impl BacklogTree {
         }
         self.group_by_selection = grouping;
         self.runway_markers_visible.set(self.show_runway_bands());
-        self.group_by
-            .set_label(grouping_label(grouping, self.compact_toolbar));
+        self.group_by.set_label(grouping_icon(grouping));
         let snapshot = self.snapshot.clone();
         self.set_snapshot(&snapshot);
         self.control
             .data_view_mut()
             .restore_tree_expansion(HashSet::new());
         true
-    }
-
-    fn configure_toolbar(&mut self, compact: bool) {
-        if self.compact_toolbar == compact {
-            return;
-        }
-        self.compact_toolbar = compact;
-        self.velocity
-            .set_label(if compact { "󰓅 V" } else { "󰓅 Velocity" });
-        self.refresh
-            .set_label(if compact { "󰑓 R" } else { "󰑓 Refresh" });
-        self.estimated
-            .set_label(if compact { "󰑭" } else { "󰑭 Estimated" });
-        self.users
-            .set_placeholder(if compact { "󰀄" } else { "󰀄 User" });
-        self.issue_types
-            .set_placeholder(if compact { "󰡯" } else { "󰡯 Type" });
-        self.statuses
-            .set_placeholder(if compact { "" } else { " Status" });
-        self.epics
-            .set_placeholder(if compact { "" } else { " Epic" });
-        self.labels
-            .set_placeholder(if compact { "" } else { " Label" });
-        self.releases
-            .set_placeholder(if compact { "" } else { " Release" });
-        self.group_by
-            .set_label(grouping_label(self.group_by_selection, compact));
-        self.web.set_label(if compact { "󰖟" } else { "Web" });
     }
 
     fn refocus_data_view_after_unfocus(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
@@ -1669,7 +1636,6 @@ impl TuiNode for BacklogTree {
     }
     fn layout(&mut self, area: ratatui::layout::Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         let compact_toolbar = area.width < 160;
-        self.configure_toolbar(compact_toolbar);
         let header_height = if area.is_empty() { 0 } else { 1 };
         let button_width = |button: &Button<()>| {
             button
@@ -2110,20 +2076,29 @@ impl TuiNode for BacklogTree {
             FocusId::new("data-view"),
             self.control_area,
             [
-                self.backlog_keys.view_description.sequence().to_owned(),
                 "yu".to_owned(),
-                "yp".to_owned(),
+                "yt".to_owned(),
+                "yd".to_owned(),
+                "yk".to_owned(),
+                "yf".to_owned(),
+                "ys".to_owned(),
                 "yg".to_owned(),
                 "yv".to_owned(),
+                self.backlog_keys.view_description.sequence().to_owned(),
             ],
             |ctx| self.control.layout(self.control_area, ctx),
         );
+        if self.yank_menu.is_open() {
+            ctx.push_slot(ChildKey::new("yank-menu"), area, |ctx| {
+                self.yank_menu.layout(area, ctx)
+            });
+        }
         result
     }
     fn render<'a>(
         &'a self,
         frame: &mut Frame,
-        _area: ratatui::layout::Rect,
+        area: ratatui::layout::Rect,
         ctx: &mut RenderCtx<'a>,
     ) {
         self.control.render(frame, self.control_area, ctx);
@@ -2138,8 +2113,14 @@ impl TuiNode for BacklogTree {
         self.releases.render(frame, self.releases_area, ctx);
         self.velocity.render(frame, self.velocity_area);
         self.refresh.render(frame, self.refresh_area);
+        if self.yank_menu.is_open() {
+            self.yank_menu.render(frame, area, ctx);
+        }
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        if self.yank_menu.is_open() && self.handle_yank(event, ctx) {
+            return EventOutcome::Handled;
+        }
         let web_was_open = self.web.is_open();
         if matches!(event, TuiEvent::Mouse(_))
             && (self.refresh.event(event, ctx) == EventOutcome::Handled
@@ -2169,6 +2150,9 @@ impl TuiNode for BacklogTree {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
+        if self.yank_menu.is_open() && self.handle_yank(event, ctx) {
+            return EventOutcome::Handled;
+        }
         if let Some(refresh_path) = route.path.without_first_if(&ChildKey::new("refresh")) {
             let outcome = self
                 .refresh
@@ -2370,12 +2354,21 @@ impl TuiNode for BacklogTree {
             ))
             .merge(self.group_by.tick(dt, settings))
             .merge(self.web.tick(dt, settings))
+            .merge(self.yank_menu.tick(dt, settings))
             .merge(number_jump)
     }
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
-        self.control.focus(target, focused, ctx);
+        if self.yank_menu.is_open() {
+            self.yank_menu.focus(target, focused, ctx);
+        } else {
+            self.control.focus(target, focused, ctx);
+        }
     }
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
+        if let Some(yank_target) = target.for_child(&ChildKey::new("yank-menu")) {
+            self.yank_menu.dispatch_focus(&yank_target, focused, ctx);
+            return;
+        }
         if let Some(refresh_target) = target.for_child(&ChildKey::new("refresh")) {
             self.refresh.dispatch_focus(&refresh_target, focused, ctx);
             return;
@@ -2434,6 +2427,7 @@ impl TuiNode for BacklogTree {
         self.labels.init(ctx);
         self.releases.init(ctx);
         self.group_by.init(ctx);
+        self.yank_menu.init(ctx);
     }
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.control.mount(ctx);
@@ -2445,6 +2439,7 @@ impl TuiNode for BacklogTree {
         self.labels.mount(ctx);
         self.releases.mount(ctx);
         self.group_by.mount(ctx);
+        self.yank_menu.mount(ctx);
     }
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.control.unmount(ctx);
@@ -2456,6 +2451,7 @@ impl TuiNode for BacklogTree {
         self.labels.unmount(ctx);
         self.releases.unmount(ctx);
         self.group_by.unmount(ctx);
+        self.yank_menu.unmount(ctx);
     }
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.control.destroy(ctx);
@@ -2467,6 +2463,7 @@ impl TuiNode for BacklogTree {
         self.labels.destroy(ctx);
         self.releases.destroy(ctx);
         self.group_by.destroy(ctx);
+        self.yank_menu.destroy(ctx);
     }
 }
 
@@ -2662,6 +2659,10 @@ fn backlog_rows(
                 is_active_sprint,
                 &item_keys,
                 snapshot.story_points_configured,
+                snapshot
+                    .ticket_comments
+                    .get(&item.key)
+                    .map(|comments| comments.total),
                 None,
                 sprint.capacity.as_ref().map(|capacity| {
                     (
@@ -2688,6 +2689,10 @@ fn backlog_rows(
             false,
             &item_keys,
             snapshot.story_points_configured,
+            snapshot
+                .ticket_comments
+                .get(&item.key)
+                .map(|comments| comments.total),
             backlog_runway_ticket(snapshot, item),
             None,
             index % 2 == 0,
@@ -2735,6 +2740,10 @@ fn grouped_backlog_rows(
                     source.is_active_sprint,
                     &item_keys,
                     snapshot.story_points_configured,
+                    snapshot
+                        .ticket_comments
+                        .get(&item.key)
+                        .map(|comments| comments.total),
                     source
                         .is_backlog
                         .then(|| backlog_runway_ticket(snapshot, item))
@@ -3250,6 +3259,7 @@ fn work_item_row(
     is_active_sprint: bool,
     item_keys: &std::collections::HashSet<&str>,
     show_story_points: bool,
+    comment_count: Option<usize>,
     runway: Option<RunwayTicket>,
     assumed_ticket_size: Option<(f64, bool)>,
     alternate_background: bool,
@@ -3298,6 +3308,7 @@ fn work_item_row(
                 status_changed_at: item.status_changed_at,
                 show_time_in_status: is_active_sprint,
             },
+            description: item.description.clone(),
             section: section.into(),
             rankable_root: item
                 .parent_key
@@ -3308,6 +3319,7 @@ fn work_item_row(
             subtask_progress: item.subtask_progress.clone(),
             fix_versions: item.fix_versions.clone(),
             epic_name: item.epic_name.clone(),
+            comment_count,
         })),
     }
 }
@@ -3391,6 +3403,7 @@ fn backlog_work_item_text(row: &BacklogWorkItem, number_query: Option<&str>) -> 
             fix_versions: &row.fix_versions,
             epic_name: row.epic_name.as_deref(),
             annotation: None,
+            comment_count: row.comment_count,
         },
     )
 }

@@ -38,36 +38,14 @@ pub(super) struct TicketRow {
     archive_outcome: Option<ArchiveOutcome>,
 }
 
-pub(super) fn selected_prepare_reference(
-    view: &DataView<TicketRow, String>,
-    state: &ComposerState,
-) -> Option<String> {
-    let mut ids = view.selected_ids();
-    if ids.is_empty() {
-        ids.extend(view.highlighted_id());
-    }
-    let rows = ticket_rows(state);
-    crate::components::work_item_rows::prepare_references(
-        ids.iter()
-            .filter_map(|id| rows.iter().find(|row| &row.item.id == id))
-            .filter(|row| row.attachment.is_none() && row.mermaid_diagram.is_none())
-            .map(|row| &row.item),
-    )
-}
-
 #[cfg(test)]
 pub(super) fn ticket_data_view(state: &ComposerState) -> DataView<TicketRow, String> {
-    ticket_data_view_with_number_jump(
-        state,
-        Rc::new(RefCell::new(TicketNumberJump::default())),
-        None,
-    )
+    ticket_data_view_with_number_jump(state, Rc::new(RefCell::new(TicketNumberJump::default())))
 }
 
 pub(super) fn ticket_data_view_with_number_jump(
     state: &ComposerState,
     number_jump: Rc<RefCell<TicketNumberJump>>,
-    jira_base_url: Option<String>,
 ) -> DataView<TicketRow, String> {
     let mut view = DataView::new(ticket_rows(state), |row: &TicketRow| row.item.id.clone())
         .headers(false)
@@ -104,20 +82,10 @@ pub(super) fn ticket_data_view_with_number_jump(
             } else {
                 row.item.key.clone()
             }
-        })
-        .copy_hotkey("yp", |row| {
-            if row.attachment.is_some() || row.mermaid_diagram.is_some() {
-                return None;
-            }
-            row.item.prepare_reference()
-        })
-        .copy_hotkey("yu", move |row| {
-            (!row.item.key.starts_with("NEW-")).then(|| {
-                jira_base_url
-                    .as_ref()
-                    .map(|base_url| format!("{base_url}/browse/{}", row.item.key))
-            })?
         });
+    for hotkey in ["yu", "yt", "yd", "yk", "yf", "ys"] {
+        view = view.copy_hotkey(hotkey, |_| None);
+    }
     if let Some(selected) = state.selected_ticket.as_ref() {
         view.highlight_id(selected);
     }
@@ -395,6 +363,7 @@ fn ticket_columns(number_jump: Rc<RefCell<TicketNumberJump>>) -> Vec<Column<Tick
                         fix_versions: &row.fix_versions,
                         epic_name: row.epic_name.as_deref(),
                         annotation: annotation.as_deref(),
+                        comment_count: None,
                     },
                 )
             },

@@ -854,14 +854,40 @@ fn quick_action_text(
     let Some(hotkey) = quick_action_hotkey(action, backlog_keys, open_command_key) else {
         return quick_action_detail_text(action);
     };
+    let hotkey_width = line_width(&Line::from(hotkey.as_str()));
+    let label = ellipsize_action_label(
+        &label,
+        usize::from(MENU_FIELD_WIDTH).saturating_sub(hotkey_width.saturating_add(1)),
+    );
     let spacing = usize::from(MENU_FIELD_WIDTH)
         .saturating_sub(line_width(&Line::from(label.as_str())))
-        .saturating_sub(line_width(&Line::from(hotkey.as_str())));
+        .saturating_sub(hotkey_width);
     Text::from(Line::from(vec![
         Span::raw(label),
         Span::raw(" ".repeat(spacing)),
         Span::styled(hotkey, Style::default().fg(tuicore::theme().muted_fg())),
     ]))
+}
+
+fn ellipsize_action_label(label: &str, max_width: usize) -> String {
+    if line_width(&Line::from(label)) <= max_width {
+        return label.to_owned();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let content_width = max_width.saturating_sub(1);
+    let mut truncated = String::new();
+    for character in label.chars() {
+        let mut candidate = truncated.clone();
+        candidate.push(character);
+        if line_width(&Line::from(candidate.as_str())) > content_width {
+            break;
+        }
+        truncated.push(character);
+    }
+    truncated.push('…');
+    truncated
 }
 
 fn quick_action_hotkey(

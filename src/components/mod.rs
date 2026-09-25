@@ -4,6 +4,8 @@ pub(crate) mod open_command_menu;
 pub(crate) mod recent_tickets;
 pub(crate) mod settings_dialog;
 pub(crate) mod status_bar;
+pub(crate) mod ticket_content;
 pub(crate) mod ticket_number_jump;
 pub(crate) mod ticket_open_command;
+pub(crate) mod ticket_yank_menu;
 pub(crate) mod work_item_rows;

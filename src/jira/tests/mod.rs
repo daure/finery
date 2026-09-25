@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 mod descriptions;
 mod release_dates;
@@ -37,7 +37,10 @@ use crate::{
             AttachmentChangeKind, ChangeKind, MermaidDiagram, Ticket, TicketAttachment,
             TicketChange, TicketKind, TicketWebLink,
         },
-        work_items::{IssueStatusTransition, RankPlan, StatusTransition},
+        work_items::{
+            IssueStatusTransition, RankPlan, StatusTransition,
+            content::{TicketContentBlock, ticket_content_blocks},
+        },
     },
 };
 
@@ -350,17 +353,80 @@ fn composer_subtasks_are_loaded_for_stories_and_tasks_only() {
 
 #[test]
 fn comment_pages_preserve_reply_parent_ids() {
-    let comments = super::mapping::ticket_comment_page(&json!({
-        "total": 2,
-        "comments": [
-            { "id": "10047", "body": { "type": "doc", "version": 1, "content": [] } },
-            { "id": "10080", "parentId": 10047, "body": { "type": "doc", "version": 1, "content": [] } }
-        ]
-    }));
+    let comments = super::mapping::ticket_comment_page(
+        &json!({
+            "total": 2,
+            "comments": [
+                { "id": "10047", "body": { "type": "doc", "version": 1, "content": [] } },
+                { "id": "10080", "parentId": 10047, "body": { "type": "doc", "version": 1, "content": [] } }
+            ]
+        }),
+        &Value::Null,
+    );
 
     assert_eq!(comments.total, 2);
     assert_eq!(comments.comments[0].parent_id, None);
     assert_eq!(comments.comments[1].parent_id.as_deref(), Some("10047"));
+}
+
+#[test]
+fn ticket_descriptions_and_comments_resolve_inline_jira_images() {
+    let media = json!({
+        "type": "doc",
+        "version": 1,
+        "content": [{
+            "type": "mediaSingle",
+            "attrs": { "width": 387 },
+            "content": [{
+                "type": "media",
+                "attrs": {
+                    "type": "file",
+                    "alt": "cart.png",
+                    "width": 387,
+                    "height": 282
+                }
+            }]
+        }]
+    });
+    let attachments = json!([{
+        "id": "10247",
+        "filename": "cart.png",
+        "mimeType": "image/png",
+        "content": "https://jira.example/rest/api/3/attachment/content/10247"
+    }]);
+    let work_item = to_work_item(
+        JiraIssue {
+            key: "KAN-58".into(),
+            fields: json!({
+                "summary": "Save cart for later",
+                "description": media,
+                "attachment": attachments
+            }),
+        },
+        None,
+    );
+    let description_blocks = ticket_content_blocks(&work_item.description);
+    let comments = super::mapping::ticket_comment_page(
+        &json!({
+            "total": 1,
+            "comments": [{ "id": "10114", "body": media }]
+        }),
+        &attachments,
+    );
+    let comment_blocks = ticket_content_blocks(&comments.comments[0].body);
+
+    for blocks in [description_blocks, comment_blocks] {
+        let TicketContentBlock::Image(image) = &blocks[0] else {
+            panic!("Jira media should become an inline ticket image");
+        };
+        assert_eq!(image.alt, "cart.png");
+        assert_eq!(image.width, 387);
+        assert_eq!(image.height, 282);
+        assert_eq!(
+            image.url,
+            "https://jira.example/rest/api/3/attachment/content/10247"
+        );
+    }
 }
 
 #[test]

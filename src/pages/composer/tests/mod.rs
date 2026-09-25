@@ -1698,50 +1698,54 @@ fn open_command_uses_the_selected_composer_ticket_without_committing() {
 }
 
 #[test]
-fn yy_copies_the_focused_composer_ticket_key() {
+fn y_opens_the_composer_ticket_yank_menu_and_shortcuts_copy_values() {
     tuicore::init();
-    let mut state = ComposerState::demo();
-    state
-        .dispatch(ComposerAction::OpenChangeSet("CS-1".into()))
-        .unwrap();
-    state
-        .dispatch(ComposerAction::SelectTicket(Some("FIN-157".into())))
-        .unwrap();
-    let mut view = super::ticket_rows::ticket_data_view_with_number_jump(
-        &state,
-        Rc::new(RefCell::new(Default::default())),
-        Some("https://jira.example".into()),
+    let service = AppService::for_tests();
+    service.settings().write().unwrap().jira_base_url = "https://jira.example".into();
+    let mut page = ComposerPage::new(
+        ComposerState::demo().change_sets,
+        service.clone(),
+        service.settings(),
     );
-    let mut ctx: EventCtx<()> = EventCtx::default();
+    page.init(&mut LifecycleCtx::default());
+    page.open_change_set_for_test("CS-1");
+    let ticket = page.selected_changes();
+    let tickets = focus(&mut page, "data-view");
+    page.dispatch_event(
+        &EventRoute::new(tickets.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('y'))),
+        &mut EventCtx::default(),
+    );
+    let menu = render_text(&mut page);
+    assert!(menu.contains("URL"));
+    assert!(menu.contains("Description"));
 
-    view.event(&TuiEvent::Yank, &mut ctx);
+    let mut slack = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(tickets.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('s'))),
+        &mut slack,
+    );
+    assert_eq!(
+        slack.clipboard_request(),
+        Some(format!(":ticket: {} - {}", ticket.key, ticket.title).as_str())
+    );
 
-    assert_eq!(ctx.clipboard_request(), Some("FIN-157"));
-}
-
-#[test]
-fn yp_copies_existing_composer_tickets_and_skips_local_drafts() {
-    tuicore::init();
-    let mut state = ComposerState::demo();
-    state
-        .dispatch(ComposerAction::OpenChangeSet("CS-1".into()))
-        .unwrap();
-    let mut view = super::ticket_rows::ticket_data_view(&state);
-    let rows = super::ticket_rows::ticket_rows(&state);
-    for row in rows {
-        view.highlight_id(&row.item.id);
-        let mut ctx: EventCtx<()> = EventCtx::default();
-        view.event(
-            &TuiEvent::Hotkey(tuicore::HotkeyEvent::Commit("yp".into())),
-            &mut ctx,
-        );
-        if row.item.key.starts_with("NEW-") {
-            assert_eq!(ctx.clipboard_request(), None);
-        } else {
-            let expected = format!("finery prepare {} \"{}\"", row.item.key, row.item.title);
-            assert_eq!(ctx.clipboard_request(), Some(expected.as_str()));
-        }
-    }
+    page.dispatch_event(
+        &EventRoute::new(tickets.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('y'))),
+        &mut EventCtx::default(),
+    );
+    let mut url = EventCtx::default();
+    page.dispatch_event(
+        &EventRoute::new(tickets.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('u'))),
+        &mut url,
+    );
+    assert_eq!(
+        url.clipboard_request(),
+        Some(format!("https://jira.example/browse/{}", ticket.key).as_str())
+    );
 }
 
 #[test]
@@ -1761,38 +1765,6 @@ fn yp_copies_the_highlighted_change_set_reference() {
     assert_eq!(
         ctx.clipboard_request(),
         Some("finery prepare CS-12 \"Change set name\"")
-    );
-}
-
-#[test]
-fn composer_prepare_reference_uses_selected_tickets_in_list_order() {
-    tuicore::init();
-    let mut state = ComposerState::demo();
-    state
-        .dispatch(ComposerAction::OpenChangeSet("CS-1".into()))
-        .unwrap();
-    let mut view = super::ticket_rows::ticket_data_view(&state);
-    let rows = super::ticket_rows::ticket_rows(&state);
-    let existing = rows
-        .iter()
-        .filter(|row| !row.item.key.starts_with("NEW-"))
-        .take(2)
-        .collect::<Vec<_>>();
-    assert_eq!(existing.len(), 2);
-    view = view.selected(existing.iter().rev().map(|row| row.item.id.clone()));
-    let expected = format!(
-        "finery prepare {} \"{}\" {} \"{}\"",
-        existing[0].item.key, existing[0].item.title, existing[1].item.key, existing[1].item.title
-    );
-    assert_eq!(
-        super::ticket_rows::selected_prepare_reference(&view, &state),
-        Some(expected)
-    );
-    view = view.selected(Vec::<String>::new());
-    view.highlight_id(&existing[0].item.id);
-    assert_eq!(
-        super::ticket_rows::selected_prepare_reference(&view, &state),
-        existing[0].item.prepare_reference()
     );
 }
 

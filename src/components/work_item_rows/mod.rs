@@ -34,12 +34,6 @@ pub(crate) struct WorkItemRow {
     pub show_time_in_status: bool,
 }
 
-impl WorkItemRow {
-    pub(crate) fn prepare_reference(&self) -> Option<String> {
-        prepare_references(std::iter::once(self))
-    }
-}
-
 pub(crate) fn prepare_references<'a>(
     rows: impl IntoIterator<Item = &'a WorkItemRow>,
 ) -> Option<String> {
@@ -77,6 +71,7 @@ pub(crate) struct TicketRowDetails<'a> {
     pub fix_versions: &'a [String],
     pub epic_name: Option<&'a str>,
     pub annotation: Option<&'a str>,
+    pub comment_count: Option<usize>,
 }
 
 pub(crate) fn ticket_summary_text(
@@ -154,6 +149,12 @@ pub(crate) fn ticket_summary_text(
         append_metadata(
             &mut metadata,
             Span::styled(annotation.to_owned(), Style::default().fg(theme.muted_fg())),
+        );
+    }
+    if let Some(comment_count) = details.comment_count.filter(|count| *count > 0) {
+        append_metadata(
+            &mut metadata,
+            Span::styled(format!("{comment_count} "), text_style),
         );
     }
     Text::from(vec![

@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 
+use super::mapping::adf_to_display_markdown;
 use super::{BacklogSnapshot, Client, request_bulk_fetch};
-use crate::store::composer::jira_adf::adf_to_markdown;
 
 pub(super) fn hydrate(
     client: &Client,
@@ -24,19 +24,34 @@ pub(super) fn hydrate(
     // Agile descriptions use wiki markup; REST v3 retains ADF and code-block languages.
     let mut descriptions = HashMap::new();
     for batch in keys.chunks(100) {
-        let response =
-            match request_bulk_fetch(client, base_url, email, token, batch, &["description"]) {
-                Ok(response) => response,
-                Err(error) => {
-                    snapshot
-                        .warnings
-                        .push(format!("Could not load formatted descriptions: {error}"));
-                    continue;
-                }
-            };
+        let response = match request_bulk_fetch(
+            client,
+            base_url,
+            email,
+            token,
+            batch,
+            &["description", "attachment"],
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                snapshot
+                    .warnings
+                    .push(format!("Could not load formatted descriptions: {error}"));
+                continue;
+            }
+        };
         for issue in response.issues {
             if let Some(description) = issue.fields.get("description") {
-                descriptions.insert(issue.key, adf_to_markdown(description));
+                descriptions.insert(
+                    issue.key,
+                    adf_to_display_markdown(
+                        description,
+                        issue
+                            .fields
+                            .get("attachment")
+                            .unwrap_or(&serde_json::Value::Null),
+                    ),
+                );
             }
         }
         let missing = batch

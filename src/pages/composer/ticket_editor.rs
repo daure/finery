@@ -21,7 +21,10 @@ use tuicore::{
 
 use crate::{
     app_settings::{AppSettings, ComposerKeyBinding, ComposerKeyBindings},
-    components::ticket_number_jump::{TicketNumberJump, exact_ticket_number_matches},
+    components::{
+        ticket_number_jump::{TicketNumberJump, exact_ticket_number_matches},
+        ticket_yank_menu::{TicketYankAction, TicketYankMenu, TicketYankTarget},
+    },
     service::{AppService, ComposerSearchTicket},
     speed_reader_settings::SpeedReaderSettings,
     store::composer::{
@@ -407,6 +410,7 @@ pub(super) struct TicketEditor {
     tree_change_set_id: Option<String>,
     number_jump: Rc<RefCell<TicketNumberJump>>,
     clipboard_image: Option<Receiver<Result<Option<crate::service::ClipboardImage>, String>>>,
+    yank_menu: TicketYankMenu,
 }
 
 impl TicketEditor {
@@ -424,19 +428,8 @@ impl TicketEditor {
             .composer_keys
             .clone();
         let number_jump = Rc::new(RefCell::new(TicketNumberJump::default()));
-        let jira_base_url = settings
-            .read()
-            .expect("settings lock poisoned")
-            .jira_base_url
-            .trim()
-            .trim_end_matches('/')
-            .to_owned();
         let ticket_list = Panel::new().top_left("Change sets").one_row(true).host(
-            ticket_data_view_with_number_jump(
-                &state.borrow(),
-                Rc::clone(&number_jump),
-                (!jira_base_url.is_empty()).then_some(jira_base_url),
-            ),
+            ticket_data_view_with_number_jump(&state.borrow(), Rc::clone(&number_jump)),
         );
 
         let detail = DetailPane::new(
@@ -613,6 +606,7 @@ impl TicketEditor {
             tree_change_set_id: None,
             number_jump,
             clipboard_image: None,
+            yank_menu: TicketYankMenu::new(),
         }
     }
 
@@ -1099,12 +1093,24 @@ impl TicketEditor {
             .is_focused()
     }
 
-    fn handle_prepare_yank(
-        &self,
+    fn handle_yank_menu(
+        &mut self,
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> Option<EventOutcome> {
-        if !matches!(event, TuiEvent::Hotkey(tuicore::HotkeyEvent::Commit(sequence)) if sequence == "yp")
+        if self.yank_menu.is_open() {
+            self.yank_menu.event(event, ctx);
+            self.finish_yank(ctx);
+            if !self.yank_menu.is_open() {
+                Self::focus_tickets(ctx);
+            }
+            ctx.stop_propagation();
+            return Some(EventOutcome::Handled);
+        }
+        let open_requested = matches!(event, TuiEvent::Yank)
+            || matches!(event, TuiEvent::Key(key) if key.code == Key::Char('y') && key.modifiers == KeyModifiers::NONE)
+            || matches!(event, TuiEvent::Hotkey(tuicore::HotkeyEvent::Pending(sequence)) if sequence == "y");
+        if !open_requested
             || !self.ticket_list_is_focused()
             || self.view.is_active()
             || self.view.base().is_active()
@@ -1113,13 +1119,43 @@ impl TicketEditor {
         {
             return None;
         }
-        if let Some(value) =
-            super::ticket_rows::selected_prepare_reference(self.table(), &self.state.borrow())
-        {
-            ctx.copy_to_clipboard(value);
-        }
+        let target = {
+            let state = self.state.borrow();
+            state.selected_ticket().map(|ticket| TicketYankTarget {
+                key: ticket.key.clone(),
+                title: ticket.title.clone(),
+                description: ticket.description.clone(),
+            })
+        }?;
+        self.yank_menu.open(target, ctx);
         ctx.stop_propagation();
         Some(EventOutcome::Handled)
+    }
+
+    fn finish_yank(&mut self, ctx: &mut EventCtx<()>) {
+        let Some((action, target)) = self.yank_menu.take_selection() else {
+            return;
+        };
+        if action == TicketYankAction::Url {
+            if target.key.starts_with("NEW-") {
+                self.service
+                    .report_error("Could not copy Jira URL for a local draft".into());
+                return;
+            }
+            let url = self
+                .settings
+                .read()
+                .ok()
+                .and_then(|settings| settings.jira_issue_url(&target.key));
+            if let Some(url) = url {
+                ctx.copy_to_clipboard(url);
+            } else {
+                self.service
+                    .report_error("Could not copy Jira URL: Jira URL is not configured".into());
+            }
+        } else if let Some(value) = action.text(&target) {
+            ctx.copy_to_clipboard(value);
+        }
     }
 
     fn description_reader_is_open(&self) -> bool {
@@ -2340,7 +2376,13 @@ impl TuiNode for TicketEditor {
             self.body_mut()
                 .set_constraints(Constraint::Length(ticket_height), Constraint::Fill(1));
             self.sync();
-            self.view.layout(area, ctx)
+            let result = self.view.layout(area, ctx);
+            if self.yank_menu.is_open() {
+                ctx.push_slot(ChildKey::new("yank-menu"), area, |ctx| {
+                    self.yank_menu.layout(area, ctx)
+                });
+            }
+            result
         }
     }
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
@@ -2348,6 +2390,9 @@ impl TuiNode for TicketEditor {
             self.loading_view.render(frame, area, ctx);
         } else {
             self.view.render(frame, area, ctx);
+            if self.yank_menu.is_open() {
+                self.yank_menu.render(frame, area, ctx);
+            }
         }
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
@@ -2368,6 +2413,11 @@ impl TuiNode for TicketEditor {
             return self.loading_view.event(event, ctx);
         }
         self.poll_submission(Some(ctx));
+        if self.yank_menu.is_open()
+            && let Some(outcome) = self.handle_yank_menu(event, ctx)
+        {
+            return outcome;
+        }
         if self.handle_open_command(event, ctx) {
             return EventOutcome::Handled;
         }
@@ -2387,7 +2437,7 @@ impl TuiNode for TicketEditor {
         if let Some(outcome) = self.handle_open_mermaid_diagram(event, ctx) {
             return outcome;
         }
-        if let Some(outcome) = self.handle_prepare_yank(event, ctx) {
+        if let Some(outcome) = self.handle_yank_menu(event, ctx) {
             return outcome;
         }
         let outcome = self.view.event(event, ctx);
@@ -2439,6 +2489,11 @@ impl TuiNode for TicketEditor {
             return self.loading_view.dispatch_event(route, event, ctx);
         }
         self.poll_submission(Some(ctx));
+        if self.yank_menu.is_open()
+            && let Some(outcome) = self.handle_yank_menu(event, ctx)
+        {
+            return outcome;
+        }
         if self.handle_open_command(event, ctx) {
             return EventOutcome::Handled;
         }
@@ -2458,7 +2513,7 @@ impl TuiNode for TicketEditor {
         if let Some(outcome) = self.handle_open_mermaid_diagram(event, ctx) {
             return outcome;
         }
-        if let Some(outcome) = self.handle_prepare_yank(event, ctx) {
+        if let Some(outcome) = self.handle_yank_menu(event, ctx) {
             return outcome;
         }
         let outcome = self.view.dispatch_event(route, event, ctx);
@@ -2541,7 +2596,10 @@ impl TuiNode for TicketEditor {
                     .map_or(TickResult::IDLE, TickResult::scheduled_after)
             }
         };
-        let view_result = self.view.tick(dt, settings);
+        let view_result = self
+            .view
+            .tick(dt, settings)
+            .merge(self.yank_menu.tick(dt, settings));
         let cache_changed = self.drain_diagram_cache_updates();
         view_result
             .merge(if changed || source_changed || cache_changed {
@@ -2572,6 +2630,8 @@ impl TuiNode for TicketEditor {
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
         if self.opening_loading {
             self.loading_view.focus(target, focused, ctx);
+        } else if self.yank_menu.is_open() {
+            self.yank_menu.focus(target, focused, ctx);
         } else {
             self.view.focus(target, focused, ctx);
         }
@@ -2579,6 +2639,8 @@ impl TuiNode for TicketEditor {
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
         if self.opening_loading {
             self.loading_view.dispatch_focus(target, focused, ctx);
+        } else if let Some(yank_target) = target.for_child(&ChildKey::new("yank-menu")) {
+            self.yank_menu.dispatch_focus(&yank_target, focused, ctx);
         } else {
             if self.pending_focus_tickets && focused {
                 let data_view_id = FocusId::new("data-view");
@@ -2594,17 +2656,21 @@ impl TuiNode for TicketEditor {
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.loading_view.init(ctx);
         self.view.init(ctx);
+        self.yank_menu.init(ctx);
     }
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.loading_view.mount(ctx);
         self.view.mount(ctx);
+        self.yank_menu.mount(ctx);
     }
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.loading_view.unmount(ctx);
         self.view.unmount(ctx);
+        self.yank_menu.unmount(ctx);
     }
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.loading_view.destroy(ctx);
         self.view.destroy(ctx);
+        self.yank_menu.destroy(ctx);
     }
 }

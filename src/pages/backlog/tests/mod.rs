@@ -7,9 +7,9 @@ use std::{
 
 use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Modifier};
 use tuicore::{
-    AnimationSettings, ChildKey, EventCtx, EventRoute, FocusCtx, FocusId, FocusRequest,
-    FocusTarget, Key, KeyEvent, KeyModifiers, LayoutCtx, Propagation, RenderCtx, TreePath,
-    TuiEvent, TuiNode,
+    AnimationSettings, ChildKey, EventCtx, EventOutcome, EventRoute, FocusCtx, FocusId,
+    FocusRequest, FocusTarget, Key, KeyEvent, KeyModifiers, LayoutCtx, Propagation, RenderCtx,
+    TreePath, TuiEvent, TuiNode,
 };
 
 use super::{
@@ -31,6 +31,8 @@ use super::{
 };
 use crate::app_settings::BacklogRunwaySettings;
 use crate::jira::JiraOption;
+use crate::service::AppService;
+use crate::store::work_items::content::{TicketImage, ticket_image_marker};
 use crate::store::work_items::{
     BacklogSnapshot, IssueStatusTransition, RunwayCapacitySource, Sprint, StatusTransition,
     SubtaskProgress, TicketComment, TicketComments, VelocityReport, VelocitySprint, WorkItem,
@@ -234,7 +236,7 @@ fn backlog_hides_the_existing_data_view_while_reloading() {
 }
 
 #[test]
-fn backlog_header_orders_toolbar_focus_and_shows_desktop_labels() {
+fn backlog_header_orders_icon_only_toolbar_focus() {
     tuicore::init();
     let (sender, _) = mpsc::channel();
     let mut view = backlog_tree(&snapshot(), sender, Default::default());
@@ -251,19 +253,35 @@ fn backlog_header_orders_toolbar_focus_and_shows_desktop_labels() {
         .unwrap();
     let header = rendered_lines(&terminal, area).remove(0);
 
-    assert!(cell_position(&header, "Web") < cell_position(&header, "Group by"));
-    assert!(cell_position(&header, "Group by") < cell_position(&header, "Estimated"));
-    assert!(header.contains("󰀄 User"));
-    assert!(header.contains("󰡯 Type"));
-    assert!(header.contains(" Status"));
-    assert!(cell_position(&header, "Estimated") < cell_position(&header, "User"));
-    assert!(cell_position(&header, "User") < cell_position(&header, "Type"));
-    assert!(cell_position(&header, "Type") < cell_position(&header, "Status"));
-    assert!(cell_position(&header, "Status") < cell_position(&header, " Epic"));
-    assert!(cell_position(&header, " Epic") < cell_position(&header, " Label"));
-    assert!(cell_position(&header, " Label") < cell_position(&header, " Release"));
-    assert!(cell_position(&header, " Release") < cell_position(&header, "Velocity"));
-    assert!(cell_position(&header, "Velocity") < cell_position(&header, "Refresh"));
+    for label in [
+        "Web",
+        "Group by",
+        "Estimated",
+        "User",
+        "Type",
+        "Status",
+        "Epic",
+        "Label",
+        "Release",
+        "Velocity",
+        "Refresh",
+    ] {
+        assert!(!header.contains(label));
+    }
+    for (left, right) in [
+        ("󰖟", "󰑮"),
+        ("󰑮", "󰑭"),
+        ("󰑭", "󰀄"),
+        ("󰀄", "󰡯"),
+        ("󰡯", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", "󰓅"),
+        ("󰓅", "󰑓"),
+    ] {
+        assert!(cell_position(&header, left) < cell_position(&header, right));
+    }
 
     let focus_position = |path| {
         layout
@@ -357,8 +375,8 @@ fn backlog_header_uses_two_rows_for_compact_widths() {
     assert!(lines[0].contains("|W|"));
     assert!(!lines[0].contains("Web"));
     assert!(lines[0].contains("󰑮"));
-    assert!(lines[0].contains(" V"));
-    assert!(lines[0].contains(" R"));
+    assert!(lines[0].contains("󰓅"));
+    assert!(lines[0].contains("󰑓"));
     assert!(!lines[0].contains(" G"));
     assert!(lines[1].contains("Search..."));
     assert!(lines[1].contains("󰀄"));
@@ -2839,16 +2857,6 @@ fn unified_tree_uses_same_section_transient_selection_for_the_quick_menu() {
         }),
         &mut ctx,
     );
-    let mut copied = EventCtx::default();
-    tree.dispatch_event(
-        &route,
-        &TuiEvent::Hotkey(tuicore::HotkeyEvent::Commit("yp".into())),
-        &mut copied,
-    );
-    assert_eq!(
-        copied.clipboard_request(),
-        Some("finery prepare FIN-1 \"First\" FIN-2 \"Second\"")
-    );
     tree.dispatch_event(
         &route,
         &TuiEvent::Key(KeyEvent::from(Key::Char('.'))),
@@ -3177,7 +3185,7 @@ fn enter_opens_a_focused_ticket_detail_dialog() {
         layout
             .focus_targets()
             .iter()
-            .any(|target| target.id == FocusId::new("syntax-highlighter"))
+            .any(|target| target.id == FocusId::new("ticket-content"))
     );
     let description = layout
         .overlays()
@@ -3309,7 +3317,7 @@ fn comment_bodies_use_markdown_viewer_styles_and_preserve_layout() {
             body: source.into(),
         }],
     }));
-    let mut pane = TicketCommentsPane::new(comments, |_| {});
+    let mut pane = TicketCommentsPane::new(comments, AppService::for_tests(), |_| {});
     let area = Rect::new(0, 0, 80, 12);
     pane.layout(area, &mut LayoutCtx::new());
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
@@ -3345,6 +3353,44 @@ fn comment_bodies_use_markdown_viewer_styles_and_preserve_layout() {
 }
 
 #[test]
+fn comment_images_render_between_the_surrounding_markdown_blocks() {
+    tuicore::init();
+    let marker = ticket_image_marker(&TicketImage {
+        url: "https://jira.example/rest/api/3/attachment/content/10248".into(),
+        alt: "comment.png".into(),
+        width: 300,
+        height: 40,
+    });
+    let comments = Rc::new(RefCell::new(TicketComments {
+        total: 1,
+        complete: true,
+        comments: vec![TicketComment {
+            id: "1".into(),
+            parent_id: None,
+            author: "Marlo Vlietstra".into(),
+            created: String::new(),
+            body: format!("Before\n\n{marker}\n\nAfter"),
+        }],
+    }));
+    let mut pane = TicketCommentsPane::new(comments, AppService::for_tests(), |_| {});
+    let area = Rect::new(0, 0, 60, 10);
+    pane.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            pane.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let lines = rendered_lines(&terminal, area);
+
+    assert_eq!(lines[1].trim_end(), "Before");
+    assert!(lines[3].contains("Loading image: comment.png"));
+    assert_eq!(lines[6].trim_end(), "After");
+}
+
+#[test]
 fn comment_tree_renders_replies_and_opens_the_activated_comment() {
     tuicore::init();
     let comments = Rc::new(RefCell::new(TicketComments {
@@ -3375,7 +3421,7 @@ fn comment_tree_renders_replies_and_opens_the_activated_comment() {
         ],
     }));
     let (opened, receiver) = mpsc::channel();
-    let mut pane = TicketCommentsPane::new(comments, move |id| {
+    let mut pane = TicketCommentsPane::new(comments, AppService::for_tests(), move |id| {
         opened.send(id).unwrap();
     });
     let area = Rect::new(0, 0, 80, 6);
@@ -3437,43 +3483,89 @@ fn backlog_rank_plan_uses_section_order_anchors() {
 }
 
 #[test]
-fn yp_copies_a_backlog_ticket_prepare_reference_but_not_a_section() {
+fn y_opens_the_backlog_ticket_yank_menu_with_immediate_navigation() {
     tuicore::init();
-    let (sender, _receiver) = mpsc::channel();
-    let mut snapshot = snapshot();
-    snapshot.work_items[0].title = "Prepare this ticket".into();
-    let key = snapshot.work_items[0].key.clone();
-    let mut tree = backlog_tree(&snapshot, sender, Default::default());
-    let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
-    tree.highlight(&format!("ticket:{key}"));
-    let event = TuiEvent::Hotkey(tuicore::HotkeyEvent::Commit("yp".into()));
-    let mut ctx = EventCtx::default();
-    tree.dispatch_event(&route, &event, &mut ctx);
-    let expected = format!("finery prepare {key} \"Prepare this ticket\"");
-    assert_eq!(ctx.clipboard_request(), Some(expected.as_str()));
-
-    tree.highlight("section:backlog");
-    let mut ctx = EventCtx::default();
-    tree.dispatch_event(&route, &event, &mut ctx);
-    assert_eq!(ctx.clipboard_request(), None);
-}
-
-#[test]
-fn yy_copies_a_backlog_ticket_key_but_not_a_section() {
-    tuicore::init();
-    let (sender, _receiver) = mpsc::channel();
+    let (sender, receiver) = mpsc::channel();
     let snapshot = snapshot();
     let key = snapshot.work_items[0].key.clone();
     let mut tree = backlog_tree(&snapshot, sender, Default::default());
     let route = EventRoute::new(TreePath::from_keys([ChildKey::new("data")]));
     tree.highlight(&format!("ticket:{key}"));
+    let mut open = EventCtx::default();
+    assert_eq!(
+        tree.dispatch_event(
+            &route,
+            &TuiEvent::Key(KeyEvent::from(Key::Char('y'))),
+            &mut open,
+        ),
+        EventOutcome::Handled
+    );
+    assert_eq!(open.propagation(), tuicore::Propagation::Stopped);
+    let area = Rect::new(0, 0, 80, 16);
+    let mut layout = LayoutCtx::new();
+    layout.with_overlay_bounds(area, |ctx| tree.layout(area, ctx));
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let text = rendered_lines(&terminal, area).concat();
+    assert!(text.contains("URL"));
+    assert!(text.contains("Description"));
+
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('j'),
+            modifiers: KeyModifiers::CONTROL,
+        }),
+        &mut EventCtx::default(),
+    );
     let mut ctx = EventCtx::default();
-    tree.dispatch_event(&route, &TuiEvent::Yank, &mut ctx);
+    tree.dispatch_event(&route, &TuiEvent::Key(KeyEvent::from(Key::Enter)), &mut ctx);
+    assert_eq!(
+        ctx.clipboard_request(),
+        Some(snapshot.work_items[0].title.as_str())
+    );
+
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('y'))),
+        &mut EventCtx::default(),
+    );
+    let mut ctx = EventCtx::default();
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('k'))),
+        &mut ctx,
+    );
     assert_eq!(ctx.clipboard_request(), Some(key.as_str()));
+
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('y'))),
+        &mut EventCtx::default(),
+    );
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('u'))),
+        &mut EventCtx::default(),
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(super::components::BacklogSectionEvent::YankTicketUrl { key: copied }) if copied == key
+    ));
 
     tree.highlight("section:backlog");
     let mut ctx = EventCtx::default();
-    tree.dispatch_event(&route, &TuiEvent::Yank, &mut ctx);
+    tree.dispatch_event(
+        &route,
+        &TuiEvent::Key(KeyEvent::from(Key::Char('y'))),
+        &mut ctx,
+    );
     assert_eq!(ctx.clipboard_request(), None);
 }
 
@@ -3654,7 +3746,7 @@ fn quick_menu_right_aligns_action_hotkeys() {
         "To Do".into(),
         "Ada".into(),
         "3".into(),
-        "FIN-42".into(),
+        "[FINERY-TC-20260906-H01] Resilient checkout delivery".into(),
         "v1.4".into(),
         Vec::new(),
         &mut ctx,
@@ -3676,7 +3768,7 @@ fn quick_menu_right_aligns_action_hotkeys() {
         ("Assign user (@AD)", "a"),
         ("Set status (To Do)", "s"),
         ("Set story points (3)", "p"),
-        ("Set epic (FIN-42)", "e"),
+        ("Set epic (", "e"),
         ("Set release (v1.4)", "r"),
         ("View description", "Enter"),
         ("Open command", "⌃;"),
