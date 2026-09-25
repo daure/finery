@@ -1173,9 +1173,7 @@ impl FileContent {
         let service = self.service.clone();
         thread::spawn(move || {
             let result = match source {
-                AttachmentImageSource::Local(data) => {
-                    Image::from_bytes(data).map_err(|error| error.to_string())
-                }
+                AttachmentImageSource::Local(data) => service.attachment_image_from_bytes(data),
                 AttachmentImageSource::Remote(url) => service.load_jira_attachment_image(&url),
             };
             let _ = sender.send(result);
@@ -1254,6 +1252,14 @@ impl TuiNode for FileContent {
                 RatatuiParagraph::new(self.text()).style(Style::default().fg(theme().text_fg())),
                 area,
             );
+        }
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        let selected = self.selected_image_key();
+        match selected.as_ref().and_then(|key| self.images.get_mut(key)) {
+            Some(CachedAttachmentImage::Ready(image)) => image.event(event, ctx),
+            _ => EventOutcome::Ignored,
         }
     }
 

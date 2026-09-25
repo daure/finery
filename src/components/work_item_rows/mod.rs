@@ -4,10 +4,22 @@ use ratatui::{
 };
 use tuicore::{Chip, ChipColorRole, MatchSpan, SearchMode, search_match};
 
+use crate::store::work_items::StatusCategory;
+
 pub(crate) const TICKET_MENU_WIDTH: u16 = 84;
 pub(crate) const TICKET_MENU_MAX_HEIGHT_PERCENT: u16 = 60;
 const LABEL_CHIP_TEXT_MAX_WIDTH: usize = 16;
 const LABEL_TEXT_MAX_WIDTH: usize = 10;
+
+pub(crate) fn status_category_style(category: StatusCategory) -> Style {
+    let theme = tuicore::theme();
+    Style::default().fg(match category {
+        StatusCategory::Todo => theme.muted_fg(),
+        StatusCategory::InProgress => theme.info_fg(),
+        StatusCategory::Done => theme.success_fg(),
+        StatusCategory::Unknown => theme.text_fg(),
+    })
+}
 
 pub(crate) fn ticket_menu_max_height(viewport_height: u16) -> u16 {
     viewport_height.saturating_mul(TICKET_MENU_MAX_HEIGHT_PERCENT) / 100
@@ -21,6 +33,7 @@ pub(crate) struct WorkItemRow {
     pub kind: WorkItemKind,
     pub priority: String,
     pub status: String,
+    pub status_category: StatusCategory,
     pub done: bool,
     pub assignee: String,
     pub labels: Vec<String>,
@@ -124,7 +137,8 @@ pub(crate) fn ticket_summary_text(
                 crate::store::work_items::format_time_in_status(chrono::Utc::now(), changed_at);
             status_text.push_str(&format!(" ({time})"));
         }
-        append_metadata(&mut metadata, Span::styled(status_text, text_style));
+        let status_style = status_category_style(row.status_category);
+        append_metadata(&mut metadata, Span::styled(status_text, status_style));
     }
     append_labels_chip(&mut metadata, &row.labels);
     if let Some(epic_name) = details.epic_name {

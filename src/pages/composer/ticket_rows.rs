@@ -16,7 +16,7 @@ use crate::{
     },
     store::{
         composer::{ArchiveOutcome, ChangeKind, ComposerState, TicketChange, TicketKind},
-        work_items::is_done_status,
+        work_items::{StatusCategory, is_done_status},
     },
 };
 
@@ -284,7 +284,13 @@ fn ticket_row(
             kind: ticket_kind(ticket.kind),
             priority: ticket.priority.clone(),
             status: ticket.status.clone(),
-            done: is_done_status(&ticket.status),
+            status_category: presentation
+                .map(|presentation| presentation.work_item.status_category)
+                .unwrap_or_else(|| StatusCategory::from_status_name(&ticket.status)),
+            done: presentation.is_some_and(|presentation| {
+                presentation.work_item.status == ticket.status
+                    && presentation.work_item.status_category == StatusCategory::Done
+            }) || is_done_status(&ticket.status),
             assignee: ticket.assignee.clone(),
             labels: ticket.labels.clone(),
             story_points: ticket.story_points,
@@ -394,6 +400,7 @@ impl TicketRow {
                 kind: WorkItemKind::Other,
                 priority: String::new(),
                 status: String::new(),
+                status_category: StatusCategory::Unknown,
                 done: false,
                 assignee: String::new(),
                 labels: Vec::new(),
@@ -435,6 +442,7 @@ impl TicketRow {
                 kind: WorkItemKind::Other,
                 priority: String::new(),
                 status: String::new(),
+                status_category: StatusCategory::Unknown,
                 done: false,
                 assignee: String::new(),
                 labels: Vec::new(),

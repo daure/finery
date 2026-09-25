@@ -24,7 +24,17 @@ use crate::{
 
 const MAX_IMAGE_WIDTH: u16 = 120;
 const MAX_IMAGE_HEIGHT: u16 = 40;
-pub(crate) const DIRECT_KITTY_SCROLL_PAUSE: Duration = Duration::from_millis(80);
+const DIRECT_KITTY_SCROLL_PAUSE: Duration = Duration::from_millis(80);
+
+pub(crate) fn image_scroll_container<C: TuiNode>(child: C) -> ScrollContainer<C> {
+    let scroll = ScrollContainer::vertical(child).scrollbars(ScrollbarConfig::default());
+    // Zellij's scaled-crop cache cannot safely reconcile moving Kitty images yet.
+    if std::env::var_os("ZELLIJ").is_some() {
+        scroll.pause_direct_kitty_while_scrolling(DIRECT_KITTY_SCROLL_PAUSE)
+    } else {
+        scroll
+    }
+}
 
 pub(crate) struct TicketDocument {
     content: Flex<()>,
@@ -83,9 +93,7 @@ impl TicketDocument {
 impl TicketContent {
     pub(crate) fn new(source: impl Into<String>, service: AppService) -> Self {
         Self {
-            content: ScrollContainer::vertical(TicketDocument::new(source, service))
-                .pause_direct_kitty_while_scrolling(DIRECT_KITTY_SCROLL_PAUSE)
-                .scrollbars(ScrollbarConfig::default()),
+            content: image_scroll_container(TicketDocument::new(source, service)),
             focused: false,
         }
     }
@@ -318,6 +326,13 @@ impl TuiNode for InlineImage {
             <Image as TuiNode<()>>::render(image, frame, area, ctx);
         } else {
             frame.render_widget(RatatuiParagraph::new(self.status()), area);
+        }
+    }
+
+    fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        match &mut self.state {
+            InlineImageState::Ready(image) => image.event(event, ctx),
+            _ => EventOutcome::Ignored,
         }
     }
 

@@ -2,6 +2,36 @@ use std::collections::HashMap;
 
 pub(crate) mod content;
 pub(crate) mod release;
+pub(crate) mod saved_filter;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StatusCategory {
+    Todo,
+    InProgress,
+    Done,
+    #[default]
+    Unknown,
+}
+
+impl StatusCategory {
+    pub(crate) fn from_jira(key: Option<&str>, name: Option<&str>) -> Self {
+        match key.unwrap_or_default().to_ascii_lowercase().as_str() {
+            "new" | "todo" | "to-do" => Self::Todo,
+            "indeterminate" | "in-flight" | "in-progress" => Self::InProgress,
+            "done" | "completed" => Self::Done,
+            _ => Self::from_status_name(name.unwrap_or_default()),
+        }
+    }
+
+    pub(crate) fn from_status_name(name: &str) -> Self {
+        match name.to_ascii_lowercase().as_str() {
+            "to do" | "todo" | "backlog" | "ready for development" => Self::Todo,
+            "in progress" => Self::InProgress,
+            "done" => Self::Done,
+            _ => Self::Unknown,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TicketComment {
@@ -26,6 +56,7 @@ pub(crate) struct WorkItem {
     pub description: String,
     pub kind: String,
     pub status: String,
+    pub status_category: StatusCategory,
     pub done: bool,
     pub priority: String,
     pub assignee: String,

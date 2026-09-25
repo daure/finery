@@ -1,3 +1,5 @@
+mod saved_filter_keys;
+
 use std::time::Duration;
 
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};

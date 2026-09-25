@@ -23,6 +23,10 @@ Escape a literal `{{` as `\{\{`. Escape any literal canonical inline opening (`@
 
 The ticket detail viewer displays Jira image attachments inline at their ADF position in descriptions and comments. This read-only rendering does not make media safe to edit or round-trip through Composer.
 
+Composer's Source, Changes, and diff views display resolved image attachments as `Image: filename` at their description position. A single click has no action; a double-click opens the image in the OS-associated viewer. Unresolved, ambiguous, deleted, or non-image media displays `Unsupported media`.
+
+Jira metadata retains the original description ADF. Image references are a display projection of that exact source snapshot; the editor and external editor receive canonical Markdown. Media overwrite guards remain active, and unrelated ticket updates leave the Jira description untouched. Refresh tickets whose saved metadata lacks the source ADF to resolve image references.
+
 ## Guarded ADF
 
 - Images, attachments, embeds, and other media.

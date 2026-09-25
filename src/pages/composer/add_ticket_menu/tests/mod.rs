@@ -196,6 +196,9 @@ fn search_ticket(ticket: Ticket) -> ComposerSearchTicket {
             description: ticket.description.clone(),
             kind: format!("{:?}", ticket.kind),
             status: ticket.status.clone(),
+            status_category: crate::store::work_items::StatusCategory::from_status_name(
+                &ticket.status,
+            ),
             done: false,
             priority: ticket.priority.clone(),
             assignee: ticket.assignee.clone(),

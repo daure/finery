@@ -22,6 +22,9 @@ use crate::{
 
 type PendingActions = Rc<RefCell<Vec<ComposerAction>>>;
 
+mod description_media;
+use description_media::DescriptionMedia;
+
 fn is_unfocus_event(event: &TuiEvent) -> bool {
     matches!(
         event,
@@ -530,6 +533,7 @@ pub(super) enum DescriptionAction {
     OpenExternalEditor(String),
     OpenExternalDiff { source: String, changes: String },
     OpenSpeedReader(String),
+    OpenImage(crate::store::composer::TicketAttachment),
     CloseSpeedReader,
 }
 
@@ -796,6 +800,8 @@ pub(super) struct BoundDescription {
     reader_hotkey: String,
     input: TextareaInput,
     diff: DiffViewer,
+    preview: TextareaInput,
+    media: DescriptionMedia,
     focused: bool,
     focus_path: TreePath,
 }
@@ -829,6 +835,10 @@ impl BoundDescription {
                 .style(DiffStyle::Word)
                 .show_headers(false)
                 .wrap(true),
+            preview: TextareaInput::new()
+                .language(Language::Markdown)
+                .disabled(true),
+            media: DescriptionMedia::default(),
             focused: false,
             focus_path: TreePath::new(),
         };
@@ -849,25 +859,43 @@ impl BoundDescription {
 
     fn sync(&mut self) -> bool {
         let state = self.state.borrow();
+        let media_changed = self.media.sync(&state);
         let value = state
             .selected_ticket()
             .map_or("", |ticket| ticket.description.as_str());
-        let (source, changes) = description_diff_texts(&state);
         self.diff.set_style(if state.description_diff_side_by_side {
             DiffStyle::SideBySide
         } else {
             DiffStyle::Word
         });
-        self.diff.set_texts(source, changes);
+        self.diff
+            .set_texts(&self.media.source.text, &self.media.changes.text);
+        if self.preview.current_value() != self.media.selected.text {
+            self.preview.set_value(&self.media.selected.text);
+        }
         let editable = state.selected_is_editable();
         let value_changed =
             (!self.input.insert_mode() || !editable) && self.input.current_value() != value;
-        let changed = value_changed || editable == self.input.is_disabled();
+        let changed = media_changed || value_changed || editable == self.input.is_disabled();
         if value_changed {
             self.input.set_value(value);
         }
         self.input.set_disabled(!editable);
         changed
+    }
+
+    fn shows_media_preview(&self) -> bool {
+        !self.input.insert_mode() && self.media.selected.text != self.input.current_value()
+    }
+
+    fn input_event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        if self.shows_media_preview() && !matches!(event, TuiEvent::Mouse(_)) {
+            let outcome = self.preview.event(event, ctx);
+            if outcome == EventOutcome::Handled {
+                return outcome;
+            }
+        }
+        self.input.event(event, ctx)
     }
 
     fn handle_description_hotkey(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
@@ -902,7 +930,11 @@ impl BoundDescription {
                 ComposerViewMode::Changes | ComposerViewMode::Source => return false,
             }
         } else if sequence == &self.reader_hotkey && view_mode != ComposerViewMode::Diff {
-            let reader = DescriptionAction::OpenSpeedReader(self.input.current_value().into());
+            let reader = DescriptionAction::OpenSpeedReader(if self.shows_media_preview() {
+                self.preview.current_value().into()
+            } else {
+                self.input.current_value().into()
+            });
             if view_mode == ComposerViewMode::Changes {
                 vec![DescriptionAction::ShowChanges, reader]
             } else {
@@ -947,6 +979,8 @@ impl TuiNode for BoundDescription {
     fn measure(&self, proposal: LayoutProposal) -> LayoutSizeHint {
         if self.state.borrow().view_mode == ComposerViewMode::Diff {
             <DiffViewer as TuiNode<()>>::measure(&self.diff, proposal)
+        } else if self.shows_media_preview() {
+            self.preview.measure(proposal)
         } else {
             self.input.measure(proposal)
         }
@@ -960,6 +994,9 @@ impl TuiNode for BoundDescription {
         }
         if self.state.borrow().view_mode == ComposerViewMode::Diff {
             <DiffViewer as TuiNode<()>>::layout(&mut self.diff, area, ctx)
+        } else if self.shows_media_preview() {
+            self.input.layout(area, &mut LayoutCtx::new());
+            self.preview.layout(area, ctx)
         } else {
             self.input.layout(area, ctx)
         }
@@ -967,18 +1004,23 @@ impl TuiNode for BoundDescription {
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, _ctx: &mut RenderCtx<'a>) {
         if self.state.borrow().view_mode == ComposerViewMode::Diff {
             self.diff.render(frame, area);
+        } else if self.shows_media_preview() {
+            self.preview.render(frame, area);
         } else {
             self.input.render(frame, area);
         }
     }
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
+        if self.handle_image_reference(event, ctx) {
+            return EventOutcome::Handled;
+        }
         if self.handle_description_hotkey(event, ctx) {
             return EventOutcome::Handled;
         }
         if self.state.borrow().view_mode == ComposerViewMode::Diff {
             self.diff.event(event, ctx)
         } else {
-            self.input.event(event, ctx)
+            self.input_event(event, ctx)
         }
     }
     fn dispatch_event(
@@ -987,13 +1029,10 @@ impl TuiNode for BoundDescription {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        if self.handle_description_hotkey(event, ctx) {
-            return EventOutcome::Handled;
-        }
-        if self.state.borrow().view_mode == ComposerViewMode::Diff {
-            self.diff.dispatch_event(route, event, ctx)
+        if route.path.is_empty() {
+            self.event(event, ctx)
         } else {
-            self.input.dispatch_event(route, event, ctx)
+            EventOutcome::Ignored
         }
     }
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
@@ -1003,37 +1042,45 @@ impl TuiNode for BoundDescription {
         } else {
             self.input.tick(dt, settings)
         };
-        active.merge(if changed {
-            TickResult::CHANGED
-        } else {
-            TickResult::IDLE
-        })
+        active
+            .merge(self.preview.tick(dt, settings))
+            .merge(if changed {
+                TickResult::CHANGED
+            } else {
+                TickResult::IDLE
+            })
     }
     fn focus(&mut self, target: Option<&FocusId>, focused: bool, ctx: &mut FocusCtx<()>) {
         self.focused = focused;
         self.input.focus(target, focused, ctx);
+        self.preview.focus(target, focused, ctx);
         self.diff.focus(target, focused, ctx);
     }
     fn dispatch_focus(&mut self, target: &FocusTarget, focused: bool, ctx: &mut FocusCtx<()>) {
         self.focused = focused;
         self.input.dispatch_focus(target, focused, ctx);
+        self.preview.dispatch_focus(target, focused, ctx);
         self.diff.dispatch_focus(target, focused, ctx);
     }
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.input.init(ctx);
+        self.preview.init(ctx);
         self.diff.init(ctx);
     }
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.input.mount(ctx);
+        self.preview.mount(ctx);
         self.diff.mount(ctx);
     }
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.diff.unmount(ctx);
         self.input.unmount(ctx);
+        self.preview.unmount(ctx);
     }
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.diff.destroy(ctx);
         self.input.destroy(ctx);
+        self.preview.destroy(ctx);
     }
 }
 

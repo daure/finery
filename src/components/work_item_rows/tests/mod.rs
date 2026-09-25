@@ -51,6 +51,7 @@ fn search_matches_are_underlined_in_the_shared_ticket_title_template() {
         kind: WorkItemKind::Story,
         priority: "Low".into(),
         status: "In Progress".into(),
+        status_category: crate::store::work_items::StatusCategory::InProgress,
         done: false,
         assignee: "Marlo".into(),
         labels: Vec::new(),
@@ -84,6 +85,7 @@ fn done_ticket_keys_are_struck_through_in_shared_ticket_rows() {
         kind: WorkItemKind::Story,
         priority: "Low".into(),
         status: "Done".into(),
+        status_category: crate::store::work_items::StatusCategory::Done,
         done: true,
         assignee: "Marlo".into(),
         labels: Vec::new(),
@@ -108,6 +110,69 @@ fn done_ticket_keys_are_struck_through_in_shared_ticket_rows() {
 }
 
 #[test]
+fn status_text_uses_the_jira_category_semantic_color() {
+    tuicore::init();
+    let theme = tuicore::theme();
+    for (status, category, color) in [
+        (
+            "Ready for Development",
+            crate::store::work_items::StatusCategory::Todo,
+            theme.muted_fg(),
+        ),
+        (
+            "Custom Testing",
+            crate::store::work_items::StatusCategory::InProgress,
+            theme.info_fg(),
+        ),
+        (
+            "Custom Released",
+            crate::store::work_items::StatusCategory::Done,
+            theme.success_fg(),
+        ),
+    ] {
+        let row = WorkItemRow {
+            id: "KAN-22".into(),
+            key: "KAN-22".into(),
+            title: "Categorized ticket".into(),
+            kind: WorkItemKind::Story,
+            priority: "Medium".into(),
+            status: status.into(),
+            status_category: category,
+            done: category == crate::store::work_items::StatusCategory::Done,
+            assignee: "Marlo".into(),
+            labels: Vec::new(),
+            story_points: None,
+            show_story_points: false,
+            story_points_estimated: false,
+            story_points_from_average: false,
+            change_badge: None,
+            submitted: false,
+            status_changed_at: None,
+            show_time_in_status: false,
+        };
+
+        let text = ticket_summary_text(
+            &row,
+            None,
+            None,
+            TicketRowDetails {
+                subtask_progress: None,
+                fix_versions: &[],
+                epic_name: None,
+                annotation: None,
+                comment_count: None,
+            },
+        );
+        let rendered_status = text.lines[1]
+            .spans
+            .iter()
+            .find(|span| span.content == status)
+            .unwrap();
+        assert_eq!(rendered_status.style.fg, Some(color));
+    }
+}
+
+#[test]
 fn case_insensitive_done_statuses_strike_through_ticket_keys() {
     tuicore::init();
     let row = WorkItemRow {
@@ -117,6 +182,7 @@ fn case_insensitive_done_statuses_strike_through_ticket_keys() {
         kind: WorkItemKind::Story,
         priority: "Low".into(),
         status: "done".into(),
+        status_category: crate::store::work_items::StatusCategory::Done,
         done: crate::store::work_items::is_done_status("done"),
         assignee: "Marlo".into(),
         labels: Vec::new(),
@@ -149,6 +215,7 @@ fn average_derived_story_points_show_one_decimal_place() {
         kind: WorkItemKind::Story,
         priority: "Low".into(),
         status: "To Do".into(),
+        status_category: crate::store::work_items::StatusCategory::Todo,
         done: false,
         assignee: "Marlo".into(),
         labels: Vec::new(),
@@ -175,6 +242,7 @@ fn ticket_metadata_keeps_comments_last_and_omits_empty_comment_counts() {
         kind: WorkItemKind::Story,
         priority: "High".into(),
         status: "In Progress".into(),
+        status_category: crate::store::work_items::StatusCategory::InProgress,
         done: false,
         assignee: "Marlo".into(),
         labels: vec!["AB".into(), "CD".into(), "Refinery".into()],
@@ -262,6 +330,7 @@ fn long_labels_use_a_tight_chip_with_an_overflow_count_after_status() {
         kind: WorkItemKind::Story,
         priority: "High".into(),
         status: "To Do".into(),
+        status_category: crate::store::work_items::StatusCategory::Todo,
         done: false,
         assignee: "Marlo".into(),
         labels: vec![

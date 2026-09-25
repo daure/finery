@@ -401,6 +401,7 @@ fn add_item_text(item: &AddItem, query: &str, _mode: DropdownSearchMode) -> Text
         kind: ticket_kind(ticket.ticket.kind),
         priority: ticket.work_item.priority.clone(),
         status: ticket.work_item.status.clone(),
+        status_category: ticket.work_item.status_category,
         done: ticket.work_item.done,
         assignee: ticket.work_item.assignee.clone(),
         labels: ticket.work_item.labels.clone(),

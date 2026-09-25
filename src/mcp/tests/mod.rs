@@ -404,6 +404,7 @@ fn change_set_guidance_includes_canonical_jira_description_tags() {
     assert!(CHANGE_SET_GUIDANCE.contains("@date("));
     assert!(CHANGE_SET_GUIDANCE.contains("{{jira:task-list"));
     assert!(CHANGE_SET_GUIDANCE.contains("accept_unsafe_description_overwrite"));
+    assert!(CHANGE_SET_GUIDANCE.contains("display-only Image: filename"));
 }
 
 fn work_item(index: usize) -> WorkItem {
@@ -413,6 +414,7 @@ fn work_item(index: usize) -> WorkItem {
         description: String::new(),
         kind: "Story".into(),
         status: "To Do".into(),
+        status_category: crate::store::work_items::StatusCategory::Todo,
         done: false,
         priority: "Medium".into(),
         assignee: "Unassigned".into(),

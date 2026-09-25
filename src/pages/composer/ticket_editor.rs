@@ -840,6 +840,17 @@ impl TicketEditor {
                 }
                 DescriptionAction::OpenExternalEditor(_) => {}
                 DescriptionAction::OpenExternalDiff { .. } => {}
+                DescriptionAction::OpenImage(attachment) => {
+                    let service = self.service.clone();
+                    std::thread::spawn(move || {
+                        if let Err(error) = service.open_attachment_image(&attachment) {
+                            service.report_notification(tuicore::Notification::error(
+                                "Could not open image",
+                                error,
+                            ));
+                        }
+                    });
+                }
                 DescriptionAction::CloseSpeedReader => {
                     self.view.set_active_with_context(false, ctx);
                 }

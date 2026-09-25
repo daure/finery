@@ -18,29 +18,29 @@ use tuicore::{
     DialogLayer, DialogLayerPlacement, DockChrome, DockSpec, EventCtx, EventOutcome, EventRoute,
     Flex, FlexItem, FocusCtx, FocusId, FocusRequest, FocusTarget, LayoutCtx, LayoutProposal,
     LayoutResult, LayoutSizeHint, LifecycleCtx, MainAlign, Paragraph, RelativeDate, RenderCtx,
-    ScrollContainer, ScrollbarConfig, Spinner, Tab, Tabs, TabsVariant, TickResult, TreePath,
-    TuiEvent, TuiNode,
+    ScrollContainer, Spinner, Tab, Tabs, TabsVariant, TickResult, TreePath, TuiEvent, TuiNode,
 };
 
 use crate::{
     app_settings::{AppSettings, BacklogRunwaySettings},
     components::{
         avatar::bubble_span,
-        ticket_content::{DIRECT_KITTY_SCROLL_PAUSE, TicketContent, TicketDocument},
+        text_entry_paths::TextEntryPaths,
+        ticket_content::{TicketContent, TicketDocument, image_scroll_container},
     },
     jira::{self, JiraAssignee, JiraEpic, JiraFixVersion, JiraOption},
     service::AppService,
     store::work_items::{
         BacklogSnapshot, RankPlan, Sprint, StatusTransition, TicketComment, TicketComments,
         VelocityReport, VelocitySprint, WorkItem, apply_capacity, is_done_status,
-        loaded_story_point_average, rank_plan,
+        loaded_story_point_average, rank_plan, saved_filter::SavedBacklogFilter,
     },
 };
 
 use super::components::{
     BacklogAssignee, BacklogDestination, BacklogEpic, BacklogQuickMenu, BacklogQuickMenuEvent,
-    BacklogRelease, BacklogSectionEvent, BacklogTree, RELEASE_DROPDOWN_KEY,
-    backlog_tree_with_issue_types_and_keys,
+    BacklogRelease, BacklogSectionEvent, BacklogTree, RELEASE_DROPDOWN_KEY, SavedFilterField,
+    SavedFilterManagerEvent, backlog_tree_with_issue_types_and_settings, saved_filter_dialog,
 };
 use super::velocity_reports::copy_report;
 
@@ -491,6 +491,8 @@ pub(crate) struct BacklogPage {
     sender: Sender<BacklogResult>,
     receiver: Receiver<BacklogResult>,
     section_receiver: Receiver<BacklogSectionEvent>,
+    saved_filter_sender: Sender<SavedFilterManagerEvent>,
+    saved_filter_receiver: Receiver<SavedFilterManagerEvent>,
     view: BacklogView,
     loading_view: ScrollContainer<Flex<()>>,
     loading: bool,
@@ -520,9 +522,16 @@ pub(crate) struct BacklogPage {
     status_transition_cache: StatusTransitionCache,
     focus_backlog_after_load: bool,
     pending_focus: Option<FocusRequest>,
+    page_path: TreePath,
+    text_entry_paths: TextEntryPaths,
     data_focus_path: TreePath,
     reload_notification_pending: bool,
     settings_revision: u64,
+    active_saved_filter_id: Option<u64>,
+    edited_saved_filter_id: Option<u64>,
+    draft_saved_filter: Option<SavedBacklogFilter>,
+    pending_saved_filter_delete: Option<u64>,
+    saved_filter_dialog_close_requested: Rc<Cell<bool>>,
     velocity_dialog_close_requested: Rc<Cell<bool>>,
     description_dialog_close_requested: Rc<Cell<bool>>,
     description_dialog_active: bool,
@@ -537,10 +546,12 @@ impl BacklogPage {
     fn new(service: AppService) -> Self {
         let (sender, receiver) = mpsc::channel();
         let (section_sender, section_receiver) = mpsc::channel();
+        let (saved_filter_sender, saved_filter_receiver) = mpsc::channel();
         let move_locked = Rc::new(Cell::new(false));
         let syncing_ticket_keys = Rc::new(RefCell::new(HashSet::new()));
         let velocity_dialog_close_requested = Rc::new(Cell::new(false));
         let description_dialog_close_requested = Rc::new(Cell::new(false));
+        let saved_filter_dialog_close_requested = Rc::new(Cell::new(false));
         let settings_revision = service.settings_revision();
         let settings = service
             .settings()
@@ -552,6 +563,8 @@ impl BacklogPage {
             sender,
             receiver,
             section_receiver,
+            saved_filter_sender,
+            saved_filter_receiver,
             view: backlog_view(
                 &empty_snapshot(),
                 section_sender.clone(),
@@ -589,6 +602,8 @@ impl BacklogPage {
             status_transition_cache: StatusTransitionCache::default(),
             focus_backlog_after_load: false,
             pending_focus: None,
+            page_path: TreePath::new(),
+            text_entry_paths: TextEntryPaths::default(),
             data_focus_path: TreePath::from_keys([
                 ChildKey::first(),
                 ChildKey::first(),
@@ -596,6 +611,11 @@ impl BacklogPage {
             ]),
             reload_notification_pending: false,
             settings_revision,
+            active_saved_filter_id: None,
+            edited_saved_filter_id: None,
+            draft_saved_filter: None,
+            pending_saved_filter_delete: None,
+            saved_filter_dialog_close_requested,
             velocity_dialog_close_requested,
             description_dialog_close_requested,
             description_dialog_active: false,
@@ -640,6 +660,40 @@ impl BacklogPage {
     #[cfg(test)]
     pub(super) fn view_for_test(&mut self) -> &mut BacklogView {
         &mut self.view
+    }
+
+    #[cfg(test)]
+    pub(super) fn open_saved_filter_manager_for_test(&mut self, ctx: &mut EventCtx<()>) {
+        self.open_saved_filter_manager(ctx);
+    }
+
+    #[cfg(test)]
+    pub(super) fn create_saved_filter_for_test(&mut self, ctx: &mut EventCtx<()>) {
+        let _ = self
+            .saved_filter_sender
+            .send(SavedFilterManagerEvent::Create);
+        self.drain_saved_filter_events(ctx);
+    }
+
+    #[cfg(test)]
+    pub(super) fn rename_saved_filter_for_test(
+        &mut self,
+        id: u64,
+        name: &str,
+        ctx: &mut EventCtx<()>,
+    ) {
+        let _ = self
+            .saved_filter_sender
+            .send(SavedFilterManagerEvent::Rename {
+                id,
+                name: name.into(),
+            });
+        self.drain_saved_filter_events(ctx);
+    }
+
+    #[cfg(test)]
+    pub(super) fn draft_saved_filter_for_test(&self) -> Option<&SavedBacklogFilter> {
+        self.draft_saved_filter.as_ref()
     }
 
     #[cfg(test)]
@@ -976,6 +1030,11 @@ impl BacklogPage {
     fn reset_to_home(&mut self, ctx: &mut EventCtx<()>) {
         self.velocity_dialog_close_requested.set(false);
         self.description_dialog_close_requested.set(false);
+        self.saved_filter_dialog_close_requested.set(false);
+        self.active_saved_filter_id = None;
+        self.edited_saved_filter_id = None;
+        self.draft_saved_filter = None;
+        self.pending_saved_filter_delete = None;
         self.view.set_active_with_context(false, ctx);
         self.view.base_mut().set_active_with_context(false, ctx);
         self.view.base_mut().base_mut().reset_to_home();
@@ -1075,10 +1134,12 @@ impl BacklogPage {
                     }
                 }
                 BacklogSectionEvent::EstimatedChanged(estimated) => {
+                    self.active_saved_filter_id = None;
                     self.view.base_mut().base_mut().set_estimated(estimated);
                     self.focus_backlog_data(ctx);
                 }
                 BacklogSectionEvent::IssueTypesChanged(issue_types) => {
+                    self.active_saved_filter_id = None;
                     self.view
                         .base_mut()
                         .base_mut()
@@ -1086,10 +1147,12 @@ impl BacklogPage {
                     self.focus_backlog_data(ctx);
                 }
                 BacklogSectionEvent::UsersChanged(users) => {
+                    self.active_saved_filter_id = None;
                     self.view.base_mut().base_mut().set_users_filter(users);
                     self.focus_backlog_data(ctx);
                 }
                 BacklogSectionEvent::StatusesChanged(statuses) => {
+                    self.active_saved_filter_id = None;
                     self.view
                         .base_mut()
                         .base_mut()
@@ -1097,19 +1160,37 @@ impl BacklogPage {
                     self.focus_backlog_data(ctx);
                 }
                 BacklogSectionEvent::EpicsChanged(epics) => {
+                    self.active_saved_filter_id = None;
                     self.view.base_mut().base_mut().set_epics_filter(epics);
                     self.focus_backlog_data(ctx);
                 }
                 BacklogSectionEvent::LabelsChanged(labels) => {
+                    self.active_saved_filter_id = None;
                     self.view.base_mut().base_mut().set_labels_filter(labels);
                     self.focus_backlog_data(ctx);
                 }
                 BacklogSectionEvent::ReleasesChanged(releases) => {
+                    self.active_saved_filter_id = None;
                     self.view
                         .base_mut()
                         .base_mut()
                         .set_releases_filter(releases);
                     self.focus_backlog_data(ctx);
+                }
+                BacklogSectionEvent::SavedFilterSelected(id) => {
+                    self.select_saved_filter(id, ctx);
+                }
+                BacklogSectionEvent::SavedFilterCleared => {
+                    self.active_saved_filter_id = None;
+                    self.view.base_mut().base_mut().clear_saved_filter();
+                    self.focus_backlog_data(ctx);
+                }
+                BacklogSectionEvent::OpenSavedFilterManager => {
+                    self.view
+                        .base_mut()
+                        .base_mut()
+                        .set_selected_saved_filter(self.active_saved_filter_id);
+                    self.open_saved_filter_manager(ctx);
                 }
                 BacklogSectionEvent::OpenVelocity => self.open_velocity_dialog(ctx),
                 BacklogSectionEvent::OpenReports => {
@@ -1410,6 +1491,7 @@ impl BacklogPage {
     fn drain_events(&mut self, ctx: &mut EventCtx<()>) -> bool {
         let mut changed = self.drain_quick_menu_events(ctx);
         changed |= self.drain_section_events(ctx);
+        changed |= self.drain_saved_filter_events(ctx);
         changed |= self.drain_quick_menu_events(ctx);
         changed
     }
@@ -2306,11 +2388,292 @@ impl BacklogPage {
         self.service.report_error(message);
     }
 
+    fn select_saved_filter(&mut self, id: u64, ctx: &mut EventCtx<()>) {
+        let filter = self.service.settings().read().ok().and_then(|settings| {
+            settings
+                .saved_backlog_filters
+                .iter()
+                .find(|filter| filter.id == id)
+                .cloned()
+        });
+        let Some(filter) = filter else {
+            self.view
+                .base_mut()
+                .base_mut()
+                .set_selected_saved_filter(None);
+            self.service
+                .report_error("Could not select saved filter: it no longer exists".into());
+            return;
+        };
+        self.active_saved_filter_id = Some(id);
+        self.view.base_mut().base_mut().apply_saved_filter(&filter);
+        self.focus_backlog_data(ctx);
+    }
+
+    fn open_saved_filter_manager(&mut self, ctx: &mut EventCtx<()>) {
+        self.draft_saved_filter = None;
+        self.pending_saved_filter_delete = None;
+        let filters = self.saved_backlog_filters();
+        self.edited_saved_filter_id = self
+            .active_saved_filter_id
+            .filter(|id| filters.iter().any(|filter| filter.id == *id));
+        self.saved_filter_dialog_close_requested.set(false);
+        self.velocity_dialog_close_requested.set(false);
+        self.description_dialog_close_requested.set(false);
+        self.description_dialog_active = false;
+        self.replace_saved_filter_dialog(ctx);
+        self.view.set_active_with_context(true, ctx);
+        ctx.focus(saved_filter_selector_focus_request(&self.page_path));
+    }
+
+    fn replace_saved_filter_dialog(&mut self, ctx: &mut EventCtx<()>) {
+        let filters = self.saved_filter_manager_filters();
+        let pending_delete = self.pending_saved_filter_delete.and_then(|id| {
+            filters.iter().find(|filter| filter.id == id).map(|filter| {
+                let name = if filter.name.trim().is_empty() {
+                    "New filter".into()
+                } else {
+                    filter.name.clone()
+                };
+                (id, name)
+            })
+        });
+        let options = self.view.base_mut().base_mut().filter_options();
+        let done_key = self
+            .service
+            .settings()
+            .read()
+            .expect("settings lock poisoned")
+            .backlog_keys
+            .saved_filter_done
+            .clone();
+        self.view.replace_layer(
+            Box::new(
+                saved_filter_dialog(
+                    &filters,
+                    self.edited_saved_filter_id,
+                    &options,
+                    self.saved_filter_sender.clone(),
+                    Rc::clone(&self.saved_filter_dialog_close_requested),
+                    pending_delete,
+                )
+                .done_key(done_key),
+            ),
+            ctx,
+        );
+        self.view.set_fit_content(false);
+        self.view.set_layer_percent(100);
+        self.view.set_layer_cross_percent(100);
+        self.view.set_extend_to_overlay_bottom(true);
+        self.view.set_placement(DialogLayerPlacement::Center);
+    }
+
+    fn saved_backlog_filters(&self) -> Vec<SavedBacklogFilter> {
+        self.service
+            .settings()
+            .read()
+            .expect("settings lock poisoned")
+            .saved_backlog_filters
+            .clone()
+    }
+
+    fn saved_filter_manager_filters(&self) -> Vec<SavedBacklogFilter> {
+        let mut filters = self.saved_backlog_filters();
+        filters.extend(self.draft_saved_filter.iter().cloned());
+        filters
+    }
+
+    fn save_backlog_filters(&mut self, filters: Vec<SavedBacklogFilter>) {
+        let mut settings = self
+            .service
+            .settings()
+            .read()
+            .expect("settings lock poisoned")
+            .clone();
+        settings.saved_backlog_filters = filters.clone();
+        self.service.save_settings(settings);
+        self.settings_revision = self.service.settings_revision();
+        self.view.base_mut().base_mut().set_saved_filters(&filters);
+        self.refresh_active_saved_filter(&filters);
+    }
+
+    fn refresh_active_saved_filter(&mut self, filters: &[SavedBacklogFilter]) {
+        let Some(id) = self.active_saved_filter_id else {
+            return;
+        };
+        if let Some(filter) = filters.iter().find(|filter| filter.id == id) {
+            self.view.base_mut().base_mut().apply_saved_filter(filter);
+        } else {
+            self.active_saved_filter_id = None;
+            self.view
+                .base_mut()
+                .base_mut()
+                .set_selected_saved_filter(None);
+        }
+    }
+
+    fn drain_saved_filter_events(&mut self, ctx: &mut EventCtx<()>) -> bool {
+        let mut changed = false;
+        let mut invalid_name = false;
+        while let Ok(event) = self.saved_filter_receiver.try_recv() {
+            changed = true;
+            let mut filters = self.saved_backlog_filters();
+            let mut rebuild = false;
+            let mut focus_name = false;
+            match event {
+                SavedFilterManagerEvent::Finish => {
+                    if invalid_name || self.draft_saved_filter.is_some() {
+                        if let Some(draft) = &self.draft_saved_filter {
+                            self.edited_saved_filter_id = Some(draft.id);
+                        }
+                        if !invalid_name {
+                            self.service
+                                .report_error("Saved filter name must not be empty".into());
+                        }
+                        rebuild = true;
+                        focus_name = true;
+                    } else {
+                        self.saved_filter_dialog_close_requested.set(true);
+                        self.close_backlog_dialog(ctx);
+                    }
+                }
+                SavedFilterManagerEvent::SelectForEditing(id) => {
+                    self.edited_saved_filter_id = Some(id);
+                    if filters.iter().any(|filter| filter.id == id) {
+                        self.active_saved_filter_id = Some(id);
+                        self.refresh_active_saved_filter(&filters);
+                    }
+                    rebuild = true;
+                }
+                SavedFilterManagerEvent::Create => {
+                    let id = if let Some(draft) = &self.draft_saved_filter {
+                        draft.id
+                    } else {
+                        let id = filters
+                            .iter()
+                            .map(|filter| filter.id)
+                            .max()
+                            .unwrap_or_default()
+                            .saturating_add(1);
+                        self.draft_saved_filter = Some(SavedBacklogFilter::new(id, ""));
+                        id
+                    };
+                    self.edited_saved_filter_id = Some(id);
+                    rebuild = true;
+                    focus_name = true;
+                }
+                SavedFilterManagerEvent::RequestDelete(id) => {
+                    if self
+                        .draft_saved_filter
+                        .iter()
+                        .chain(filters.iter())
+                        .any(|filter| filter.id == id)
+                    {
+                        self.pending_saved_filter_delete = Some(id);
+                        rebuild = true;
+                    }
+                }
+                SavedFilterManagerEvent::ConfirmDelete(id) => {
+                    self.pending_saved_filter_delete = None;
+                    let deleting_draft = self
+                        .draft_saved_filter
+                        .as_ref()
+                        .is_some_and(|filter| filter.id == id);
+                    if deleting_draft {
+                        self.draft_saved_filter = None;
+                    } else {
+                        filters.retain(|filter| filter.id != id);
+                        self.save_backlog_filters(filters);
+                    }
+                    if self.active_saved_filter_id == Some(id) {
+                        self.active_saved_filter_id = None;
+                    }
+                    self.edited_saved_filter_id = self
+                        .saved_filter_manager_filters()
+                        .first()
+                        .map(|filter| filter.id);
+                    rebuild = true;
+                }
+                SavedFilterManagerEvent::CancelDelete => {
+                    self.pending_saved_filter_delete = None;
+                    rebuild = true;
+                }
+                SavedFilterManagerEvent::Rename { id, name } => {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        invalid_name = true;
+                        self.service
+                            .report_error("Saved filter name must not be empty".into());
+                        rebuild = true;
+                        focus_name = true;
+                    } else if self
+                        .draft_saved_filter
+                        .as_ref()
+                        .is_some_and(|filter| filter.id == id)
+                    {
+                        let mut draft = self
+                            .draft_saved_filter
+                            .take()
+                            .expect("matching saved filter draft exists");
+                        draft.name = name.into();
+                        filters.push(draft);
+                        self.active_saved_filter_id = Some(id);
+                        self.save_backlog_filters(filters);
+                        rebuild = true;
+                        focus_name = true;
+                    } else if let Some(filter) = filters.iter_mut().find(|filter| filter.id == id) {
+                        filter.name = name.into();
+                        self.active_saved_filter_id = Some(id);
+                        self.save_backlog_filters(filters);
+                        rebuild = true;
+                        focus_name = true;
+                    }
+                }
+                SavedFilterManagerEvent::SetEstimated { id, estimated } => {
+                    if let Some(filter) = self
+                        .draft_saved_filter
+                        .as_mut()
+                        .filter(|filter| filter.id == id)
+                    {
+                        filter.criteria.estimated = estimated;
+                    } else if let Some(filter) = filters.iter_mut().find(|filter| filter.id == id) {
+                        filter.criteria.estimated = estimated;
+                        self.save_backlog_filters(filters);
+                    }
+                }
+                SavedFilterManagerEvent::SetValues { id, field, values } => {
+                    if let Some(filter) = self
+                        .draft_saved_filter
+                        .as_mut()
+                        .filter(|filter| filter.id == id)
+                    {
+                        set_saved_filter_values(filter, field, values);
+                    } else if let Some(filter) = filters.iter_mut().find(|filter| filter.id == id) {
+                        set_saved_filter_values(filter, field, values);
+                        self.save_backlog_filters(filters);
+                    }
+                }
+            }
+            if rebuild {
+                self.replace_saved_filter_dialog(ctx);
+                if focus_name {
+                    ctx.focus(saved_filter_name_focus_request(&self.page_path));
+                } else if self.pending_saved_filter_delete.is_some() {
+                    ctx.focus(saved_filter_delete_focus_request(&self.page_path));
+                } else {
+                    ctx.focus(saved_filter_selector_focus_request(&self.page_path));
+                }
+            }
+        }
+        changed
+    }
+
     fn open_velocity_dialog(&mut self, ctx: &mut EventCtx<()>) {
         let settings = self.service.settings();
         let settings = settings.read().expect("settings lock poisoned");
         self.velocity_dialog_close_requested.set(false);
         self.description_dialog_close_requested.set(false);
+        self.saved_filter_dialog_close_requested.set(false);
         self.description_dialog_active = false;
         self.view.replace_layer(
             Box::new(velocity_dialog(
@@ -2326,6 +2689,7 @@ impl BacklogPage {
         );
         self.view.set_fit_content(true);
         self.view.set_fit_content_max(96, 26);
+        self.view.set_extend_to_overlay_bottom(false);
         self.view.set_placement(DialogLayerPlacement::Center);
         self.view.set_active_with_context(true, ctx);
     }
@@ -2340,6 +2704,7 @@ impl BacklogPage {
     ) {
         self.velocity_dialog_close_requested.set(false);
         self.description_dialog_close_requested.set(false);
+        self.saved_filter_dialog_close_requested.set(false);
         self.description_dialog_active = true;
         self.description_dialog_key = Some(key.clone());
         let comments = Rc::new(RefCell::new(comments));
@@ -2355,6 +2720,7 @@ impl BacklogPage {
         )
         .on_close(move |_| close_requested.set(true));
         self.view.replace_layer(Box::new(tabs), ctx);
+        self.view.set_extend_to_overlay_bottom(false);
         self.dock_description_dialog(self.area.width);
         self.view.set_active_with_context(true, ctx);
     }
@@ -2473,8 +2839,12 @@ impl BacklogPage {
     fn close_backlog_dialog(&mut self, ctx: &mut EventCtx<()>) {
         if self.velocity_dialog_close_requested.replace(false)
             || self.description_dialog_close_requested.replace(false)
+            || self.saved_filter_dialog_close_requested.replace(false)
         {
             self.description_dialog_active = false;
+            self.edited_saved_filter_id = None;
+            self.draft_saved_filter = None;
+            self.pending_saved_filter_delete = None;
             self.description_dialog_key = None;
             self.description_dialog_comments = None;
             self.view.set_active_with_context(false, ctx);
@@ -3557,14 +3927,13 @@ fn backlog_view(
     settings: &AppSettings,
 ) -> BacklogView {
     let quick_menu = DialogLayer::new(
-        backlog_tree_with_issue_types_and_keys(
+        backlog_tree_with_issue_types_and_settings(
             snapshot,
             section_sender,
             move_locked.clone(),
             syncing_ticket_keys,
             issue_types,
-            settings.backlog_keys.clone(),
-            settings.open_command_key.clone(),
+            settings,
         ),
         BacklogQuickMenu::new_with_keys(
             move_locked,
@@ -3590,6 +3959,54 @@ fn backlog_view(
     .fit_content()
     .fit_content_max(96, 26)
     .backdrop(DialogBackdrop::dim().amount(0.55))
+}
+
+fn set_saved_filter_values(
+    filter: &mut SavedBacklogFilter,
+    field: SavedFilterField,
+    values: Vec<String>,
+) {
+    match field {
+        SavedFilterField::IssueTypes => filter.criteria.issue_types = values,
+        SavedFilterField::Users => filter.criteria.users = values,
+        SavedFilterField::Statuses => filter.criteria.statuses = values,
+        SavedFilterField::Epics => filter.criteria.epics = values,
+        SavedFilterField::Labels => filter.criteria.labels = values,
+        SavedFilterField::Releases => filter.criteria.releases = values,
+    }
+}
+
+fn saved_filter_body_path(page_path: &TreePath) -> TreePath {
+    page_path
+        .child(ChildKey::second())
+        .child(ChildKey::first())
+        .child(ChildKey::second())
+        .child(ChildKey::body())
+        .child(ChildKey::body())
+}
+
+fn saved_filter_name_focus_request(page_path: &TreePath) -> FocusRequest {
+    FocusRequest::TargetAt {
+        path: saved_filter_body_path(page_path).child(ChildKey::new("name")),
+        id: FocusId::new("input"),
+    }
+}
+
+fn saved_filter_selector_focus_request(page_path: &TreePath) -> FocusRequest {
+    FocusRequest::TargetAt {
+        path: saved_filter_body_path(page_path)
+            .child(ChildKey::new("toolbar"))
+            .child(ChildKey::new("selector")),
+        id: FocusId::new("field"),
+    }
+}
+
+fn saved_filter_delete_focus_request(page_path: &TreePath) -> FocusRequest {
+    FocusRequest::Path(
+        page_path
+            .child(ChildKey::second())
+            .child(ChildKey::second()),
+    )
 }
 
 pub(super) fn description_width_percent(width: u16) -> u16 {
@@ -4000,9 +4417,7 @@ impl TicketCommentsPane {
         let (document, ordered_comments) =
             ticket_comments_document(&rendered_comments, service.clone(), Rc::clone(&selected));
         Self {
-            content: ScrollContainer::vertical(document)
-                .pause_direct_kitty_while_scrolling(DIRECT_KITTY_SCROLL_PAUSE)
-                .scrollbars(ScrollbarConfig::default()),
+            content: image_scroll_container(document),
             comments,
             rendered_comments,
             service,
@@ -4024,9 +4439,7 @@ impl TicketCommentsPane {
             self.service.clone(),
             Rc::clone(&self.selected),
         );
-        self.content = ScrollContainer::vertical(document)
-            .pause_direct_kitty_while_scrolling(DIRECT_KITTY_SCROLL_PAUSE)
-            .scrollbars(ScrollbarConfig::default());
+        self.content = image_scroll_container(document);
         self.content.set_focused(self.focused);
         self.ordered_comments = ordered_comments;
     }
@@ -4303,6 +4716,15 @@ impl TuiNode for TicketCommentCard {
         self.body.render(frame, self.body_area(area), ctx);
     }
 
+    fn dispatch_event(
+        &mut self,
+        route: &EventRoute,
+        event: &TuiEvent,
+        ctx: &mut EventCtx<()>,
+    ) -> EventOutcome {
+        self.body.dispatch_event(route, event, ctx)
+    }
+
     fn tick(&mut self, dt: Duration, settings: AnimationSettings) -> TickResult {
         self.body.tick(dt, settings)
     }
@@ -4484,10 +4906,11 @@ impl TuiNode for BacklogPage {
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
         self.area = area;
+        self.page_path = ctx.current_path();
         if self.description_dialog_active {
             self.dock_description_dialog(area.width);
         }
-        if self.shows_initial_loading() {
+        let result = if self.shows_initial_loading() {
             ctx.with_focus_fallback(FocusId::new("backlog-loading"), area, |ctx| {
                 self.loading_view.layout(area, ctx)
             })
@@ -4498,7 +4921,9 @@ impl TuiNode for BacklogPage {
                 .child(ChildKey::first())
                 .child(ChildKey::new("data"));
             self.view.layout(area, ctx)
-        }
+        };
+        self.text_entry_paths.capture(ctx, &self.page_path);
+        result
     }
 
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
@@ -4510,7 +4935,10 @@ impl TuiNode for BacklogPage {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        if !self.shows_initial_loading() && self.home_matches(event) {
+        if !self.shows_initial_loading()
+            && !self.text_entry_paths.contains(&ctx.current_path())
+            && self.home_matches(event)
+        {
             self.reset_to_home(ctx);
             ctx.stop_propagation();
             return EventOutcome::Handled;
@@ -4533,7 +4961,10 @@ impl TuiNode for BacklogPage {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        if !self.shows_initial_loading() && self.home_matches(event) {
+        if !self.shows_initial_loading()
+            && !self.text_entry_paths.contains(&route.path)
+            && self.home_matches(event)
+        {
             self.reset_to_home(ctx);
             ctx.stop_propagation();
             return EventOutcome::Handled;

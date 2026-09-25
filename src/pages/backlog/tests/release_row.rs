@@ -18,6 +18,7 @@ fn release_snapshot() -> BacklogSnapshot {
         description: String::new(),
         kind: "Story".into(),
         status: "To Do".into(),
+        status_category: crate::store::work_items::StatusCategory::Todo,
         done: false,
         priority: String::new(),
         assignee: String::new(),
@@ -207,6 +208,12 @@ fn release_header_distinguishes_planning_active_overdue_and_delivered_work() {
             text.lines[1].to_string(),
             "✓ 2/2 est • 1 open • 30 pts remaining"
         );
+        let filtered = title(&snapshot, &group, parse_date(today).unwrap(), true);
+        assert_eq!(
+            filtered.lines[0].to_string(),
+            format!("{} (some tickets hidden by filters)", text.lines[0])
+        );
+        assert_eq!(filtered.lines[1], text.lines[1]);
     }
     snapshot.work_items[0].done = true;
     let group = WorkItemGroup {
@@ -241,7 +248,7 @@ fn release_header_distinguishes_planning_active_overdue_and_delivered_work() {
 }
 
 #[test]
-fn release_filters_hide_forecasts_and_restore_them_when_cleared() {
+fn release_filters_preserve_full_metrics_while_filtering_children() {
     use super::super::{BacklogRowContent, BacklogTree, backlog_tree};
     use tuicore::{AnimationSettings, EventCtx, EventOutcome, Key, KeyEvent, TuiEvent};
 
@@ -252,10 +259,18 @@ fn release_filters_hide_forecasts_and_restore_them_when_cleared() {
     let mut task = snapshot.work_items[0].clone();
     task.key = "FIN-2".into();
     task.kind = "Task".into();
+    task.title = "Prepare rollout".into();
     task.assignee = "Maya".into();
     task.done = false;
     task.story_points = None;
-    snapshot.work_items.push(task);
+    snapshot.sprints[0].work_items.push(task);
+    let mut other_release = snapshot.work_items[0].clone();
+    other_release.key = "FIN-3".into();
+    other_release.assignee = "Grace".into();
+    other_release.fix_versions = vec!["v2.0".into()];
+    other_release.releases[0].id = "2".into();
+    other_release.releases[0].name = "v2.0".into();
+    snapshot.work_items.push(other_release);
     let (sender, _) = std::sync::mpsc::channel();
     let mut tree = backlog_tree(&snapshot, sender, Default::default());
     tree.group_by_release_for_test();
@@ -272,34 +287,54 @@ fn release_filters_hide_forecasts_and_restore_them_when_cleared() {
             .unwrap()
     };
     let original = group_title(&tree);
-    let expected_heading = " v1.0 • 14 Sep – 2 Oct •  Filtered scope";
+    let mut expected = original.clone();
+    expected.lines[0].spans.push(Span::styled(
+        " (some tickets hidden by filters)",
+        Style::default().fg(tuicore::theme().muted_fg()),
+    ));
+    let ticket_keys = |tree: &BacklogTree| {
+        tree.control
+            .items()
+            .iter()
+            .filter_map(|row| match &row.content {
+                BacklogRowContent::WorkItem(work_item) => Some(work_item.item.key.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
 
+    tree.set_users_filter(vec!["Ada".into(), "Maya".into()]);
+    assert_eq!(group_title(&tree), original);
+    assert_eq!(ticket_keys(&tree), ["FIN-2", "FIN-1"]);
     tree.set_users_filter(vec!["Ada".into()]);
-    let filtered = group_title(&tree);
-    assert_eq!(filtered.lines[0].to_string(), expected_heading);
-    assert_eq!(
-        filtered.lines[1].to_string(),
-        "✓ 1/1 est • 0 open • 0 pts remaining"
-    );
+    assert_eq!(group_title(&tree), expected);
+    assert_eq!(ticket_keys(&tree), ["FIN-1"]);
     tree.set_users_filter(Vec::new());
     assert_eq!(group_title(&tree), original);
 
     tree.set_estimated(false);
-    let filtered = group_title(&tree);
-    assert_eq!(filtered.lines[0].to_string(), expected_heading);
-    assert_eq!(
-        filtered.lines[1].to_string(),
-        "󰄰 0/1 est • 1 open • ~3 pts remaining"
-    );
+    assert_eq!(group_title(&tree), expected);
+    assert_eq!(ticket_keys(&tree), ["FIN-2"]);
     tree.set_estimated(true);
     assert_eq!(group_title(&tree), original);
 
     tree.set_issue_types_filter(vec!["Story".into()]);
-    assert_eq!(group_title(&tree).lines[0].to_string(), expected_heading);
+    assert_eq!(group_title(&tree), expected);
+    assert_eq!(ticket_keys(&tree), ["FIN-1", "FIN-3"]);
     tree.set_issue_types_filter(Vec::new());
     assert_eq!(group_title(&tree), original);
 
-    for query in ["Deliver", "Deliver release", ""] {
+    tree.set_releases_filter(vec!["v1.0".into()]);
+    assert_eq!(group_title(&tree), original);
+    tree.set_releases_filter(Vec::new());
+
+    for (query, hides_tickets) in [
+        ("FIN", false),
+        ("Deliver", true),
+        ("v1.0", false),
+        ("Deliver release", true),
+        ("", false),
+    ] {
         tree.handle_event(
             &TuiEvent::Key(KeyEvent::from(Key::Char('/'))),
             &mut EventCtx::new(AnimationSettings::default()),
@@ -308,10 +343,10 @@ fn release_filters_hide_forecasts_and_restore_them_when_cleared() {
                 EventOutcome::Handled
             },
         );
-        if query.is_empty() {
-            assert_eq!(group_title(&tree), original);
+        if hides_tickets {
+            assert_eq!(group_title(&tree), expected);
         } else {
-            assert_eq!(group_title(&tree).lines[0].to_string(), expected_heading);
+            assert_eq!(group_title(&tree), original);
         }
     }
 }

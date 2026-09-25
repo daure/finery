@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::store::work_items::WorkItem;
 
 mod archive;
+pub(crate) mod description_media;
 pub(crate) mod summary;
 pub(crate) use archive::ArchiveOutcome;
 
@@ -69,6 +70,8 @@ pub(crate) struct JiraTicketMetadata {
     pub reporter: String,
     pub created: String,
     pub updated: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_adf: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2682,6 +2685,7 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
                 reporter: "Mina Patel".into(),
                 created: "2026-08-14T09:30:00.000+0000".into(),
                 updated: "2026-09-15T14:05:00.000+0000".into(),
+                description_adf: None,
             }),
             kind: TicketKind::Story,
             status: "In Progress".into(),
@@ -2711,6 +2715,7 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
                 reporter: "Ada Mensah".into(),
                 created: "2026-08-21T11:45:00.000+0000".into(),
                 updated: "2026-09-16T08:20:00.000+0000".into(),
+                description_adf: None,
             }),
             kind: TicketKind::Task,
             status: "To Do".into(),
@@ -2740,6 +2745,7 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
                 reporter: "Lin Chen".into(),
                 created: "2026-07-30T16:00:00.000+0000".into(),
                 updated: "2026-09-10T12:10:00.000+0000".into(),
+                description_adf: None,
             }),
             kind: TicketKind::Task,
             status: "Done".into(),
@@ -2769,6 +2775,7 @@ pub(crate) fn demo_jira_tickets() -> Vec<Ticket> {
                 reporter: "Mina Patel".into(),
                 created: "2026-09-01T10:15:00.000+0000".into(),
                 updated: "2026-09-12T17:40:00.000+0000".into(),
+                description_adf: None,
             }),
             kind: TicketKind::Bug,
             status: "Backlog".into(),

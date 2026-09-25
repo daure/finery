@@ -5,6 +5,7 @@ use tuicore::{Key, KeyModifiers, KeySpec};
 use crate::speed_reader_settings::{
     SpeedReaderSettings, parse_markdown_block_pause, parse_speed_reader_wpm,
 };
+use crate::store::work_items::saved_filter::SavedBacklogFilter;
 
 pub(crate) const JIRA_BASE_URL_SETTING: &str = "jira.base_url";
 pub(crate) const JIRA_EMAIL_SETTING: &str = "jira.email";
@@ -29,6 +30,8 @@ pub(crate) const BACKLOG_MOVE_TO_TOP_KEY_SETTING: &str = "backlog.move_to_top_ke
 pub(crate) const BACKLOG_MOVE_TO_BOTTOM_KEY_SETTING: &str = "backlog.move_to_bottom_key";
 pub(crate) const BACKLOG_VIEW_DESCRIPTION_KEY_SETTING: &str = "backlog.view_description_key";
 pub(crate) const BACKLOG_HOME_KEY_SETTING: &str = "backlog.home_key";
+pub(crate) const BACKLOG_SAVED_FILTER_DONE_KEY_SETTING: &str = "backlog.saved_filter_done_key";
+pub(crate) const BACKLOG_SAVED_FILTERS_SETTING: &str = "backlog.saved_filters";
 pub(crate) const SPEED_READER_WPM_SETTING: &str = "reader.wpm";
 pub(crate) const SPEED_READER_BLOCK_DELAY_SETTING: &str = "reader.markdown_block_pause_ms";
 pub(crate) const RECENT_TICKETS_LIMIT_SETTING: &str = "recent_tickets.limit";
@@ -352,6 +355,7 @@ pub(crate) struct BacklogKeyBindings {
     pub(crate) move_to_bottom: ComposerKeyBinding,
     pub(crate) view_description: ComposerKeyBinding,
     pub(crate) home: ComposerKeyBinding,
+    pub(crate) saved_filter_done: ComposerKeyBinding,
 }
 
 impl Default for BacklogKeyBindings {
@@ -383,12 +387,17 @@ impl BacklogKeyBindings {
                 binding(BACKLOG_VIEW_DESCRIPTION_KEY_SETTING, "enter")?
             },
             home: binding(BACKLOG_HOME_KEY_SETTING, "shift+h")?,
+            saved_filter_done: binding(BACKLOG_SAVED_FILTER_DONE_KEY_SETTING, "ctrl+enter")?,
         };
         ensure_unambiguous(&[
             bindings.move_to_top.sequence(),
             bindings.move_to_bottom.sequence(),
             bindings.view_description.sequence(),
             bindings.home.sequence(),
+        ])?;
+        ensure_unambiguous(&[
+            bindings.home.sequence(),
+            bindings.saved_filter_done.sequence(),
         ])?;
         Ok(bindings)
     }
@@ -430,6 +439,7 @@ pub(crate) struct AppSettings {
     pub(crate) jira_story_points_discovery_complete: bool,
     pub(crate) backlog_runway: BacklogRunwaySettings,
     pub(crate) excluded_sprint_name_fragments: Vec<String>,
+    pub(crate) saved_backlog_filters: Vec<SavedBacklogFilter>,
     pub(crate) backlog_keys: BacklogKeyBindings,
     pub(crate) speed_reader: SpeedReaderSettings,
     pub(crate) recent_tickets_limit: usize,
@@ -453,6 +463,7 @@ impl Default for AppSettings {
             jira_story_points_discovery_complete: false,
             backlog_runway: BacklogRunwaySettings::default(),
             excluded_sprint_name_fragments: Vec::new(),
+            saved_backlog_filters: Vec::new(),
             backlog_keys: BacklogKeyBindings::default(),
             speed_reader: SpeedReaderSettings::default(),
             recent_tickets_limit: 15,
@@ -553,6 +564,7 @@ impl AppSettings {
             excluded_sprint_name_fragments: sprint_name_fragments(
                 values.get(BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING),
             ),
+            saved_backlog_filters: saved_backlog_filters(values.get(BACKLOG_SAVED_FILTERS_SETTING)),
             backlog_keys: BacklogKeyBindings::from_values(values)?,
             speed_reader: SpeedReaderSettings {
                 wpm: values
@@ -650,6 +662,11 @@ impl AppSettings {
                 self.excluded_sprint_name_fragments.join(","),
             ),
             (
+                BACKLOG_SAVED_FILTERS_SETTING,
+                serde_json::to_string(&self.saved_backlog_filters)
+                    .expect("saved backlog filters must serialize"),
+            ),
+            (
                 BACKLOG_MOVE_TO_TOP_KEY_SETTING,
                 self.backlog_keys.move_to_top.sequence.clone(),
             ),
@@ -664,6 +681,10 @@ impl AppSettings {
             (
                 BACKLOG_HOME_KEY_SETTING,
                 self.backlog_keys.home.sequence.clone(),
+            ),
+            (
+                BACKLOG_SAVED_FILTER_DONE_KEY_SETTING,
+                self.backlog_keys.saved_filter_done.sequence.clone(),
             ),
             (SPEED_READER_WPM_SETTING, self.speed_reader.wpm.to_string()),
             (
@@ -980,6 +1001,51 @@ fn sprint_name_fragments(value: Option<&String>) -> Vec<String> {
             }
             fragments
         })
+}
+
+fn saved_backlog_filters(value: Option<&String>) -> Vec<SavedBacklogFilter> {
+    value
+        .and_then(|value| serde_json::from_str::<Vec<SavedBacklogFilter>>(value).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|mut filter| {
+            filter.name = filter.name.trim().to_owned();
+            if filter.name.is_empty() || filter.name.contains('\0') {
+                return None;
+            }
+            normalize_filter_values(&mut filter.criteria.issue_types, false);
+            normalize_filter_values(&mut filter.criteria.users, true);
+            normalize_filter_values(&mut filter.criteria.statuses, false);
+            normalize_filter_values(&mut filter.criteria.epics, true);
+            normalize_filter_values(&mut filter.criteria.labels, true);
+            normalize_filter_values(&mut filter.criteria.releases, true);
+            Some(filter)
+        })
+        .fold(Vec::new(), |mut filters, filter| {
+            if !filters
+                .iter()
+                .any(|existing: &SavedBacklogFilter| existing.id == filter.id)
+            {
+                filters.push(filter);
+            }
+            filters
+        })
+}
+
+fn normalize_filter_values(values: &mut Vec<String>, allow_missing: bool) {
+    let mut normalized = Vec::new();
+    for value in values.drain(..) {
+        let value = value.trim();
+        if (allow_missing || !value.is_empty())
+            && !value.contains('\0')
+            && !normalized
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(value))
+        {
+            normalized.push(value.to_owned());
+        }
+    }
+    *values = normalized;
 }
 
 fn open_command_enum_values(value: Option<&String>) -> Vec<String> {

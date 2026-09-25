@@ -4,15 +4,16 @@ use super::{
     AppSettings, BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING,
     BACKLOG_FIXED_SPRINT_CAPACITY_SETTING, BACKLOG_FIXED_TICKET_SIZE_SETTING,
     BACKLOG_HOME_KEY_SETTING, BACKLOG_MOVE_TO_BOTTOM_KEY_SETTING, BACKLOG_MOVE_TO_TOP_KEY_SETTING,
-    BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING, BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING,
-    BACKLOG_USE_JIRA_VELOCITY_SETTING, COMPOSER_ADD_CHILD_KEY_SETTING,
-    COMPOSER_ADD_SIBLING_KEY_SETTING, COMPOSER_COMMIT_KEY_SETTING,
+    BACKLOG_SAVED_FILTERS_SETTING, BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING,
+    BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING, BACKLOG_USE_JIRA_VELOCITY_SETTING,
+    COMPOSER_ADD_CHILD_KEY_SETTING, COMPOSER_ADD_SIBLING_KEY_SETTING, COMPOSER_COMMIT_KEY_SETTING,
     COMPOSER_CREATE_SUBMIT_KEY_SETTING, COMPOSER_DESCRIPTION_FOCUS_KEY_SETTING,
     COMPOSER_DESCRIPTION_READER_KEY_SETTING, COMPOSER_ISSUE_TYPE_KEY_SETTING,
     COMPOSER_METADATA_TAB_KEY_SETTING, JIRA_COMPANY_MANAGED_URLS_SETTING,
     JIRA_STORY_POINTS_BOARD_ID_SETTING, JIRA_STORY_POINTS_FIELD_ID_SETTING,
     RECENT_TICKETS_LIMIT_SETTING, SPEED_READER_WPM_SETTING,
 };
+use crate::store::work_items::saved_filter::{BacklogFilterCriteria, SavedBacklogFilter};
 
 #[test]
 fn open_command_binding_is_configurable_and_round_trips() {
@@ -64,6 +65,35 @@ fn open_command_enum_round_trips_as_json() {
             r#"["browser","editor, preview"]"#.into()
         ))
     );
+}
+
+#[test]
+fn saved_backlog_filters_round_trip_with_missing_and_unavailable_values_intact() {
+    let filter = SavedBacklogFilter {
+        id: 7,
+        name: "Release readiness".into(),
+        criteria: BacklogFilterCriteria {
+            users: vec![String::new(), "Former contractor".into()],
+            epics: vec![String::new()],
+            labels: vec![String::new(), "ready".into()],
+            releases: vec![String::new(), "4.8".into()],
+            ..BacklogFilterCriteria::default()
+        },
+    };
+    let settings = AppSettings {
+        saved_backlog_filters: vec![filter.clone()],
+        ..AppSettings::default()
+    };
+    let stored = settings
+        .values()
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect::<HashMap<_, _>>();
+
+    let resolved = AppSettings::resolve(&stored).unwrap();
+
+    assert_eq!(resolved.saved_backlog_filters, [filter]);
+    assert!(stored[BACKLOG_SAVED_FILTERS_SETTING].contains("Former contractor"));
 }
 
 #[test]

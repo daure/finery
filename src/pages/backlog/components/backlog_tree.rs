@@ -25,22 +25,28 @@ use tuicore::{
 };
 
 use crate::{
-    app_settings::{BacklogKeyBindings, ComposerKeyBinding},
+    app_settings::{AppSettings, BacklogKeyBindings, ComposerKeyBinding},
     components::{
         avatar::initials,
         ticket_number_jump::{TicketNumberJump, exact_ticket_number_matches},
         ticket_yank_menu::{TicketYankAction, TicketYankMenu, TicketYankTarget},
         work_item_rows::{
-            TicketRowDetails, WorkItemKind, WorkItemRow, ticket_summary_text,
-            work_item_title_prefix_width,
+            TicketRowDetails, WorkItemKind, WorkItemRow, status_category_style,
+            ticket_summary_text, work_item_title_prefix_width,
         },
     },
     jira::{JiraOption, version_name_cmp},
     store::work_items::{
         BacklogSnapshot, RunwayCapacitySource, RunwayTicket, Sprint, SprintCapacityState,
-        SubtaskProgress, WorkItem, release,
+        StatusCategory, SubtaskProgress, WorkItem, release,
+        saved_filter::{
+            BacklogFilterCriteria, BacklogFilterOptions, SavedBacklogFilter,
+            matches_optional_values,
+        },
     },
 };
+
+use super::filter_values::SavedFilterField;
 
 const FILTER_POPUP_MAX_WIDTH: u16 = u16::MAX;
 
@@ -88,6 +94,9 @@ pub(in crate::pages::backlog) enum BacklogSectionEvent {
     EpicsChanged(Vec<String>),
     LabelsChanged(Vec<String>),
     ReleasesChanged(Vec<String>),
+    SavedFilterSelected(u64),
+    SavedFilterCleared,
+    OpenSavedFilterManager,
     OpenVelocity,
     OpenReports,
     OpenTimeline,
@@ -179,6 +188,7 @@ enum WebMenuItem {
 enum BacklogGroupBy {
     Release,
     Epic,
+    User,
 }
 
 impl BacklogGroupBy {
@@ -186,6 +196,7 @@ impl BacklogGroupBy {
         match self {
             Self::Release => "release",
             Self::Epic => "epic",
+            Self::User => "user",
         }
     }
 }
@@ -194,6 +205,7 @@ fn grouping_icon(grouping: Option<BacklogGroupBy>) -> &'static str {
     match grouping {
         Some(BacklogGroupBy::Release) => "",
         Some(BacklogGroupBy::Epic) => "",
+        Some(BacklogGroupBy::User) => "󰀆",
         None => "󰑮",
     }
 }
@@ -202,7 +214,14 @@ fn grouping_icon(grouping: Option<BacklogGroupBy>) -> &'static str {
 enum GroupByMenuItem {
     Release,
     Epic,
+    User,
     Ungroup,
+}
+
+#[derive(Clone)]
+struct SavedFilterChoice {
+    id: String,
+    label: String,
 }
 
 impl GroupByMenuItem {
@@ -210,6 +229,7 @@ impl GroupByMenuItem {
         match self {
             Self::Release => Some(BacklogGroupBy::Release),
             Self::Epic => Some(BacklogGroupBy::Epic),
+            Self::User => Some(BacklogGroupBy::User),
             Self::Ungroup => None,
         }
     }
@@ -238,25 +258,23 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types(
     syncing_ticket_keys: Rc<RefCell<HashSet<String>>>,
     issue_types: Vec<JiraOption>,
 ) -> BacklogTree {
-    backlog_tree_with_issue_types_and_keys(
+    backlog_tree_with_issue_types_and_settings(
         snapshot,
         events,
         move_locked,
         syncing_ticket_keys,
         issue_types,
-        BacklogKeyBindings::default(),
-        crate::app_settings::AppSettings::default().open_command_key,
+        &AppSettings::default(),
     )
 }
 
-pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
+pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_settings(
     snapshot: &BacklogSnapshot,
     events: Sender<BacklogSectionEvent>,
     move_locked: Rc<Cell<bool>>,
     syncing_ticket_keys: Rc<RefCell<HashSet<String>>>,
     issue_types: Vec<JiraOption>,
-    backlog_keys: BacklogKeyBindings,
-    open_command_key: ComposerKeyBinding,
+    settings: &AppSettings,
 ) -> BacklogTree {
     let number_jump = Rc::new(RefCell::new(TicketNumberJump::default()));
     #[cfg(test)]
@@ -264,7 +282,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
     let filters = BacklogFilters::default();
     let issue_types = selectable_issue_types(issue_types);
     let mut control = ListControl::new(
-        backlog_rows(snapshot, &filters, None, false),
+        backlog_rows(snapshot, &filters, None, ""),
         |row: &BacklogRow| row.id.clone(),
         |_, _| unreachable!("backlog does not add rows"),
     )
@@ -299,7 +317,10 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         if matches!(row.content, BacklogRowContent::Group { .. }) {
             match &row.content {
                 BacklogRowContent::Group { search_text, .. } => {
-                    1 + u16::from(!is_unassigned_group_label(search_text))
+                    1 + u16::from(
+                        search_text == "(no user assigned)"
+                            || !is_unassigned_group_label(search_text),
+                    )
                 }
                 _ => unreachable!(),
             }
@@ -345,6 +366,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
     let epic_events = events.clone();
     let label_events = events.clone();
     let release_events = events.clone();
+    let saved_filter_events = events.clone();
     let issue_type_labels = Rc::new(RefCell::new(issue_type_labels(&issue_types)));
     let selected_issue_type_labels = Rc::clone(&issue_type_labels);
     BacklogTree {
@@ -362,6 +384,36 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
             .on_change(move |estimated| {
                 let _ = estimated_events.send(BacklogSectionEvent::EstimatedChanged(estimated));
             }),
+        saved_filter: Dropdown::single(
+            saved_filter_choices(&settings.saved_backlog_filters),
+            |choice: &SavedFilterChoice| choice.id.clone(),
+            |choice| choice.label.clone(),
+        )
+        .label_position(DropdownLabelPosition::Inline)
+        .alt_style(true)
+        .variant(DropdownVariant::Filled)
+        .placeholder("󰈲")
+        .no_selection_text("None")
+        .field_padding_left(1)
+        .hotkey("shift+f")
+        .max_popup_width(FILTER_POPUP_MAX_WIDTH)
+        .on_select(move |selected| {
+            let Some(selected) = selected.first() else {
+                let _ = saved_filter_events.send(BacklogSectionEvent::SavedFilterCleared);
+                return;
+            };
+            let event = if selected == "manage" {
+                BacklogSectionEvent::OpenSavedFilterManager
+            } else if let Some(id) = selected
+                .strip_prefix("filter:")
+                .and_then(|id| id.parse::<u64>().ok())
+            {
+                BacklogSectionEvent::SavedFilterSelected(id)
+            } else {
+                return;
+            };
+            let _ = saved_filter_events.send(event);
+        }),
         issue_types: Dropdown::multi(
             issue_types,
             |issue_type: &JiraOption| issue_type.id.clone(),
@@ -372,7 +424,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         .variant(DropdownVariant::Filled)
         .placeholder("󰡯")
         .field_padding_left(1)
-        .hotkey("shift+t")
+        .hotkey(SavedFilterField::IssueTypes.hotkey())
         .max_popup_width(FILTER_POPUP_MAX_WIDTH)
         .on_select(move |selected| {
             let issue_types = selected
@@ -384,16 +436,23 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         users: Dropdown::multi(
             selectable_users(snapshot),
             |user: &String| user.clone(),
-            |user| user.clone(),
+            |user| SavedFilterField::Users.label(user),
         )
+        .row_style_by(|user| SavedFilterField::Users.style(user))
         .label_position(DropdownLabelPosition::Inline)
         .alt_style(true)
         .variant(DropdownVariant::Filled)
         .placeholder("󰀄")
         .field_padding_left(1)
-        .selected_label_by(|user| format!("@{}", initials(user)))
+        .selected_label_by(|user| {
+            if user == "Unassigned" {
+                user.into()
+            } else {
+                format!("@{}", initials(user))
+            }
+        })
         .show_multi_labels(true)
-        .hotkey("shift+u")
+        .hotkey(SavedFilterField::Users.hotkey())
         .max_popup_width(FILTER_POPUP_MAX_WIDTH)
         .on_select(move |selected| {
             let _ = user_events.send(BacklogSectionEvent::UsersChanged(selected));
@@ -408,7 +467,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         .variant(DropdownVariant::Filled)
         .placeholder("")
         .field_padding_left(1)
-        .hotkey("shift+s")
+        .hotkey(SavedFilterField::Statuses.hotkey())
         .max_popup_width(FILTER_POPUP_MAX_WIDTH)
         .on_select(move |selected| {
             let _ = status_events.send(BacklogSectionEvent::StatusesChanged(selected));
@@ -416,14 +475,15 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         epics: Dropdown::multi(
             selectable_epics(snapshot),
             |epic: &String| epic.clone(),
-            |epic| epic.clone(),
+            |epic| SavedFilterField::Epics.label(epic),
         )
+        .row_style_by(|epic| SavedFilterField::Epics.style(epic))
         .label_position(DropdownLabelPosition::Inline)
         .alt_style(true)
         .variant(DropdownVariant::Filled)
         .placeholder("")
         .field_padding_left(1)
-        .hotkey("shift+e")
+        .hotkey(SavedFilterField::Epics.hotkey())
         .max_popup_width(FILTER_POPUP_MAX_WIDTH)
         .on_select(move |selected| {
             let _ = epic_events.send(BacklogSectionEvent::EpicsChanged(selected));
@@ -431,14 +491,15 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         labels: Dropdown::multi(
             selectable_labels(snapshot),
             |label: &String| label.clone(),
-            |label| label.clone(),
+            |label| SavedFilterField::Labels.label(label),
         )
+        .row_style_by(|label| SavedFilterField::Labels.style(label))
         .label_position(DropdownLabelPosition::Inline)
         .alt_style(true)
         .variant(DropdownVariant::Filled)
         .placeholder("")
         .field_padding_left(1)
-        .hotkey("shift+l")
+        .hotkey(SavedFilterField::Labels.hotkey())
         .max_popup_width(FILTER_POPUP_MAX_WIDTH)
         .on_select(move |selected| {
             let _ = label_events.send(BacklogSectionEvent::LabelsChanged(selected));
@@ -446,14 +507,15 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         releases: Dropdown::multi(
             selectable_releases(snapshot),
             |release: &String| release.clone(),
-            |release| release.clone(),
+            |release| SavedFilterField::Releases.label(release),
         )
+        .row_style_by(|release| SavedFilterField::Releases.style(release))
         .label_position(DropdownLabelPosition::Inline)
         .alt_style(true)
         .variant(DropdownVariant::Filled)
         .placeholder("")
         .field_padding_left(1)
-        .hotkey("shift+a")
+        .hotkey(SavedFilterField::Releases.hotkey())
         .max_popup_width(FILTER_POPUP_MAX_WIDTH)
         .on_select(move |selected| {
             let _ = release_events.send(BacklogSectionEvent::ReleasesChanged(selected));
@@ -464,6 +526,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
                 MenuItem::new(GroupByMenuItem::Ungroup, "󰑮 Sprint"),
                 MenuItem::new(GroupByMenuItem::Release, " Release"),
                 MenuItem::new(GroupByMenuItem::Epic, " Epic"),
+                MenuItem::new(GroupByMenuItem::User, "󰀆 User"),
             ],
         )
         .min_popup_width(12)
@@ -484,6 +547,7 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         refresh_area: ratatui::layout::Rect::default(),
         velocity_area: ratatui::layout::Rect::default(),
         estimated_area: ratatui::layout::Rect::default(),
+        saved_filter_area: ratatui::layout::Rect::default(),
         issue_types_area: ratatui::layout::Rect::default(),
         users_area: ratatui::layout::Rect::default(),
         statuses_area: ratatui::layout::Rect::default(),
@@ -505,8 +569,8 @@ pub(in crate::pages::backlog) fn backlog_tree_with_issue_types_and_keys(
         wrap_geometry_epoch: 0,
         #[cfg(test)]
         renderer_calls,
-        backlog_keys,
-        open_command_key,
+        backlog_keys: settings.backlog_keys.clone(),
+        open_command_key: settings.open_command_key.clone(),
     }
 }
 
@@ -515,6 +579,7 @@ pub(in crate::pages::backlog) struct BacklogTree {
     refresh: Button<()>,
     velocity: Button<()>,
     estimated: Toggle<()>,
+    saved_filter: Dropdown<SavedFilterChoice, String>,
     issue_types: Dropdown<JiraOption, String>,
     users: Dropdown<String, String>,
     statuses: Dropdown<String, String>,
@@ -528,6 +593,7 @@ pub(in crate::pages::backlog) struct BacklogTree {
     refresh_area: ratatui::layout::Rect,
     velocity_area: ratatui::layout::Rect,
     estimated_area: ratatui::layout::Rect,
+    saved_filter_area: ratatui::layout::Rect,
     issue_types_area: ratatui::layout::Rect,
     users_area: ratatui::layout::Rect,
     statuses_area: ratatui::layout::Rect,
@@ -571,18 +637,12 @@ impl BacklogTree {
                 .find(|row| &row.id == id)
                 .and_then(|row| row.parent_id.clone())
         });
-        let search_active = !self
-            .control
-            .data_view()
-            .transform_state()
-            .search
-            .trim()
-            .is_empty();
+        let search = self.control.data_view().transform_state().search.clone();
         self.control.set_rows(backlog_rows(
             snapshot,
             &self.filters,
             self.group_by_selection,
-            search_active,
+            &search,
         ));
         self.advance_wrap_geometry_epoch();
         self.sync_search_results();
@@ -635,6 +695,7 @@ impl BacklogTree {
     }
 
     pub(in crate::pages::backlog) fn set_estimated(&mut self, estimated: bool) {
+        self.saved_filter.clear_selection();
         self.filters.estimated = estimated;
         self.estimated.set_value(estimated);
         self.runway_markers_visible.set(self.show_runway_bands());
@@ -643,6 +704,7 @@ impl BacklogTree {
     }
 
     pub(in crate::pages::backlog) fn set_issue_types_filter(&mut self, issue_types: Vec<String>) {
+        self.saved_filter.clear_selection();
         self.filters.issue_types = issue_types;
         self.runway_markers_visible.set(self.show_runway_bands());
         let snapshot = self.snapshot.clone();
@@ -650,13 +712,15 @@ impl BacklogTree {
     }
 
     pub(in crate::pages::backlog) fn set_users_filter(&mut self, users: Vec<String>) {
-        self.filters.users = users;
+        self.saved_filter.clear_selection();
+        self.filters.users = SavedFilterField::Users.selection(users);
         self.runway_markers_visible.set(self.show_runway_bands());
         let snapshot = self.snapshot.clone();
         self.set_snapshot(&snapshot);
     }
 
     pub(in crate::pages::backlog) fn set_statuses_filter(&mut self, statuses: Vec<String>) {
+        self.saved_filter.clear_selection();
         self.filters.statuses = statuses;
         self.runway_markers_visible.set(self.show_runway_bands());
         let snapshot = self.snapshot.clone();
@@ -664,6 +728,7 @@ impl BacklogTree {
     }
 
     pub(in crate::pages::backlog) fn set_epics_filter(&mut self, epics: Vec<String>) {
+        self.saved_filter.clear_selection();
         self.filters.epics = epics;
         self.runway_markers_visible.set(self.show_runway_bands());
         let snapshot = self.snapshot.clone();
@@ -671,6 +736,7 @@ impl BacklogTree {
     }
 
     pub(in crate::pages::backlog) fn set_labels_filter(&mut self, labels: Vec<String>) {
+        self.saved_filter.clear_selection();
         self.filters.labels = labels;
         self.runway_markers_visible.set(self.show_runway_bands());
         let snapshot = self.snapshot.clone();
@@ -678,6 +744,7 @@ impl BacklogTree {
     }
 
     pub(in crate::pages::backlog) fn set_releases_filter(&mut self, releases: Vec<String>) {
+        self.saved_filter.clear_selection();
         self.filters.releases = releases;
         self.runway_markers_visible.set(self.show_runway_bands());
         let snapshot = self.snapshot.clone();
@@ -686,6 +753,8 @@ impl BacklogTree {
 
     pub(in crate::pages::backlog) fn reset_to_home(&mut self) {
         self.filters = BacklogFilters::default();
+        self.saved_filter.close();
+        self.saved_filter.clear_selection();
         self.estimated.set_value(true);
         self.issue_types.close();
         self.issue_types.clear_selection();
@@ -721,6 +790,76 @@ impl BacklogTree {
         self.runway_markers_visible.set(true);
     }
 
+    pub(in crate::pages::backlog) fn set_saved_filters(
+        &mut self,
+        saved_filters: &[SavedBacklogFilter],
+    ) {
+        self.saved_filter
+            .set_rows(saved_filter_choices(saved_filters));
+    }
+
+    pub(in crate::pages::backlog) fn set_selected_saved_filter(&mut self, id: Option<u64>) {
+        if let Some(id) = id {
+            self.saved_filter.set_selected_one(format!("filter:{id}"));
+        } else {
+            self.saved_filter.clear_selection();
+        }
+    }
+
+    pub(in crate::pages::backlog) fn apply_saved_filter(&mut self, filter: &SavedBacklogFilter) {
+        self.set_selected_saved_filter(Some(filter.id));
+        self.apply_filter_criteria(&filter.criteria);
+    }
+
+    pub(in crate::pages::backlog) fn clear_saved_filter(&mut self) {
+        self.set_selected_saved_filter(None);
+        self.apply_filter_criteria(&BacklogFilterCriteria::unfiltered());
+    }
+
+    fn apply_filter_criteria(&mut self, criteria: &BacklogFilterCriteria) {
+        self.filters = BacklogFilters::from(criteria);
+        self.estimated.set_value(criteria.estimated);
+        let issue_type_ids = self
+            .issue_type_labels
+            .borrow()
+            .iter()
+            .filter(|(_, label)| {
+                criteria
+                    .issue_types
+                    .iter()
+                    .any(|selected| selected.eq_ignore_ascii_case(label))
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        self.issue_types.set_selected(issue_type_ids);
+        self.users.set_selected(self.filters.users.clone());
+        self.statuses.set_selected(criteria.statuses.clone());
+        self.epics.set_selected(self.filters.epics.clone());
+        self.labels.set_selected(self.filters.labels.clone());
+        self.releases.set_selected(self.filters.releases.clone());
+        self.runway_markers_visible.set(self.show_runway_bands());
+        let snapshot = self.snapshot.clone();
+        self.set_snapshot(&snapshot);
+    }
+
+    pub(in crate::pages::backlog) fn filter_options(&self) -> BacklogFilterOptions {
+        let mut issue_types = self
+            .issue_type_labels
+            .borrow()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        issue_types.sort_unstable_by_key(|value| value.to_ascii_lowercase());
+        BacklogFilterOptions {
+            issue_types,
+            users: selectable_users(&self.snapshot),
+            statuses: selectable_statuses(&self.snapshot),
+            epics: selectable_epics(&self.snapshot),
+            labels: selectable_labels(&self.snapshot),
+            releases: selectable_releases(&self.snapshot),
+        }
+    }
+
     pub(in crate::pages::backlog) fn set_issue_types(&mut self, issue_types: Vec<JiraOption>) {
         let issue_types = selectable_issue_types(issue_types);
         *self.issue_type_labels.borrow_mut() = issue_type_labels(&issue_types);
@@ -740,6 +879,7 @@ impl BacklogTree {
         self.refresh.set_disabled(loading);
         self.velocity.set_disabled(loading);
         self.estimated.set_disabled(loading);
+        self.saved_filter.set_disabled(loading);
         self.issue_types.set_disabled(loading);
         self.users.set_disabled(loading);
         self.statuses.set_disabled(loading);
@@ -794,6 +934,16 @@ impl BacklogTree {
     #[cfg(test)]
     pub(in crate::pages::backlog) fn group_by_epic_for_test(&mut self) {
         self.set_group_by_selection(Some(BacklogGroupBy::Epic));
+    }
+
+    #[cfg(test)]
+    pub(in crate::pages::backlog) fn group_by_user_for_test(&mut self) {
+        self.set_group_by_selection(Some(BacklogGroupBy::User));
+    }
+
+    #[cfg(test)]
+    pub(in crate::pages::backlog) fn expansion_snapshot_for_test(&self) -> HashSet<String> {
+        self.control.data_view().tree_expansion_snapshot()
     }
 
     #[cfg(test)]
@@ -1461,16 +1611,7 @@ impl BacklogTree {
         let search = self.control.data_view().transform_state().search.clone();
         let outcome = dispatch(&mut self.control, ctx);
         if self.control.data_view().transform_state().search != search {
-            let search_active = !self
-                .control
-                .data_view()
-                .transform_state()
-                .search
-                .trim()
-                .is_empty();
-            if self.group_by_selection == Some(BacklogGroupBy::Release)
-                && search_active == search.trim().is_empty()
-            {
+            if self.group_by_selection == Some(BacklogGroupBy::Release) {
                 let snapshot = self.snapshot.clone();
                 self.set_snapshot(&snapshot);
             } else {
@@ -1518,14 +1659,6 @@ impl BacklogTree {
             .set_transform_mode(DataViewTransformMode::External);
 
         let rows = self.control.items();
-        let row_ids = rows
-            .iter()
-            .map(|row| row.id.clone())
-            .collect::<std::collections::HashSet<_>>();
-        let parent_ids = rows
-            .iter()
-            .map(|row| (row.id.as_str(), row.parent_id.as_deref()))
-            .collect::<HashMap<_, _>>();
         let matching_ticket_row_id = rows.iter().find_map(|row| {
             matches!(row.content, BacklogRowContent::WorkItem(_))
                 .then(|| {
@@ -1546,27 +1679,10 @@ impl BacklogTree {
                     .is_some()
             })
         });
-        let mut visible_ids = std::collections::HashSet::new();
-
-        for row in rows.iter().filter(|row| {
-            tuicore::search_match(&search, &backlog_search_text(row), SearchMode::Contains)
-                .is_some()
-        }) {
-            visible_ids.insert(row.id.as_str());
-            visible_ids.extend(descendant_row_ids(row.id.as_str(), rows));
-
-            let mut parent_id = row.parent_id.as_deref();
-            while let Some(id) = parent_id {
-                if !visible_ids.insert(id) {
-                    break;
-                }
-                parent_id = parent_ids.get(id).copied().flatten();
-            }
-        }
-
+        let visible_ids = search_visible_row_ids(rows, &search);
         let visible_row_ids = rows
             .iter()
-            .filter(|row| row_ids.contains(&row.id) && visible_ids.contains(row.id.as_str()))
+            .filter(|row| visible_ids.contains(row.id.as_str()))
             .map(|row| row.id.clone())
             .collect::<Vec<_>>();
         self.control
@@ -1661,6 +1777,16 @@ impl TuiNode for BacklogTree {
             .width
             .min(proposal_width)
         };
+        let saved_filter_width =
+            |proposal_width, dropdown: &Dropdown<SavedFilterChoice, String>| {
+                <Dropdown<SavedFilterChoice, String> as TuiNode<()>>::measure(
+                    dropdown,
+                    LayoutProposal::at_most(proposal_width, 1),
+                )
+                .preferred
+                .width
+                .min(proposal_width)
+            };
         let menu_width = |proposal_width, menu: &MenuButton<GroupByMenuItem>| {
             menu.measure(LayoutProposal::at_most(proposal_width, 1))
                 .preferred
@@ -1766,22 +1892,30 @@ impl TuiNode for BacklogTree {
                 &self.users,
             );
             let users_width = users_width.min(6);
+            let occupied_filter_width = issue_types_width
+                .saturating_add(users_width)
+                .saturating_add(statuses_width)
+                .saturating_add(epics_width)
+                .saturating_add(labels_width)
+                .saturating_add(releases_width)
+                .saturating_add(u16::from(issue_types_width > 0))
+                .saturating_add(u16::from(users_width > 0))
+                .saturating_add(u16::from(statuses_width > 0))
+                .saturating_add(u16::from(epics_width > 0))
+                .saturating_add(u16::from(labels_width > 0))
+                .saturating_add(u16::from(releases_width > 0));
+            let saved_filter_width = saved_filter_width(
+                area.width.saturating_sub(occupied_filter_width),
+                &self.saved_filter,
+            )
+            .min(18);
             let estimated_width = <Toggle<()> as TuiNode<()>>::measure(
                 &self.estimated,
                 LayoutProposal::at_most(
                     area.width
-                        .saturating_sub(issue_types_width)
-                        .saturating_sub(users_width)
-                        .saturating_sub(statuses_width)
-                        .saturating_sub(epics_width)
-                        .saturating_sub(labels_width)
-                        .saturating_sub(releases_width)
-                        .saturating_sub(u16::from(issue_types_width > 0))
-                        .saturating_sub(u16::from(users_width > 0))
-                        .saturating_sub(u16::from(statuses_width > 0))
-                        .saturating_sub(u16::from(epics_width > 0))
-                        .saturating_sub(u16::from(labels_width > 0))
-                        .saturating_sub(u16::from(releases_width > 0)),
+                        .saturating_sub(occupied_filter_width)
+                        .saturating_sub(saved_filter_width)
+                        .saturating_sub(u16::from(saved_filter_width > 0)),
                     1,
                 ),
             )
@@ -1789,23 +1923,15 @@ impl TuiNode for BacklogTree {
             .width
             .min(
                 area.width
-                    .saturating_sub(issue_types_width)
-                    .saturating_sub(users_width)
-                    .saturating_sub(statuses_width)
-                    .saturating_sub(epics_width)
-                    .saturating_sub(labels_width)
-                    .saturating_sub(releases_width)
-                    .saturating_sub(u16::from(issue_types_width > 0))
-                    .saturating_sub(u16::from(users_width > 0))
-                    .saturating_sub(u16::from(statuses_width > 0))
-                    .saturating_sub(u16::from(epics_width > 0))
-                    .saturating_sub(u16::from(labels_width > 0))
-                    .saturating_sub(u16::from(releases_width > 0)),
+                    .saturating_sub(occupied_filter_width)
+                    .saturating_sub(saved_filter_width)
+                    .saturating_sub(u16::from(saved_filter_width > 0)),
             );
             self.estimated_area = ratatui::layout::Rect::new(
                 area.x.saturating_add(
                     area.width
                         .saturating_sub(estimated_width)
+                        .saturating_sub(saved_filter_width)
                         .saturating_sub(users_width)
                         .saturating_sub(issue_types_width)
                         .saturating_sub(statuses_width)
@@ -1813,6 +1939,7 @@ impl TuiNode for BacklogTree {
                         .saturating_sub(labels_width)
                         .saturating_sub(releases_width)
                         .saturating_sub(u16::from(users_width > 0))
+                        .saturating_sub(u16::from(saved_filter_width > 0))
                         .saturating_sub(u16::from(issue_types_width > 0))
                         .saturating_sub(u16::from(statuses_width > 0))
                         .saturating_sub(u16::from(epics_width > 0))
@@ -1823,11 +1950,20 @@ impl TuiNode for BacklogTree {
                 estimated_width,
                 1,
             );
-            self.users_area = ratatui::layout::Rect::new(
+            self.saved_filter_area = ratatui::layout::Rect::new(
                 self.estimated_area
                     .x
                     .saturating_add(estimated_width)
                     .saturating_add(u16::from(estimated_width > 0)),
+                row_y,
+                saved_filter_width,
+                1,
+            );
+            self.users_area = ratatui::layout::Rect::new(
+                self.saved_filter_area
+                    .x
+                    .saturating_add(saved_filter_width)
+                    .saturating_add(u16::from(saved_filter_width > 0)),
                 row_y,
                 users_width,
                 1,
@@ -1895,6 +2031,9 @@ impl TuiNode for BacklogTree {
             remaining_width = remaining_width.saturating_sub(issue_types_width + 1);
             let users_width = users_width(remaining_width, &self.users);
             remaining_width = remaining_width.saturating_sub(users_width + 1);
+            let saved_filter_width =
+                saved_filter_width(remaining_width, &self.saved_filter).min(24);
+            remaining_width = remaining_width.saturating_sub(saved_filter_width + 1);
             let estimated_width = <Toggle<()> as TuiNode<()>>::measure(
                 &self.estimated,
                 LayoutProposal::at_most(remaining_width, 1),
@@ -1988,8 +2127,17 @@ impl TuiNode for BacklogTree {
                 users_width,
                 1,
             );
-            self.estimated_area = ratatui::layout::Rect::new(
+            self.saved_filter_area = ratatui::layout::Rect::new(
                 self.users_area
+                    .x
+                    .saturating_sub(saved_filter_width)
+                    .saturating_sub(u16::from(saved_filter_width > 0)),
+                area.y,
+                saved_filter_width,
+                1,
+            );
+            self.estimated_area = ratatui::layout::Rect::new(
+                self.saved_filter_area
                     .x
                     .saturating_sub(estimated_width)
                     .saturating_sub(u16::from(estimated_width > 0)),
@@ -2030,6 +2178,17 @@ impl TuiNode for BacklogTree {
         ctx.push_slot(ChildKey::new("estimated"), self.estimated_area, |ctx| {
             <Toggle<()> as TuiNode<()>>::layout(&mut self.estimated, self.estimated_area, ctx)
         });
+        ctx.push_slot(
+            ChildKey::new("saved-filter"),
+            self.saved_filter_area,
+            |ctx| {
+                <Dropdown<SavedFilterChoice, String> as TuiNode<()>>::layout(
+                    &mut self.saved_filter,
+                    self.saved_filter_area,
+                    ctx,
+                )
+            },
+        );
         ctx.push_slot(ChildKey::new("users"), self.users_area, |ctx| {
             <Dropdown<String, String> as TuiNode<()>>::layout(&mut self.users, self.users_area, ctx)
         });
@@ -2105,6 +2264,7 @@ impl TuiNode for BacklogTree {
         self.web.render(frame, self.web_area, ctx);
         self.group_by.render(frame, self.group_by_area, ctx);
         self.estimated.render(frame, self.estimated_area);
+        self.saved_filter.render(frame, self.saved_filter_area, ctx);
         self.users.render(frame, self.users_area, ctx);
         self.issue_types.render(frame, self.issue_types_area, ctx);
         self.statuses.render(frame, self.statuses_area, ctx);
@@ -2126,6 +2286,7 @@ impl TuiNode for BacklogTree {
             && (self.refresh.event(event, ctx) == EventOutcome::Handled
                 || self.velocity.event(event, ctx) == EventOutcome::Handled
                 || self.estimated.event(event, ctx) == EventOutcome::Handled
+                || self.saved_filter.event(event, ctx) == EventOutcome::Handled
                 || self.issue_types.event(event, ctx) == EventOutcome::Handled
                 || self.users.event(event, ctx) == EventOutcome::Handled
                 || self.statuses.event(event, ctx) == EventOutcome::Handled
@@ -2177,6 +2338,17 @@ impl TuiNode for BacklogTree {
             let outcome =
                 self.estimated
                     .dispatch_event(&EventRoute::new(estimated_path), event, ctx);
+            return if self.refocus_data_view_after_unfocus(event, ctx) {
+                EventOutcome::Handled
+            } else {
+                outcome
+            };
+        }
+        if let Some(saved_filter_path) = route.path.without_first_if(&ChildKey::new("saved-filter"))
+        {
+            let outcome =
+                self.saved_filter
+                    .dispatch_event(&EventRoute::new(saved_filter_path), event, ctx);
             return if self.refocus_data_view_after_unfocus(event, ctx) {
                 EventOutcome::Handled
             } else {
@@ -2322,6 +2494,11 @@ impl TuiNode for BacklogTree {
                 dt,
                 settings,
             ))
+            .merge(<Dropdown<SavedFilterChoice, String> as TuiNode<()>>::tick(
+                &mut self.saved_filter,
+                dt,
+                settings,
+            ))
             .merge(<Dropdown<JiraOption, String> as TuiNode<()>>::tick(
                 &mut self.issue_types,
                 dt,
@@ -2382,6 +2559,11 @@ impl TuiNode for BacklogTree {
                 .dispatch_focus(&estimated_target, focused, ctx);
             return;
         }
+        if let Some(saved_filter_target) = target.for_child(&ChildKey::new("saved-filter")) {
+            self.saved_filter
+                .dispatch_focus(&saved_filter_target, focused, ctx);
+            return;
+        }
         if let Some(issue_types_target) = target.for_child(&ChildKey::new("issue-types")) {
             self.issue_types
                 .dispatch_focus(&issue_types_target, focused, ctx);
@@ -2420,6 +2602,7 @@ impl TuiNode for BacklogTree {
     fn init(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.control.init(ctx);
         self.estimated.init(ctx);
+        self.saved_filter.init(ctx);
         self.issue_types.init(ctx);
         self.users.init(ctx);
         self.statuses.init(ctx);
@@ -2432,6 +2615,7 @@ impl TuiNode for BacklogTree {
     fn mount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.control.mount(ctx);
         self.estimated.mount(ctx);
+        self.saved_filter.mount(ctx);
         self.issue_types.mount(ctx);
         self.users.mount(ctx);
         self.statuses.mount(ctx);
@@ -2444,6 +2628,7 @@ impl TuiNode for BacklogTree {
     fn unmount(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.control.unmount(ctx);
         self.estimated.unmount(ctx);
+        self.saved_filter.unmount(ctx);
         self.issue_types.unmount(ctx);
         self.users.unmount(ctx);
         self.statuses.unmount(ctx);
@@ -2456,6 +2641,7 @@ impl TuiNode for BacklogTree {
     fn destroy(&mut self, ctx: &mut LifecycleCtx<()>) {
         self.control.destroy(ctx);
         self.estimated.destroy(ctx);
+        self.saved_filter.destroy(ctx);
         self.issue_types.destroy(ctx);
         self.users.destroy(ctx);
         self.statuses.destroy(ctx);
@@ -2467,6 +2653,7 @@ impl TuiNode for BacklogTree {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
 struct BacklogFilters {
     estimated: bool,
     issue_types: Vec<String>,
@@ -2501,6 +2688,34 @@ impl BacklogFilters {
             || !self.labels.is_empty()
             || !self.releases.is_empty()
     }
+}
+
+impl From<&BacklogFilterCriteria> for BacklogFilters {
+    fn from(criteria: &BacklogFilterCriteria) -> Self {
+        Self {
+            estimated: criteria.estimated,
+            issue_types: criteria.issue_types.clone(),
+            users: SavedFilterField::Users.selection(criteria.users.clone()),
+            statuses: criteria.statuses.clone(),
+            epics: SavedFilterField::Epics.selection(criteria.epics.clone()),
+            labels: SavedFilterField::Labels.selection(criteria.labels.clone()),
+            releases: SavedFilterField::Releases.selection(criteria.releases.clone()),
+        }
+    }
+}
+
+fn saved_filter_choices(filters: &[SavedBacklogFilter]) -> Vec<SavedFilterChoice> {
+    filters
+        .iter()
+        .map(|filter| SavedFilterChoice {
+            id: format!("filter:{}", filter.id),
+            label: filter.name.clone(),
+        })
+        .chain(std::iter::once(SavedFilterChoice {
+            id: "manage".into(),
+            label: "Manage filters…".into(),
+        }))
+        .collect()
 }
 
 pub(in crate::pages::backlog) fn selectable_issue_types(
@@ -2564,7 +2779,7 @@ fn selectable_users(snapshot: &BacklogSnapshot) -> Vec<String> {
         .collect::<Vec<_>>();
     users.sort_unstable_by_key(|user| user.to_ascii_lowercase());
     users.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-    users
+    SavedFilterField::Users.options(users)
 }
 
 fn selectable_statuses(snapshot: &BacklogSnapshot) -> Vec<String> {
@@ -2595,7 +2810,7 @@ fn selectable_epics(snapshot: &BacklogSnapshot) -> Vec<String> {
         .collect::<Vec<_>>();
     epics.sort_unstable_by_key(|epic| epic.to_ascii_lowercase());
     epics.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-    epics
+    SavedFilterField::Epics.options(epics)
 }
 
 fn selectable_labels(snapshot: &BacklogSnapshot) -> Vec<String> {
@@ -2611,7 +2826,7 @@ fn selectable_labels(snapshot: &BacklogSnapshot) -> Vec<String> {
         .collect::<Vec<_>>();
     labels.sort_unstable_by_key(|label| label.to_ascii_lowercase());
     labels.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-    labels
+    SavedFilterField::Labels.options(labels)
 }
 
 fn selectable_releases(snapshot: &BacklogSnapshot) -> Vec<String> {
@@ -2627,17 +2842,17 @@ fn selectable_releases(snapshot: &BacklogSnapshot) -> Vec<String> {
         .collect::<Vec<_>>();
     releases.sort_unstable_by(|left, right| version_name_cmp(left, right));
     releases.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-    releases
+    SavedFilterField::Releases.options(releases)
 }
 
 fn backlog_rows(
     snapshot: &BacklogSnapshot,
     filters: &BacklogFilters,
     group_by: Option<BacklogGroupBy>,
-    search_active: bool,
+    search: &str,
 ) -> Vec<BacklogRow> {
     if let Some(group_by) = group_by {
-        return grouped_backlog_rows(snapshot, filters, group_by, search_active);
+        return grouped_backlog_rows(snapshot, filters, group_by, search);
     }
 
     let mut rows = Vec::new();
@@ -2705,7 +2920,7 @@ fn grouped_backlog_rows(
     snapshot: &BacklogSnapshot,
     filters: &BacklogFilters,
     group_by: BacklogGroupBy,
-    search_active: bool,
+    search: &str,
 ) -> Vec<BacklogRow> {
     let visible_items = snapshot
         .sprints
@@ -2713,6 +2928,18 @@ fn grouped_backlog_rows(
         .flat_map(|sprint| visible_work_items(&sprint.work_items, filters))
         .chain(visible_work_items(&snapshot.work_items, filters))
         .collect::<Vec<_>>();
+    let full_release_groups = if group_by == BacklogGroupBy::Release && filters.is_active() {
+        let unfiltered = BacklogFilters::default();
+        let items = snapshot
+            .sprints
+            .iter()
+            .flat_map(|sprint| visible_work_items(&sprint.work_items, &unfiltered))
+            .chain(visible_work_items(&snapshot.work_items, &unfiltered))
+            .collect::<Vec<_>>();
+        grouped_work_items(snapshot, &items, group_by)
+    } else {
+        Vec::new()
+    };
 
     grouped_work_items(snapshot, &visible_items, group_by)
         .into_iter()
@@ -2723,14 +2950,19 @@ fn grouped_backlog_rows(
                 .iter()
                 .map(|item| item.key.as_str())
                 .collect::<HashSet<_>>();
+            let full_group = full_release_groups
+                .iter()
+                .find(|full| full.label == group.label && !is_unassigned_group_label(&full.label))
+                .unwrap_or(&group);
+            let hides_tickets = full_group.items.len() > group.items.len();
             let mut rows = vec![group_row(
                 snapshot,
                 group_by,
                 &group_id,
-                &group,
-                filters.is_active() || search_active,
+                full_group,
+                hides_tickets,
             )];
-            rows.extend(group.items.into_iter().enumerate().map(|(index, item)| {
+            rows.extend(group.items.iter().enumerate().map(|(index, item)| {
                 let source = work_item_source(snapshot, item);
                 work_item_row(
                     item,
@@ -2752,6 +2984,16 @@ fn grouped_backlog_rows(
                     index % 2 == 0,
                 )
             }));
+            if group_by == BacklogGroupBy::Release && !hides_tickets && !search.trim().is_empty() {
+                let visible_ids = search_visible_row_ids(&rows, search.trim());
+                if rows
+                    .iter()
+                    .skip(1)
+                    .any(|row| !visible_ids.contains(row.id.as_str()))
+                {
+                    rows[0] = group_row(snapshot, group_by, &group_id, full_group, true);
+                }
+            }
             rows
         })
         .collect()
@@ -2865,13 +3107,18 @@ fn group_label_cmp(
                 (None, None) => std::cmp::Ordering::Equal,
             }
             .then_with(|| version_name_cmp(left, right)),
-            BacklogGroupBy::Epic => left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase()),
+            BacklogGroupBy::Epic | BacklogGroupBy::User => {
+                left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase())
+            }
         },
     }
 }
 
 fn is_unassigned_group_label(label: &str) -> bool {
-    matches!(label, "(no release version)" | "(no epic assigned)")
+    matches!(
+        label,
+        "(no release version)" | "(no epic assigned)" | "(no user assigned)"
+    )
 }
 
 fn root_work_item_key<'a>(
@@ -2909,6 +3156,17 @@ fn group_labels(item: &WorkItem, group_by: BacklogGroupBy) -> Vec<String> {
             .map(str::to_owned)
             .into_iter()
             .collect(),
+        BacklogGroupBy::User => {
+            let assignee = item.assignee.trim();
+            if assignee.is_empty()
+                || assignee == "--"
+                || assignee.eq_ignore_ascii_case("unassigned")
+            {
+                Vec::new()
+            } else {
+                vec![assignee.to_owned()]
+            }
+        }
     };
     labels.sort_unstable();
     labels.dedup();
@@ -2916,6 +3174,7 @@ fn group_labels(item: &WorkItem, group_by: BacklogGroupBy) -> Vec<String> {
         labels.push(match group_by {
             BacklogGroupBy::Release => "(no release version)".into(),
             BacklogGroupBy::Epic => "(no epic assigned)".into(),
+            BacklogGroupBy::User => "(no user assigned)".into(),
         });
     }
     labels
@@ -2975,37 +3234,22 @@ fn matches_filters(item: &WorkItem, filters: &BacklogFilters) -> bool {
                 .issue_types
                 .iter()
                 .any(|issue_type| item.kind.eq_ignore_ascii_case(issue_type)))
-        && (filters.users.is_empty()
-            || filters
-                .users
-                .iter()
-                .any(|user| item.assignee.eq_ignore_ascii_case(user)))
+        && matches_optional_values(
+            &filters.users,
+            std::iter::once(item.assignee.as_str())
+                .filter(|user| !user.trim().eq_ignore_ascii_case("Unassigned")),
+        )
         && (filters.statuses.is_empty()
             || filters
                 .statuses
                 .iter()
                 .any(|status| item.status.eq_ignore_ascii_case(status)))
-        && (filters.epics.is_empty()
-            || item.epic_name.as_deref().is_some_and(|epic| {
-                filters
-                    .epics
-                    .iter()
-                    .any(|selected| epic.eq_ignore_ascii_case(selected))
-            }))
-        && (filters.labels.is_empty()
-            || item.labels.iter().any(|label| {
-                filters
-                    .labels
-                    .iter()
-                    .any(|selected| label.eq_ignore_ascii_case(selected))
-            }))
-        && (filters.releases.is_empty()
-            || item.fix_versions.iter().any(|release| {
-                filters
-                    .releases
-                    .iter()
-                    .any(|selected| release.eq_ignore_ascii_case(selected))
-            }))
+        && matches_optional_values(&filters.epics, item.epic_name.as_deref())
+        && matches_optional_values(&filters.labels, item.labels.iter().map(String::as_str))
+        && matches_optional_values(
+            &filters.releases,
+            item.fix_versions.iter().map(String::as_str),
+        )
 }
 
 fn initially_expanded_rows(
@@ -3103,6 +3347,16 @@ fn group_row(
             },
         };
     }
+    if group_by == BacklogGroupBy::User {
+        return BacklogRow {
+            id: id.into(),
+            parent_id: None,
+            content: BacklogRowContent::Group {
+                title: user_group_title(group),
+                search_text: group.label.clone(),
+            },
+        };
+    }
     let theme = tuicore::theme();
     let no_assignment = is_unassigned_group_label(&group.label);
     let mut heading = vec![
@@ -3160,6 +3414,125 @@ fn group_row(
             title: Text::from(title),
             search_text: group.label.clone(),
         },
+    }
+}
+
+fn user_group_title(group: &WorkItemGroup<'_>) -> Text<'static> {
+    let theme = tuicore::theme();
+    let muted = Style::default().fg(theme.muted_fg());
+    let no_assignment = is_unassigned_group_label(&group.label);
+    let (coverage, coverage_style) = estimation_coverage(&group.items);
+    let heading = Line::from(vec![
+        Span::styled(
+            "󰀆",
+            if no_assignment {
+                muted
+            } else {
+                Style::default().fg(theme.accent_fg())
+            },
+        ),
+        Span::raw(" "),
+        Span::styled(
+            group.label.clone(),
+            if no_assignment {
+                muted
+            } else {
+                Style::default()
+                    .fg(theme.text_fg())
+                    .add_modifier(Modifier::BOLD)
+            },
+        ),
+        Span::styled(" • ", muted),
+        Span::styled(format!("{coverage} est"), coverage_style),
+        Span::styled(" • ", muted),
+        Span::styled(format!("{} items", group.items.len()), muted),
+    ]);
+    let mut status = Vec::new();
+    for summary in status_summaries(&group.items) {
+        if !status.is_empty() {
+            status.push(Span::styled(" • ", muted));
+        }
+        status.push(Span::styled(
+            format!("{} {}", summary.count, summary.label),
+            status_category_style(summary.category),
+        ));
+    }
+    Text::from(vec![heading, Line::from(status)])
+}
+
+struct StatusSummary {
+    category: StatusCategory,
+    label: String,
+    count: usize,
+}
+
+fn status_summaries(items: &[&WorkItem]) -> Vec<StatusSummary> {
+    let mut summaries = Vec::<StatusSummary>::new();
+    for item in items {
+        let category = if item.status_category == StatusCategory::Unknown && item.done {
+            StatusCategory::Done
+        } else {
+            item.status_category
+        };
+        let label = match item.status.trim() {
+            "" => match category {
+                StatusCategory::Todo => "To Do",
+                StatusCategory::InProgress => "In Progress",
+                StatusCategory::Done => "Done",
+                StatusCategory::Unknown => "Unknown",
+            },
+            label => label,
+        };
+        if let Some(summary) = summaries.iter_mut().find(|summary| {
+            summary.category == category && summary.label.eq_ignore_ascii_case(label)
+        }) {
+            summary.count += 1;
+        } else {
+            summaries.push(StatusSummary {
+                category,
+                label: label.to_owned(),
+                count: 1,
+            });
+        }
+    }
+    summaries.sort_unstable_by(|left, right| {
+        status_category_order(left.category)
+            .cmp(&status_category_order(right.category))
+            .then_with(|| {
+                status_name_order(left.category, &left.label)
+                    .cmp(&status_name_order(right.category, &right.label))
+            })
+            .then_with(|| {
+                left.label
+                    .to_ascii_lowercase()
+                    .cmp(&right.label.to_ascii_lowercase())
+            })
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    summaries
+}
+
+fn status_category_order(category: StatusCategory) -> u8 {
+    match category {
+        StatusCategory::Todo => 0,
+        StatusCategory::InProgress => 1,
+        StatusCategory::Unknown => 2,
+        StatusCategory::Done => 3,
+    }
+}
+
+fn status_name_order(category: StatusCategory, label: &str) -> u8 {
+    let label = label.to_ascii_lowercase();
+    match category {
+        StatusCategory::Todo if label.contains("backlog") => 0,
+        StatusCategory::Todo if label.contains("to do") => 1,
+        StatusCategory::Todo if label.contains("todo") => 2,
+        StatusCategory::Todo => 3,
+        StatusCategory::InProgress if label.contains("progress") => 0,
+        StatusCategory::InProgress if label.contains("review") => 1,
+        StatusCategory::InProgress => 2,
+        StatusCategory::Done if label.contains("done") => 1,
+        StatusCategory::Done | StatusCategory::Unknown => 0,
     }
 }
 
@@ -3292,6 +3665,7 @@ fn work_item_row(
                 kind: work_item_kind(&item.kind),
                 priority: item.priority.clone(),
                 status: item.status.clone(),
+                status_category: item.status_category,
                 done: item.done,
                 assignee: item.assignee.clone(),
                 labels: item.labels.clone(),
@@ -3388,6 +3762,28 @@ fn descendant_row_ids<'a>(id: &'a str, rows: &'a [BacklogRow]) -> Vec<&'a str> {
         }
     }
     descendants
+}
+
+fn search_visible_row_ids<'a>(rows: &'a [BacklogRow], search: &str) -> HashSet<&'a str> {
+    let parent_ids = rows
+        .iter()
+        .map(|row| (row.id.as_str(), row.parent_id.as_deref()))
+        .collect::<HashMap<_, _>>();
+    let mut visible_ids = HashSet::new();
+    for row in rows.iter().filter(|row| {
+        tuicore::search_match(search, &backlog_search_text(row), SearchMode::Contains).is_some()
+    }) {
+        visible_ids.insert(row.id.as_str());
+        visible_ids.extend(descendant_row_ids(row.id.as_str(), rows));
+        let mut parent_id = row.parent_id.as_deref();
+        while let Some(id) = parent_id {
+            if !visible_ids.insert(id) {
+                break;
+            }
+            parent_id = parent_ids.get(id).copied().flatten();
+        }
+    }
+    visible_ids
 }
 
 fn backlog_work_item_text(row: &BacklogWorkItem, number_query: Option<&str>) -> Text<'static> {

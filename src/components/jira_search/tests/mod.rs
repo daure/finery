@@ -52,6 +52,7 @@ fn open_command_closes_search_only_when_a_command_is_triggered() {
         description: String::new(),
         kind: "Story".into(),
         status: "To Do".into(),
+        status_category: crate::store::work_items::StatusCategory::Todo,
         done: false,
         priority: String::new(),
         assignee: String::new(),

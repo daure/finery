@@ -28,6 +28,7 @@ use crate::{
     store::work_items::{BacklogSnapshot, RankPlan, StatusTransition, WorkItem},
 };
 
+mod attachment_images;
 mod background_clipboard;
 mod open_command;
 pub(crate) use open_command::OpenCommandRequest;
@@ -1096,29 +1097,6 @@ impl AppService {
             }
             self.report_error(format!("Could not open Jira releases in browser: {error}"));
         }
-    }
-
-    pub(crate) fn load_jira_attachment_image(
-        &self,
-        content_url: &str,
-    ) -> Result<tuicore::Image, String> {
-        let settings = self
-            .settings
-            .read()
-            .map_err(|_| "settings lock is unavailable".to_string())?;
-        let (base_url, email, token) = settings.configured_jira().ok_or_else(|| {
-            "Jira is not configured; add URL, email, and API token in Settings".to_string()
-        })?;
-        let base_url = reqwest::Url::parse(base_url).map_err(|error| error.to_string())?;
-        let content_url = reqwest::Url::parse(content_url).map_err(|error| error.to_string())?;
-        if content_url.scheme() != base_url.scheme()
-            || content_url.host_str() != base_url.host_str()
-            || content_url.port_or_known_default() != base_url.port_or_known_default()
-        {
-            return Err("Jira attachment URL does not match the configured Jira site".into());
-        }
-        tuicore::Image::from_url_with_basic_auth(content_url, email, token)
-            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn read_clipboard_image(&self) -> Result<Option<ClipboardImage>, String> {

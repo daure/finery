@@ -97,6 +97,7 @@ fn work_item(kind: &str) -> WorkItem {
         description: String::new(),
         kind: kind.into(),
         status: "To Do".into(),
+        status_category: crate::store::work_items::StatusCategory::Todo,
         done: false,
         priority: String::new(),
         assignee: "Unassigned".into(),

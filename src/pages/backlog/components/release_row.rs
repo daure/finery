@@ -21,7 +21,7 @@ pub(super) fn title(
     snapshot: &BacklogSnapshot,
     group: &WorkItemGroup<'_>,
     today: NaiveDate,
-    filtered: bool,
+    hides_tickets: bool,
 ) -> Text<'static> {
     let theme = tuicore::theme();
     let muted = Style::default().fg(theme.muted_fg());
@@ -83,9 +83,7 @@ pub(super) fn title(
             ),
             separator(),
         ]);
-        if filtered {
-            heading.push(Span::styled(" Filtered scope", muted));
-        } else if forecast.status == ReleaseStatus::Delivered {
+        if forecast.status == ReleaseStatus::Delivered {
             heading.push(Span::styled(format!("{icon} {status}"), status_style));
         } else if today > end {
             if let Some((needed, _)) = forecast.sprints {
@@ -127,9 +125,9 @@ pub(super) fn title(
             warning,
             Style::default().fg(theme.warning_fg()),
         ));
-        if filtered {
-            heading.extend([separator(), Span::styled(" Filtered scope", muted)]);
-        }
+    }
+    if hides_tickets {
+        heading.push(Span::styled(" (some tickets hidden by filters)", muted));
     }
     let (coverage, coverage_style) = estimation_coverage(&group.items);
     let remaining_points = if forecast.points_known {

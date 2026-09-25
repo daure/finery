@@ -12,6 +12,7 @@ fn work_item(key: &str, story_points: Option<f64>) -> WorkItem {
         description: String::new(),
         kind: "Story".into(),
         status: "To Do".into(),
+        status_category: super::StatusCategory::Todo,
         done: false,
         priority: "Medium".into(),
         assignee: "Unassigned".into(),

@@ -15,6 +15,7 @@ use crate::{
         open_command_menu::OpenCommandMenu,
         recent_tickets::{RecentTicketsMenu, RecentTicketsMenuEvent},
         settings_dialog::SettingsDialog,
+        text_entry_paths::TextEntryPaths,
         work_item_rows::TICKET_MENU_WIDTH,
     },
     pages,
@@ -136,6 +137,7 @@ pub(crate) struct App {
     close_dialog: Rc<Cell<bool>>,
     service: AppService,
     service_notifications: ToastRack,
+    text_entry_paths: TextEntryPaths,
 }
 
 pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
@@ -209,6 +211,7 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
         close_dialog,
         service,
         service_notifications: ToastRack::new(),
+        text_entry_paths: TextEntryPaths::default(),
     }
 }
 
@@ -381,7 +384,10 @@ impl TuiNode for App {
     }
 
     fn layout(&mut self, area: Rect, ctx: &mut LayoutCtx) -> LayoutResult {
-        self.view.layout(area, ctx)
+        let path = ctx.current_path();
+        let result = self.view.layout(area, ctx);
+        self.text_entry_paths.capture(ctx, &path);
+        result
     }
 
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
@@ -390,7 +396,7 @@ impl TuiNode for App {
     }
 
     fn event(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> EventOutcome {
-        if self.go_home(event, ctx)
+        if (!self.text_entry_paths.contains(&ctx.current_path()) && self.go_home(event, ctx))
             || self.open_jira_search(event, ctx)
             || self.open_recent_tickets(event, ctx)
         {
@@ -407,7 +413,7 @@ impl TuiNode for App {
         event: &TuiEvent,
         ctx: &mut EventCtx<()>,
     ) -> EventOutcome {
-        if self.go_home(event, ctx)
+        if (!self.text_entry_paths.contains(&route.path) && self.go_home(event, ctx))
             || self.open_jira_search(event, ctx)
             || self.open_recent_tickets(event, ctx)
         {

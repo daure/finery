@@ -1299,13 +1299,20 @@ fn jira_description_overwrite_safety_allows_supported_marks_and_guards_media() {
 
 #[test]
 fn jira_ticket_maps_attachment_metadata() {
+    let adf = json!({"type":"doc", "version":1, "content":[
+        {"type":"mediaSingle", "content":[{"type":"media", "attrs":{
+            "type":"file", "id":"media-uuid", "alt":"image-20260904-161404.png"
+        }}]}
+    ]});
     let ticket = to_ticket(JiraIssue {
         key: "FIN-7".into(),
         fields: json!({
             "reporter": { "displayName": "Mina" },
             "created": "2026-09-04T16:14:04.000+0000",
             "updated": "2026-09-05T09:30:00.000+0000",
+            "description": adf,
             "attachment": [{
+                "id": "42",
                 "filename": "image-20260904-161404.png",
                 "created": "2026-09-04T16:14:04.000+0000",
                 "size": 21_504,
@@ -1316,6 +1323,26 @@ fn jira_ticket_maps_attachment_metadata() {
     });
 
     assert_eq!(ticket.attachments.len(), 1);
+    assert_eq!(
+        ticket.jira_metadata.as_ref().unwrap().description_adf,
+        Some(adf)
+    );
+    assert!(!ticket.description_safe_to_overwrite);
+    assert_eq!(
+        crate::store::composer::description_media::DescriptionPresentation::for_ticket(Some(
+            &ticket
+        ))
+        .text,
+        "Image: `image-20260904-161404.png`"
+    );
+    let mut title_only = ticket.clone();
+    title_only.title = "Updated title".into();
+    assert!(
+        update_payload(&ticket, &title_only, None, false, None)
+            .unwrap()
+            .pointer("/fields/description")
+            .is_none()
+    );
     assert_eq!(ticket.jira_metadata.as_ref().unwrap().reporter, "Mina");
     assert_eq!(
         ticket.jira_metadata.as_ref().unwrap().created,
@@ -1693,7 +1720,7 @@ fn backlog_items_include_subtask_progress_labels_releases_and_epic_names() {
 }
 
 #[test]
-fn only_done_statuses_mark_a_work_item_complete() {
+fn done_category_marks_custom_statuses_complete() {
     let work_item = to_work_item(
         JiraIssue {
             key: "FIN-2".into(),
@@ -1705,7 +1732,11 @@ fn only_done_statuses_mark_a_work_item_complete() {
         None,
     );
 
-    assert!(!work_item.done);
+    assert!(work_item.done);
+    assert_eq!(
+        work_item.status_category,
+        crate::store::work_items::StatusCategory::Done
+    );
 }
 
 #[test]

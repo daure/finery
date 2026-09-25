@@ -407,6 +407,7 @@ fn recent_ticket_row(
             kind: work_item_kind(&ticket.kind),
             priority: ticket.priority,
             status: ticket.status,
+            status_category: ticket.status_category,
             done: ticket.done,
             assignee: ticket.assignee,
             labels: ticket.labels,

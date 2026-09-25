@@ -1042,7 +1042,7 @@ fn change_set_list_is_borderless_and_opens_the_new_change_set_dialog() {
     let list = render_text(&mut page);
     assert!(list.contains("New change set"));
     assert!(list.contains("Open"));
-    assert!(list.contains("Search..."));
+    assert!(list.contains("Search…"));
     assert!(!list.contains("Change sets"));
 
     let new_change_set = last_target(&mut page, "button");
@@ -2306,6 +2306,7 @@ fn composer_rows_show_current_ticket_properties_with_presentation_only_details()
                     description: String::new(),
                     kind: "Story".into(),
                     status: "In Progress".into(),
+                    status_category: crate::store::work_items::StatusCategory::InProgress,
                     done: false,
                     priority: "High".into(),
                     assignee: "Ada".into(),

@@ -7,7 +7,7 @@ use crate::store::{
         jira_adf::{adf_is_safe_to_overwrite, adf_overwrite_warning, adf_to_markdown},
     },
     work_items::{
-        BacklogSnapshot, SubtaskProgress, TicketComment, TicketComments, WorkItem,
+        BacklogSnapshot, StatusCategory, SubtaskProgress, TicketComment, TicketComments, WorkItem,
         content::{TicketImage, ticket_image_marker},
         is_done_status,
     },
@@ -33,6 +33,9 @@ pub(super) fn to_ticket(issue: JiraIssue) -> Ticket {
             reporter: person_name(field("reporter")),
             created: field("created").as_str().unwrap_or_default().into(),
             updated: field("updated").as_str().unwrap_or_default().into(),
+            description_adf: field("description")
+                .as_object()
+                .map(|_| field("description").clone()),
         }),
         kind: field("issuetype")
             .get("name")
@@ -244,13 +247,18 @@ fn to_work_item_fields(key: &str, fields: &Value, story_points_field_id: Option<
     let field = |name: &str| fields.get(name).unwrap_or(&Value::Null);
     let (parent_key, parent_title) = parent_metadata(field("parent"));
     let subtask_progress = subtask_progress(field("subtasks"));
+    let status = named_field(field("status")).unwrap_or_default();
+    let status_category = status_category(field("status"));
+    let done = status_category == StatusCategory::Done
+        || (status_category == StatusCategory::Unknown && is_done_status(&status));
     WorkItem {
         key: key.into(),
         title: field("summary").as_str().unwrap_or(key).into(),
         description: adf_to_display_markdown(field("description"), field("attachment")),
         kind: named_field(field("issuetype")).unwrap_or_else(|| "Issue".into()),
-        status: named_field(field("status")).unwrap_or_default(),
-        done: named_field(field("status")).is_some_and(|status| is_done_status(&status)),
+        status,
+        status_category,
+        done,
         priority: named_field(field("priority")).unwrap_or_default(),
         assignee: field("assignee")
             .get("displayName")
@@ -300,14 +308,26 @@ fn subtask_progress(subtasks: &Value) -> Option<SubtaskProgress> {
         completed: subtasks
             .iter()
             .filter(|subtask| {
-                subtask
-                    .pointer("/fields/status/name")
-                    .and_then(Value::as_str)
-                    .is_some_and(is_done_status)
+                let status = subtask.pointer("/fields/status").unwrap_or(&Value::Null);
+                let category = status_category(status);
+                category == StatusCategory::Done
+                    || (category == StatusCategory::Unknown
+                        && status
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(is_done_status))
             })
             .count(),
         total: subtasks.len(),
     })
+}
+
+fn status_category(status: &Value) -> StatusCategory {
+    let category = status.get("statusCategory").unwrap_or(&Value::Null);
+    StatusCategory::from_jira(
+        category.get("key").and_then(Value::as_str),
+        category.get("name").and_then(Value::as_str),
+    )
 }
 
 fn fix_versions(value: &Value) -> Vec<String> {

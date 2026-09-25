@@ -1,3 +1,6 @@
+mod missing_filter_values;
+mod saved_filter_runtime;
+
 use std::{
     cell::{Cell, RefCell},
     collections::HashSet,
@@ -14,8 +17,9 @@ use tuicore::{
 
 use super::{
     components::{
-        BacklogQuickMenu, BacklogQuickMenuEvent, BacklogTree, backlog_tree,
-        backlog_tree_with_issue_types, issue_types_in_snapshot, selectable_issue_types,
+        BacklogQuickMenu, BacklogQuickMenuEvent, BacklogTree, SavedFilterField,
+        SavedFilterManagerEvent, backlog_tree, backlog_tree_with_issue_types,
+        issue_types_in_snapshot, saved_filter_dialog, selectable_issue_types,
     },
     page::{
         BacklogPage, MAX_UNCONFIRMED_TRANSFER_REFRESHES, PendingRank, PendingRankReconciliation,
@@ -38,6 +42,7 @@ use crate::store::work_items::{
     SubtaskProgress, TicketComment, TicketComments, VelocityReport, VelocitySprint, WorkItem,
     apply_capacity, rank_plan,
     release::{ReleaseVersion, parse_date},
+    saved_filter::{BacklogFilterCriteria, BacklogFilterOptions, SavedBacklogFilter},
 };
 
 fn work_item(key: &str, title: &str) -> WorkItem {
@@ -47,6 +52,7 @@ fn work_item(key: &str, title: &str) -> WorkItem {
         description: String::new(),
         kind: "Story".into(),
         status: "To Do".into(),
+        status_category: crate::store::work_items::StatusCategory::Todo,
         done: false,
         priority: "High".into(),
         assignee: "Ada".into(),
@@ -378,7 +384,7 @@ fn backlog_header_uses_two_rows_for_compact_widths() {
     assert!(lines[0].contains("󰓅"));
     assert!(lines[0].contains("󰑓"));
     assert!(!lines[0].contains(" G"));
-    assert!(lines[1].contains("Search..."));
+    assert!(lines[1].contains("Search…"));
     assert!(lines[1].contains("󰀄"));
     assert!(lines[1].contains("󰡯"));
     assert!(lines[1].contains(""));
@@ -540,6 +546,22 @@ fn backlog_groups_sprint_and_backlog_tickets_by_release_with_a_missing_version_g
 }
 
 #[test]
+fn changing_backlog_grouping_leaves_all_rows_collapsed() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    let mut child = work_item("FIN-9", "Hidden child");
+    child.kind = "Sub-task".into();
+    child.parent_key = Some("FIN-8".into());
+    snapshot.work_items.push(child);
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+
+    tree.group_by_user_for_test();
+
+    assert!(tree.expansion_snapshot_for_test().is_empty());
+}
+
+#[test]
 fn backlog_groups_releases_by_scheduled_dates_before_version_names() {
     tuicore::init();
     let mut snapshot = snapshot();
@@ -642,6 +664,85 @@ fn backlog_groups_sprint_and_backlog_tickets_by_epic_with_an_unassigned_group() 
     assert!(!text.contains("Ship sprint work"));
     assert!(!text.contains("Build the release"));
     assert!(!text.contains("Polish the release"));
+}
+
+#[test]
+fn backlog_groups_all_ticket_types_by_user_with_estimation_and_status_summaries() {
+    tuicore::init();
+    let mut snapshot = snapshot();
+    snapshot.story_points_configured = true;
+    snapshot.sprints[0].work_items[0].story_points = Some(3.0);
+    snapshot.sprints[0].work_items[0].status = "Team To Do Queue".into();
+
+    let task = WorkItem {
+        kind: "Task".into(),
+        status: "Product Backlog".into(),
+        ..work_item("FIN-8", "Plan the work")
+    };
+    let in_progress_story = WorkItem {
+        status: "QA Review".into(),
+        status_category: crate::store::work_items::StatusCategory::InProgress,
+        story_points: Some(5.0),
+        ..work_item("FIN-9", "Build the work")
+    };
+    let bug = WorkItem {
+        kind: "Bug".into(),
+        status: "Work In Progress".into(),
+        status_category: crate::store::work_items::StatusCategory::InProgress,
+        ..work_item("FIN-10", "Fix the work")
+    };
+    let subtask = WorkItem {
+        kind: "Sub-task".into(),
+        status: "Done".into(),
+        status_category: crate::store::work_items::StatusCategory::Done,
+        done: true,
+        parent_key: Some("FIN-8".into()),
+        ..work_item("FIN-11", "Finish the work")
+    };
+    let todo_bug = WorkItem {
+        kind: "Bug".into(),
+        status: "TODO Grooming".into(),
+        ..work_item("FIN-13", "Groom the work")
+    };
+    let unassigned = WorkItem {
+        kind: "Bug".into(),
+        assignee: "Unassigned".into(),
+        ..work_item("FIN-12", "Assign the work")
+    };
+    snapshot.work_items = vec![task, in_progress_story, bug, subtask, todo_bug, unassigned];
+
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&snapshot, sender, Default::default());
+    tree.group_by_user_for_test();
+    let area = Rect::new(0, 0, 160, 16);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let lines = rendered_lines(&terminal, area);
+    assert!(lines[2].contains("󰀆 Ada • 󰄰 2/3 est • 6 items"));
+    assert_eq!(
+        lines[3].trim(),
+        "1 Product Backlog • 1 Team To Do Queue • 1 TODO Grooming • 1 Work In Progress • 1 QA Review • 1 Done"
+    );
+    let review_x = cell_position(&lines[3], "QA Review").unwrap() as u16;
+    assert_eq!(
+        terminal.backend().buffer().cell((review_x, 3)).unwrap().fg,
+        tuicore::theme().info_fg()
+    );
+    let done_x = cell_position(&lines[3], "Done").unwrap() as u16;
+    assert_eq!(
+        terminal.backend().buffer().cell((done_x, 3)).unwrap().fg,
+        tuicore::theme().success_fg()
+    );
+    assert!(lines[4].contains("󰀆 (no user assigned) • ✓ 0/0 est • 1 items"));
+    assert_eq!(lines[5].trim(), "1 To Do");
 }
 
 #[test]
@@ -1140,6 +1241,24 @@ fn backlog_estimated_toggle_is_focusable_with_shift_d() {
         .unwrap();
 
     assert_eq!(estimated.hotkey_sequences, ["shift+d"]);
+}
+
+#[test]
+fn backlog_saved_filter_dropdown_is_focusable_with_shift_f() {
+    tuicore::init();
+    let (sender, _) = mpsc::channel();
+    let mut view = backlog_tree(&snapshot(), sender, Default::default());
+    let area = Rect::new(0, 0, 100, 16);
+    let mut layout = LayoutCtx::new();
+    view.layout(area, &mut layout);
+
+    let saved_filter = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.path == TreePath::from_keys([ChildKey::new("saved-filter")]))
+        .unwrap();
+
+    assert_eq!(saved_filter.hotkey_sequences, ["shift+f"]);
 }
 
 #[test]
@@ -2366,6 +2485,532 @@ fn rendered_lines(terminal: &Terminal<TestBackend>, area: Rect) -> Vec<String> {
                 .collect()
         })
         .collect()
+}
+
+#[test]
+fn saved_filter_dialog_shows_every_filter_and_marks_unavailable_values() {
+    tuicore::init();
+    let filter = SavedBacklogFilter {
+        id: 1,
+        name: "Release readiness".into(),
+        criteria: BacklogFilterCriteria {
+            users: vec!["Ada".into(), "Former contractor".into()],
+            releases: vec!["4.8".into()],
+            ..BacklogFilterCriteria::default()
+        },
+    };
+    let options = BacklogFilterOptions {
+        issue_types: vec!["Story".into(), "Bug".into()],
+        users: vec!["Ada".into()],
+        statuses: vec!["To Do".into()],
+        epics: vec!["Delivery".into()],
+        labels: vec!["release".into()],
+        releases: vec!["4.9".into()],
+    };
+    let (sender, _) = mpsc::channel();
+    let mut dialog = saved_filter_dialog(
+        std::slice::from_ref(&filter),
+        Some(filter.id),
+        &options,
+        sender,
+        Rc::new(Cell::new(false)),
+        None,
+    );
+    let area = Rect::new(0, 0, 90, 46);
+    dialog.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            dialog.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let lines = rendered_lines(&terminal, area);
+    let text = lines.join("\n");
+    for title in ["Types", "Users", "Statuses", "Epics", "Labels", "Releases"] {
+        assert!(text.contains(title), "missing {title} filter");
+    }
+    let unavailable_y = lines
+        .iter()
+        .position(|line| line.contains("Former contractor · unavailable"))
+        .unwrap() as u16;
+    let unavailable_x = cell_position(
+        &lines[usize::from(unavailable_y)],
+        "Former contractor · unavailable",
+    )
+    .unwrap() as u16;
+    assert_eq!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((unavailable_x, unavailable_y))
+            .unwrap()
+            .fg,
+        tuicore::theme().error_fg()
+    );
+}
+
+#[test]
+fn saved_filter_manager_opens_as_a_right_dock() {
+    tuicore::init();
+    let mut page = BacklogPage::with_snapshot_for_test(snapshot());
+    let mut open = EventCtx::default();
+    page.open_saved_filter_manager_for_test(&mut open);
+    let area = Rect::new(0, 0, 100, 30);
+    let mut layout = LayoutCtx::new();
+    page.view_for_test().layout(area, &mut layout);
+    let selector = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "field"
+                && target
+                    .path
+                    .keys()
+                    .iter()
+                    .any(|key| key.as_str() == "selector")
+        })
+        .unwrap()
+        .clone();
+    assert!(matches!(
+        open.focus_request(),
+        Some(FocusRequest::TargetAt { path, id })
+            if path == &selector.path && id == &selector.id
+    ));
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            page.view_for_test().render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let lines = rendered_lines(&terminal, area);
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("Manage saved filters"))
+    );
+    let selector_x = usize::from(selector.area.x);
+    assert_eq!(selector_x, 61, "selector must sit beside the dock border");
+    assert!(
+        (selector_x.saturating_sub(3)..selector_x).any(|x| {
+            (0..area.height).any(|y| {
+                terminal.backend().buffer().cell((x as u16, y)).unwrap().fg
+                    == tuicore::theme().accent_fg()
+            })
+        }),
+        "focused manager border did not use the accent color"
+    );
+}
+
+#[test]
+fn saved_filter_manager_registers_management_hotkeys() {
+    tuicore::init();
+    let filter = SavedBacklogFilter::new(1, "Filter");
+    let (sender, _) = mpsc::channel();
+    let mut manager = saved_filter_dialog(
+        std::slice::from_ref(&filter),
+        Some(filter.id),
+        &BacklogFilterOptions::default(),
+        sender,
+        Rc::new(Cell::new(false)),
+        None,
+    );
+    let mut layout = LayoutCtx::new();
+    manager.layout(Rect::new(0, 0, 80, 30), &mut layout);
+
+    for (slot, hotkey) in [
+        ("selector", "shift+f"),
+        ("new", "shift+n"),
+        ("delete", "shift+d"),
+        ("issue-types", "shift+t"),
+        ("users", "shift+u"),
+        ("statuses", "shift+s"),
+        ("epics", "shift+e"),
+        ("labels", "shift+l"),
+        ("releases", "shift+a"),
+    ] {
+        let target = layout
+            .focus_targets()
+            .iter()
+            .find(|target| target.path.keys().iter().any(|key| key.as_str() == slot))
+            .unwrap_or_else(|| panic!("missing {slot} control"));
+        assert_eq!(target.hotkey_sequences, [hotkey]);
+    }
+}
+
+#[test]
+fn saved_filter_delete_confirmation_keeps_the_manager_underneath() {
+    tuicore::init();
+    let filter = SavedBacklogFilter::new(1, "Release readiness");
+    let (sender, _) = mpsc::channel();
+    let mut manager = saved_filter_dialog(
+        std::slice::from_ref(&filter),
+        Some(filter.id),
+        &BacklogFilterOptions::default(),
+        sender,
+        Rc::new(Cell::new(false)),
+        Some((filter.id, filter.name.clone())),
+    );
+    let area = Rect::new(0, 0, 80, 30);
+    manager.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            manager.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let lines = rendered_lines(&terminal, area);
+    let text = lines.join("\n");
+    assert!(!text.contains("Manage saved filters"));
+    assert!(text.contains("Delete saved filter?"));
+    assert!(text.matches("Release readiness").count() >= 2);
+    assert!(text.contains("Cancel (c)"));
+    assert!(!text.contains("Keep (k)"));
+    let confirmation_x = lines
+        .iter()
+        .find_map(|line| cell_position(line, "Delete saved filter?"))
+        .unwrap();
+    let manager_x = lines
+        .iter()
+        .filter_map(|line| cell_position(line, "Release readiness"))
+        .max()
+        .unwrap();
+    assert!(manager_x >= 49, "manager started at column {manager_x}");
+    assert!(
+        confirmation_x < 40,
+        "confirmation started at column {confirmation_x}"
+    );
+}
+
+#[test]
+fn saved_filter_selector_popup_is_visible_inside_the_right_dock() {
+    tuicore::init();
+    let filters = [
+        SavedBacklogFilter::new(1, "First filter"),
+        SavedBacklogFilter::new(2, "Second filter"),
+    ];
+    let (sender, _) = mpsc::channel();
+    let mut manager = saved_filter_dialog(
+        &filters,
+        Some(1),
+        &BacklogFilterOptions::default(),
+        sender,
+        Rc::new(Cell::new(false)),
+        None,
+    );
+    let area = Rect::new(0, 0, 100, 30);
+    let mut layout = LayoutCtx::new();
+    manager.layout(area, &mut layout);
+    let selector = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target
+                .path
+                .keys()
+                .iter()
+                .any(|key| key.as_str() == "selector")
+        })
+        .unwrap()
+        .clone();
+    manager.dispatch_event(
+        &EventRoute::new(selector.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::default(),
+    );
+    manager.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            manager.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    assert!(
+        rendered_lines(&terminal, area)
+            .iter()
+            .any(|line| line.contains("Second filter"))
+    );
+}
+
+#[test]
+fn saved_filter_value_popup_is_visible_inside_the_right_dock() {
+    tuicore::init();
+    let filter = SavedBacklogFilter::new(1, "Filter");
+    let options = BacklogFilterOptions {
+        users: vec!["Ada".into(), "Grace".into(), "Linus".into()],
+        ..BacklogFilterOptions::default()
+    };
+    let (sender, _) = mpsc::channel();
+    let mut manager = saved_filter_dialog(
+        std::slice::from_ref(&filter),
+        Some(filter.id),
+        &options,
+        sender,
+        Rc::new(Cell::new(false)),
+        None,
+    );
+    let area = Rect::new(0, 0, 100, 30);
+    let mut layout = LayoutCtx::new();
+    manager.layout(area, &mut layout);
+    let users = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "data-view"
+                && target.path.keys().iter().any(|key| key.as_str() == "users")
+        })
+        .unwrap()
+        .clone();
+    let outcome = manager.dispatch_event(
+        &EventRoute::new(users.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('+'))),
+        &mut EventCtx::default(),
+    );
+    assert_eq!(outcome, EventOutcome::Handled);
+    manager.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            manager.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let lines = rendered_lines(&terminal, area);
+    let text = lines.join("\n");
+    assert!(text.contains("Ada"));
+    assert!(text.contains("Grace"));
+    assert!(text.contains("Linus"));
+    let option_rows = ["Ada", "Grace", "Linus"]
+        .map(|option| lines.iter().position(|line| line.contains(option)).unwrap());
+    assert_eq!(option_rows[1], option_rows[0] + 1);
+    assert_eq!(option_rows[2], option_rows[1] + 1);
+}
+
+#[test]
+fn new_saved_filter_is_an_empty_draft_and_focuses_its_name() {
+    tuicore::init();
+    let mut page = BacklogPage::with_snapshot_for_test(snapshot());
+    page.open_saved_filter_manager_for_test(&mut EventCtx::default());
+    let mut create_ctx = EventCtx::default();
+
+    page.create_saved_filter_for_test(&mut create_ctx);
+
+    assert_eq!(page.draft_saved_filter_for_test().unwrap().name, "");
+    let Some(FocusRequest::TargetAt { path, id }) = create_ctx.focus_request() else {
+        panic!("new filter name did not receive a targeted focus request");
+    };
+    assert_eq!(id.as_str(), "input");
+    let mut layout = LayoutCtx::new();
+    page.view_for_test()
+        .layout(Rect::new(0, 0, 100, 30), &mut layout);
+    let name = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "input"
+                && target.path.keys().iter().any(|key| key.as_str() == "name")
+        })
+        .unwrap();
+    assert_eq!(path, &name.path);
+}
+
+#[test]
+fn naming_a_saved_filter_restores_name_focus_after_rebuild() {
+    tuicore::init();
+    let mut page = BacklogPage::with_snapshot_for_test(snapshot());
+    page.open_saved_filter_manager_for_test(&mut EventCtx::default());
+    page.create_saved_filter_for_test(&mut EventCtx::default());
+    let id = page.draft_saved_filter_for_test().unwrap().id;
+    let mut rename = EventCtx::default();
+
+    page.rename_saved_filter_for_test(id, "Release readiness", &mut rename);
+
+    let Some(FocusRequest::TargetAt { path, id }) = rename.focus_request() else {
+        panic!("saved filter name did not regain focus after its dialog rebuilt");
+    };
+    assert_eq!(id.as_str(), "input");
+    let mut layout = LayoutCtx::new();
+    page.view_for_test()
+        .layout(Rect::new(0, 0, 100, 30), &mut layout);
+    let name = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "input"
+                && target.path.keys().iter().any(|key| key.as_str() == "name")
+        })
+        .unwrap();
+    assert_eq!(path, &name.path);
+}
+
+#[test]
+fn new_saved_filter_name_starts_in_insert_mode() {
+    tuicore::init();
+    let filter = SavedBacklogFilter::new(1, "");
+    let (sender, receiver) = mpsc::channel();
+    let mut manager = saved_filter_dialog(
+        std::slice::from_ref(&filter),
+        Some(filter.id),
+        &BacklogFilterOptions::default(),
+        sender,
+        Rc::new(Cell::new(false)),
+        None,
+    );
+    let mut layout = LayoutCtx::new();
+    manager.layout(Rect::new(0, 0, 80, 30), &mut layout);
+    let name = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "input"
+                && target.path.keys().iter().any(|key| key.as_str() == "name")
+        })
+        .unwrap()
+        .clone();
+    manager.dispatch_focus(
+        &name,
+        true,
+        &mut FocusCtx::new(AnimationSettings {
+            enabled: false,
+            ..AnimationSettings::default()
+        }),
+    );
+    let area = Rect::new(0, 0, 80, 30);
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            manager.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    assert_eq!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((name.area.x.saturating_sub(1), name.area.y.saturating_sub(1)))
+            .unwrap()
+            .fg,
+        tuicore::theme().accent_fg()
+    );
+    manager.dispatch_event(
+        &EventRoute::new(name.path.clone()),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('x'))),
+        &mut EventCtx::default(),
+    );
+    manager.dispatch_event(
+        &EventRoute::new(name.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Enter)),
+        &mut EventCtx::default(),
+    );
+
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(SavedFilterManagerEvent::Rename { id: 1, name }) if name == "x"
+    ));
+}
+
+#[test]
+fn saved_filter_value_lists_remove_the_highlighted_value_with_minus() {
+    tuicore::init();
+    let filter = SavedBacklogFilter {
+        id: 1,
+        name: "Release readiness".into(),
+        criteria: BacklogFilterCriteria {
+            users: vec!["Ada".into(), "Grace".into()],
+            ..BacklogFilterCriteria::default()
+        },
+    };
+    let options = BacklogFilterOptions {
+        users: vec!["Ada".into(), "Grace".into()],
+        ..BacklogFilterOptions::default()
+    };
+    let (sender, receiver) = mpsc::channel();
+    let mut dialog = saved_filter_dialog(
+        std::slice::from_ref(&filter),
+        Some(filter.id),
+        &options,
+        sender,
+        Rc::new(Cell::new(false)),
+        None,
+    );
+    let area = Rect::new(0, 0, 90, 46);
+    let mut layout = LayoutCtx::new();
+    dialog.layout(area, &mut layout);
+    let users = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.id.as_str() == "data-view"
+                && target.path.keys().iter().any(|key| key.as_str() == "users")
+        })
+        .unwrap()
+        .clone();
+
+    dialog.dispatch_event(
+        &EventRoute::new(users.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('-'))),
+        &mut EventCtx::default(),
+    );
+
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(SavedFilterManagerEvent::SetValues {
+            id: 1,
+            field: SavedFilterField::Users,
+            values,
+        }) if values == ["Grace"]
+    ));
+}
+
+#[test]
+fn saved_filter_is_selectable_in_the_backlog_toolbar_and_applies_locally() {
+    tuicore::init();
+    let mut backlog_snapshot = snapshot();
+    backlog_snapshot.work_items[0].assignee = "Bob".into();
+    backlog_snapshot
+        .work_items
+        .push(work_item("FIN-9", "Ada backlog work"));
+    let filter = SavedBacklogFilter {
+        id: 1,
+        name: "Ada only".into(),
+        criteria: BacklogFilterCriteria {
+            users: vec!["Ada".into(), "Unavailable user".into()],
+            ..BacklogFilterCriteria::default()
+        },
+    };
+    let (sender, _) = mpsc::channel();
+    let mut tree = backlog_tree(&backlog_snapshot, sender, Default::default());
+    tree.set_saved_filters(std::slice::from_ref(&filter));
+    tree.apply_saved_filter(&filter);
+    let area = Rect::new(0, 0, 180, 20);
+    tree.layout(area, &mut LayoutCtx::new());
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            tree.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    let text = rendered_lines(&terminal, area).join("\n");
+    assert!(text.contains("Ada only"));
+    assert!(text.contains("Ada backlog work"));
+    assert!(!text.contains("Plan next sprint"));
 }
 
 #[test]
