@@ -802,6 +802,13 @@ impl TicketEditor {
         self.view.base().base().base().is_active()
     }
 
+    pub(super) fn has_active_dialog(&self) -> bool {
+        self.view.is_active()
+            || self.view.base().is_active()
+            || self.view.base().base().is_active()
+            || self.view.base().base().base().is_active()
+    }
+
     fn drain_description_actions(&mut self, ctx: &mut EventCtx<()>) {
         let actions = self
             .description_actions

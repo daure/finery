@@ -483,8 +483,8 @@ pub(super) fn should_poll(
     loading || ranking || status_working || retry_pending
 }
 
-pub(crate) fn page(service: AppService) -> BacklogPage {
-    BacklogPage::new(service)
+pub(crate) fn page(service: AppService, shell_dialog_active: Rc<Cell<bool>>) -> BacklogPage {
+    BacklogPage::new_with_shell_dialog(service, shell_dialog_active)
 }
 
 pub(crate) struct BacklogPage {
@@ -540,11 +540,17 @@ pub(crate) struct BacklogPage {
     description_dialog_comments: Option<SharedTicketComments>,
     comment_load_generation: u64,
     active_comment_load: Option<(u64, String)>,
+    shell_dialog_active: Rc<Cell<bool>>,
     area: Rect,
 }
 
 impl BacklogPage {
+    #[cfg(test)]
     fn new(service: AppService) -> Self {
+        Self::new_with_shell_dialog(service, Rc::new(Cell::new(false)))
+    }
+
+    fn new_with_shell_dialog(service: AppService, shell_dialog_active: Rc<Cell<bool>>) -> Self {
         let (sender, receiver) = mpsc::channel();
         let (section_sender, section_receiver) = mpsc::channel();
         let (saved_filter_sender, saved_filter_receiver) = mpsc::channel();
@@ -624,6 +630,7 @@ impl BacklogPage {
             description_dialog_comments: None,
             comment_load_generation: 0,
             active_comment_load: None,
+            shell_dialog_active,
             area: Rect::default(),
         }
     }
@@ -631,6 +638,17 @@ impl BacklogPage {
     #[cfg(test)]
     pub(super) fn with_snapshot_for_test(snapshot: BacklogSnapshot) -> Self {
         Self::with_snapshot_and_service_for_test(snapshot, AppService::for_tests())
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_snapshot_and_shell_dialog_for_test(
+        snapshot: BacklogSnapshot,
+        shell_dialog_active: Rc<Cell<bool>>,
+    ) -> Self {
+        let mut page = Self::new_with_shell_dialog(AppService::for_tests(), shell_dialog_active);
+        page.snapshot = Some(snapshot);
+        page.restore_snapshot();
+        page
     }
 
     #[cfg(test)]
@@ -2721,7 +2739,7 @@ impl BacklogPage {
         )
         .on_close(move |_| close_requested.set(true));
         self.view.replace_layer(Box::new(tabs), ctx);
-        self.view.set_extend_to_overlay_bottom(false);
+        self.view.set_extend_to_overlay_bottom(true);
         self.dock_description_dialog(self.area.width);
         self.view.set_active_with_context(true, ctx);
     }
@@ -4933,6 +4951,8 @@ impl TuiNode for BacklogPage {
     }
 
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        self.shell_dialog_active
+            .set(self.view.is_active() || self.view.base().is_active());
         if self.shows_initial_loading() {
             self.loading_view.render(frame, area, ctx);
         } else {

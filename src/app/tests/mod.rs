@@ -2,7 +2,7 @@ mod saved_filter_keys;
 
 use std::time::Duration;
 
-use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Modifier};
 use tuicore::{
     AnimationSettings, ChildKey, EventCtx, FocusManager, FocusRequest, Key, KeyEvent, KeyModifiers,
     Propagation, RenderCtx, TreePath, TuiEvent, TuiNode,
@@ -47,6 +47,65 @@ fn background_notifications_render_on_the_next_tick() {
         .collect();
 
     assert!(text.contains("Refresh complete"));
+}
+
+#[test]
+fn composer_dot_menu_dims_the_status_bar() {
+    tuicore::init();
+    let mut app = root(AppService::for_tests(), ComposerState::demo().change_sets);
+    let area = Rect::new(0, 0, 96, 30);
+    let status_cell = (area.right() - 1, area.bottom() - 1);
+    app.selected_page.set(Some(1));
+    let mut layout = tuicore::LayoutCtx::new();
+    layout.with_overlay_bounds(area, |ctx| app.layout(area, ctx));
+    let list = layout
+        .focus_targets()
+        .iter()
+        .find(|target| target.id == tuicore::FocusId::new("data-view"))
+        .unwrap()
+        .clone();
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            app.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+    let status_background = terminal.backend().buffer()[status_cell].bg;
+
+    app.dispatch_event(
+        &tuicore::EventRoute::new(list.path),
+        &TuiEvent::Key(KeyEvent::from(Key::Char('.'))),
+        &mut EventCtx::default(),
+    );
+    app.tick(
+        Duration::from_secs(1),
+        AnimationSettings {
+            enabled: false,
+            ..AnimationSettings::default()
+        },
+    );
+    let mut layout = tuicore::LayoutCtx::new();
+    layout.with_overlay_bounds(area, |ctx| app.layout(area, ctx));
+    terminal
+        .draw(|frame| {
+            let mut render = RenderCtx::new();
+            app.render(frame, area, &mut render);
+            render.flush(frame);
+        })
+        .unwrap();
+
+    assert!(app.page_dialog_active.get(), "dot menu did not open");
+    assert_ne!(
+        terminal.backend().buffer()[status_cell].bg,
+        status_background
+    );
+    assert!(
+        terminal.backend().buffer()[status_cell]
+            .modifier
+            .contains(Modifier::DIM)
+    );
 }
 
 #[test]

@@ -578,6 +578,10 @@ impl TuiNode for ChangeSetContent {
 }
 
 impl ChangeSetListView {
+    pub(super) fn has_active_dialog(&self) -> bool {
+        self.view.is_active()
+    }
+
     pub(super) fn new(
         state: Rc<RefCell<ComposerState>>,
         service: AppService,

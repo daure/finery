@@ -1,11 +1,16 @@
 use std::{cell::Cell, rc::Rc, time::Duration};
 
-use ratatui::{Frame, layout::Rect};
+use ratatui::{
+    Frame,
+    layout::Rect,
+    style::{Modifier, Style},
+};
 use tuicore::{
     AnimationSettings, ChildKey, Dialog, DialogAction, DialogBackdrop, DialogHost, DialogLayer,
     EventCtx, EventOutcome, EventRoute, Flex, FlexItem, FocusCtx, FocusId, FocusTarget, Key,
     KeyModifiers, KeySpec, LayoutCtx, LayoutProposal, LayoutResult, LayoutSizeHint, LifecycleCtx,
     RenderCtx, Tab, Tabs, TabsVariant, TickResult, ToastRack, TreePath, TuiEvent, TuiNode,
+    fade_buffer,
 };
 
 use crate::{
@@ -135,6 +140,7 @@ pub(crate) struct App {
     reset_composer_focus: Rc<Cell<bool>>,
     open_settings: Rc<Cell<bool>>,
     close_dialog: Rc<Cell<bool>>,
+    page_dialog_active: Rc<Cell<bool>>,
     service: AppService,
     service_notifications: ToastRack,
     text_entry_paths: TextEntryPaths,
@@ -146,11 +152,20 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
     let close_dialog = Rc::new(Cell::new(false));
     let selected_page = Rc::new(Cell::new(None));
     let reset_composer_focus = Rc::new(Cell::new(false));
+    let page_dialog_active = Rc::new(Cell::new(false));
     let pages = Tabs::new(vec![
-        Tab::new("Backlog", pages::backlog::page(service.clone())),
+        Tab::new(
+            "Backlog",
+            pages::backlog::page(service.clone(), Rc::clone(&page_dialog_active)),
+        ),
         Tab::new(
             "Composer",
-            pages::composer::page(change_sets, service.clone(), settings.clone()),
+            pages::composer::page(
+                change_sets,
+                service.clone(),
+                settings.clone(),
+                Rc::clone(&page_dialog_active),
+            ),
         ),
     ])
     .variant(TabsVariant::OneRow);
@@ -209,6 +224,7 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
         reset_composer_focus,
         open_settings,
         close_dialog,
+        page_dialog_active,
         service,
         service_notifications: ToastRack::new(),
         text_entry_paths: TextEntryPaths::default(),
@@ -216,6 +232,13 @@ pub(crate) fn root(service: AppService, change_sets: Vec<ChangeSet>) -> App {
 }
 
 impl App {
+    fn global_dialog_active(&self) -> bool {
+        self.view.is_active()
+            || self.view.base().is_active()
+            || self.view.base().base().is_active()
+            || self.view.base().base().base().is_active()
+    }
+
     fn apply_dialog_signals(&mut self, ctx: &mut EventCtx<()>) {
         if ctx.clipboard_request().is_some() {
             self.service.cancel_pending_clipboard();
@@ -392,6 +415,13 @@ impl TuiNode for App {
 
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
         self.view.render(frame, area, ctx);
+        if self.page_dialog_active.get() && !self.global_dialog_active() && area.height > 0 {
+            let status_area = Rect::new(area.x, area.bottom() - 1, area.width, 1);
+            fade_buffer(frame, status_area, 0.55);
+            frame
+                .buffer_mut()
+                .set_style(status_area, Style::default().add_modifier(Modifier::DIM));
+        }
         self.service_notifications.render(frame, area);
     }
 

@@ -2622,12 +2622,16 @@ fn saved_filter_dialog_shows_every_filter_and_marks_unavailable_values() {
 #[test]
 fn saved_filter_manager_opens_as_a_right_dock() {
     tuicore::init();
-    let mut page = BacklogPage::with_snapshot_for_test(snapshot());
+    let shell_dialog_active = Rc::new(Cell::new(false));
+    let mut page = BacklogPage::with_snapshot_and_shell_dialog_for_test(
+        snapshot(),
+        Rc::clone(&shell_dialog_active),
+    );
     let mut open = EventCtx::default();
     page.open_saved_filter_manager_for_test(&mut open);
     let area = Rect::new(0, 0, 100, 30);
     let mut layout = LayoutCtx::new();
-    page.view_for_test().layout(area, &mut layout);
+    page.layout(area, &mut layout);
     let selector = layout
         .focus_targets()
         .iter()
@@ -2650,11 +2654,12 @@ fn saved_filter_manager_opens_as_a_right_dock() {
     terminal
         .draw(|frame| {
             let mut render = RenderCtx::new();
-            page.view_for_test().render(frame, area, &mut render);
+            page.render(frame, area, &mut render);
             render.flush(frame);
         })
         .unwrap();
 
+    assert!(shell_dialog_active.get());
     let lines = rendered_lines(&terminal, area);
     assert!(
         !lines
@@ -3930,7 +3935,8 @@ fn enter_opens_a_focused_ticket_detail_dialog() {
         .base_mut()
         .base_mut()
         .highlight("ticket:FIN-8");
-    let area = Rect::new(0, 0, 120, 30);
+    let shell = Rect::new(0, 0, 120, 30);
+    let area = Rect::new(0, 0, shell.width, shell.height - 1);
     page.layout(area, &mut LayoutCtx::new());
     let mut event = EventCtx::new(AnimationSettings::default());
 
@@ -3949,7 +3955,7 @@ fn enter_opens_a_focused_ticket_detail_dialog() {
         matches!(event.focus_request(), Some(FocusRequest::Path(path)) if path == &TreePath::from_keys([ChildKey::second()]))
     );
     let mut layout = LayoutCtx::new();
-    layout.with_overlay_bounds(area, |ctx| page.layout(area, ctx));
+    layout.with_overlay_bounds(shell, |ctx| page.layout(area, ctx));
     assert!(
         layout
             .focus_targets()
@@ -3963,8 +3969,9 @@ fn enter_opens_a_focused_ticket_detail_dialog() {
         .expect("description dialog should be visible");
     assert_eq!(description.area.width, 90);
     assert_eq!(description.area.height, 24);
+    assert_eq!(description.area.bottom(), shell.bottom());
     let dialog_area = description.area;
-    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(shell.width, shell.height)).unwrap();
     terminal
         .draw(|frame| {
             let mut render = RenderCtx::new();
@@ -3972,7 +3979,7 @@ fn enter_opens_a_focused_ticket_detail_dialog() {
             render.flush(frame);
         })
         .unwrap();
-    let lines = rendered_lines(&terminal, area);
+    let lines = rendered_lines(&terminal, shell);
     let text = lines.concat();
     assert!(text.contains("Scrollable description"));
     assert!(text.contains("WRAPPED-END"));
@@ -3991,17 +3998,20 @@ fn enter_opens_a_focused_ticket_detail_dialog() {
         }
     }
 
-    let mobile = Rect::new(0, 0, 60, 30);
+    let mobile_shell = Rect::new(0, 0, 60, 30);
+    let mobile = Rect::new(0, 0, mobile_shell.width, mobile_shell.height - 1);
     let mut layout = LayoutCtx::new();
-    layout.with_overlay_bounds(mobile, |ctx| page.layout(mobile, ctx));
+    layout.with_overlay_bounds(mobile_shell, |ctx| page.layout(mobile, ctx));
     let description = layout
         .overlays()
         .iter()
         .find(|entry| entry.layer == tuicore::OverlayLayer::Modal)
         .expect("description dialog should stay visible after resize");
     assert_eq!(description.area.width, 60);
+    assert_eq!(description.area.bottom(), mobile_shell.bottom());
     let mobile_dialog_area = description.area;
-    let mut terminal = Terminal::new(TestBackend::new(mobile.width, mobile.height)).unwrap();
+    let mut terminal =
+        Terminal::new(TestBackend::new(mobile_shell.width, mobile_shell.height)).unwrap();
     terminal
         .draw(|frame| {
             let mut render = RenderCtx::new();
@@ -4010,7 +4020,7 @@ fn enter_opens_a_focused_ticket_detail_dialog() {
         })
         .unwrap();
     assert!(
-        rendered_lines(&terminal, mobile)
+        rendered_lines(&terminal, mobile_shell)
             .concat()
             .contains("WRAPPED-END")
     );
@@ -4041,7 +4051,7 @@ fn enter_opens_a_focused_ticket_detail_dialog() {
         &mut event,
     );
     let mut layout = LayoutCtx::new();
-    layout.with_overlay_bounds(mobile, |ctx| page.layout(mobile, ctx));
+    layout.with_overlay_bounds(mobile_shell, |ctx| page.layout(mobile, ctx));
     terminal
         .draw(|frame| {
             let mut render = RenderCtx::new();
@@ -4050,7 +4060,7 @@ fn enter_opens_a_focused_ticket_detail_dialog() {
         })
         .unwrap();
     assert!(
-        rendered_lines(&terminal, mobile)
+        rendered_lines(&terminal, mobile_shell)
             .concat()
             .contains("First comment")
     );

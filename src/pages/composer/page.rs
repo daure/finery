@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::Rc,
     sync::{Arc, RwLock},
     time::Duration,
@@ -24,8 +24,9 @@ pub(crate) fn page(
     change_sets: Vec<ChangeSet>,
     service: AppService,
     settings: Arc<RwLock<AppSettings>>,
+    shell_dialog_active: Rc<Cell<bool>>,
 ) -> ComposerPage {
-    ComposerPage::new(change_sets, service, settings)
+    ComposerPage::new_with_shell_dialog(change_sets, service, settings, shell_dialog_active)
 }
 
 pub(crate) struct ComposerPage {
@@ -37,13 +38,24 @@ pub(crate) struct ComposerPage {
     catalog_revision: i64,
     poll_elapsed: Duration,
     external_reload_needed: bool,
+    shell_dialog_active: Rc<Cell<bool>>,
 }
 
 impl ComposerPage {
+    #[cfg(test)]
     pub(super) fn new(
         change_sets: Vec<ChangeSet>,
         service: AppService,
         settings: Arc<RwLock<AppSettings>>,
+    ) -> Self {
+        Self::new_with_shell_dialog(change_sets, service, settings, Rc::new(Cell::new(false)))
+    }
+
+    fn new_with_shell_dialog(
+        change_sets: Vec<ChangeSet>,
+        service: AppService,
+        settings: Arc<RwLock<AppSettings>>,
+        shell_dialog_active: Rc<Cell<bool>>,
     ) -> Self {
         let composer_state = ComposerState::from_change_sets(change_sets);
         let state = Rc::new(RefCell::new(composer_state));
@@ -60,6 +72,7 @@ impl ComposerPage {
             service,
             poll_elapsed: Duration::ZERO,
             external_reload_needed: false,
+            shell_dialog_active,
         }
     }
 
@@ -430,6 +443,12 @@ impl TuiNode for ComposerPage {
     }
 
     fn render<'a>(&'a self, frame: &mut Frame, area: Rect, ctx: &mut RenderCtx<'a>) {
+        let dialog_active = if self.in_change_set() {
+            self.editor.has_active_dialog()
+        } else {
+            self.change_sets.has_active_dialog()
+        };
+        self.shell_dialog_active.set(dialog_active);
         self.active().render(frame, area, ctx);
     }
 
