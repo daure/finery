@@ -1202,6 +1202,9 @@ impl BacklogTree {
     }
 
     fn open_highlighted_ticket(&self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        if self.control.data_view().is_searching() || self.control.is_reordering() {
+            return false;
+        }
         let custom = matches!(event, TuiEvent::Key(key) if self.open_command_key.matches(*key));
         if !custom
             && !matches!(event, TuiEvent::Key(key) if KeySpec::key_with_modifiers(Key::Enter, KeyModifiers::CONTROL).matches(*key))

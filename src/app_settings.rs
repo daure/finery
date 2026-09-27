@@ -468,7 +468,7 @@ impl Default for AppSettings {
             speed_reader: SpeedReaderSettings::default(),
             recent_tickets_limit: 15,
             open_command: String::new(),
-            open_command_key: ComposerKeyBinding::parse("ctrl+;".into(), OPEN_COMMAND_KEY_SETTING)
+            open_command_key: ComposerKeyBinding::parse("n".into(), OPEN_COMMAND_KEY_SETTING)
                 .expect("built-in open command key must be valid"),
             open_command_enum: Vec::new(),
             composer_keys: ComposerKeyBindings::default(),

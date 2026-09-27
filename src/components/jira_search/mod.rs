@@ -212,6 +212,9 @@ impl JiraSearchMenu {
     }
 
     fn open_highlighted_ticket(&mut self, event: &TuiEvent, ctx: &mut EventCtx<()>) -> bool {
+        if self.input.insert_mode() {
+            return false;
+        }
         let ticket = self.list.data_view().highlighted_id().and_then(|key| {
             self.list
                 .items()

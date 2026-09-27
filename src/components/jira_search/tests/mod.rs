@@ -68,6 +68,27 @@ fn open_command_closes_search_only_when_a_command_is_triggered() {
         status_changed_at: None,
     };
     menu.list.set_rows(vec![super::jira_search_row(
+        ticket.clone(),
+        true,
+        3.0,
+        String::new(),
+        false,
+    )]);
+    menu.list.set_highlighted_id(&"FIN-42".into());
+    menu.input.set_insert_mode(true);
+    menu.event(
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('n'),
+            modifiers: KeyModifiers::NONE,
+        }),
+        &mut EventCtx::default(),
+    );
+    assert_eq!(menu.input.current_value(), "n");
+    probe.assert_not_opened();
+    assert!(menu.take_events().is_empty());
+
+    menu.input.set_value("");
+    menu.list.set_rows(vec![super::jira_search_row(
         ticket,
         true,
         3.0,
@@ -75,12 +96,13 @@ fn open_command_closes_search_only_when_a_command_is_triggered() {
         false,
     )]);
     menu.list.set_highlighted_id(&"FIN-42".into());
+    menu.input.set_insert_mode(false);
     let mut ctx = EventCtx::default();
     menu.dispatch_event(
         &EventRoute::new(TreePath::default()),
         &TuiEvent::Key(KeyEvent {
-            code: Key::Char(';'),
-            modifiers: KeyModifiers::CONTROL,
+            code: Key::Char('n'),
+            modifiers: KeyModifiers::NONE,
         }),
         &mut ctx,
     );
@@ -100,8 +122,8 @@ fn open_command_closes_search_only_when_a_command_is_triggered() {
         .clear();
     menu.event(
         &TuiEvent::Key(KeyEvent {
-            code: Key::Char(';'),
-            modifiers: KeyModifiers::CONTROL,
+            code: Key::Char('n'),
+            modifiers: KeyModifiers::NONE,
         }),
         &mut EventCtx::default(),
     );

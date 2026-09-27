@@ -2051,6 +2051,7 @@ impl TicketEditor {
             || self.view.base().is_active()
             || self.view.base().base().is_active()
             || self.view.base().base().base().is_active()
+            || !self.ticket_list_is_focused()
         {
             return false;
         }

@@ -10598,7 +10598,7 @@ dependencies = [
 
 [[package]]
 name = "tuicore"
-version = "0.40.13"
+version = "0.40.14"
 dependencies = [
  "ansi-to-tui",
  "base64 0.22.1",

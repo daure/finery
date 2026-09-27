@@ -75,12 +75,13 @@ pub(super) fn title(
         Span::styled(group.label.clone(), text.add_modifier(Modifier::BOLD)),
         separator(),
     ];
-    if let (Some(start), Some(end)) = (forecast.start, forecast.end) {
+    if let Some(end) = forecast.end {
+        heading.push(match forecast.start {
+            Some(start) => Span::styled(start.format("%-d %b").to_string(), text),
+            None => Span::styled("(no start date)", muted),
+        });
         heading.extend([
-            Span::styled(
-                format!("{} – {}", start.format("%-d %b"), end.format("%-d %b")),
-                text,
-            ),
+            Span::styled(format!(" – {}", end.format("%-d %b")), text),
             separator(),
         ]);
         if forecast.status == ReleaseStatus::Delivered {
@@ -98,28 +99,28 @@ pub(super) fn title(
                 text,
             ));
         } else if let Some((needed, available)) = forecast.sprints {
-            let (work_label, time_label) = if today < start {
+            let (work_label, time_label) = if forecast.start.is_some_and(|start| today < start) {
                 ("planned", "available")
             } else {
                 ("todo", "left")
             };
+            let assumption = if forecast.start.is_none() { "~" } else { "" };
             heading.push(Span::styled(
                 format!("󰑮 {} {work_label} ", points_label(needed)),
                 text,
             ));
             heading.push(Span::styled(icon, status_style));
             heading.push(Span::styled(
-                format!(" {} {time_label}", points_label(available)),
+                format!(" {assumption}{} {time_label}", points_label(available)),
                 text,
             ));
         } else {
             heading.push(Span::styled(format!("{icon} {status}"), status_style));
         }
     } else {
-        let warning = match (forecast.start, forecast.end) {
-            (None, Some(_)) => " Start date missing",
-            (Some(_), None) => " End date missing",
-            _ => " Start and end date missing",
+        let warning = match forecast.start {
+            Some(_) => " End date missing",
+            None => " Start and end date missing",
         };
         heading.push(Span::styled(
             warning,

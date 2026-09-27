@@ -73,17 +73,15 @@ pub(crate) fn forecast(
             forecast.completed_points += points;
         }
     }
-    if forecast.start.is_some_and(|start| today >= start)
-        && forecast.end.is_some_and(|end| today <= end)
-    {
+    let start = forecast.start.unwrap_or(today);
+    if today >= start && forecast.end.is_some_and(|end| today <= end) {
         forecast.status = ReleaseStatus::InProgress;
     }
-    if let (Some(start), Some(end), Some(runway), Some(sprint_days)) = (
-        forecast.start,
+    if let (Some(end), Some(runway), Some(sprint_days)) = (
         forecast.end,
         snapshot.runway.as_ref(),
         sprint_workdays(snapshot),
-    ) && start <= end
+    ) && (forecast.start.is_none() || start <= end)
         && forecast.points_known
         && runway.capacity.is_finite()
         && runway.capacity > 0.0

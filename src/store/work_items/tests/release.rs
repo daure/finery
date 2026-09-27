@@ -105,8 +105,9 @@ fn active_release_uses_outstanding_points_and_remaining_workdays() {
 #[test]
 fn unavailable_inputs_never_produce_a_capacity_forecast() {
     let mut snapshot = planned(10.0);
-    snapshot.work_items[0].releases[0].start_date = None;
+    snapshot.work_items[0].releases[0].end_date = None;
     assert!(evaluate(&snapshot, "2026-09-12", false).sprints.is_none());
+    snapshot.work_items[0].releases[0].end_date = Some(date("2026-10-02"));
     snapshot.work_items[0].releases[0].start_date = Some(date("2026-10-03"));
     assert_eq!(
         evaluate(&snapshot, "2026-09-12", false).status,

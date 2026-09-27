@@ -1682,13 +1682,24 @@ fn open_command_uses_the_selected_composer_ticket_without_committing() {
     let ticket = page.selected_changes();
     let key = ticket.key;
     let title = ticket.title;
+    let description = focus(&mut page, "textarea");
+    page.dispatch_event(
+        &EventRoute::new(description.path),
+        &TuiEvent::Key(KeyEvent {
+            code: Key::Char('n'),
+            modifiers: KeyModifiers::NONE,
+        }),
+        &mut EventCtx::default(),
+    );
+    probe.assert_not_opened();
+
     let tickets = focus(&mut page, "data-view");
     let mut ctx = EventCtx::default();
     page.dispatch_event(
         &EventRoute::new(tickets.path),
         &TuiEvent::Key(KeyEvent {
-            code: Key::Char(';'),
-            modifiers: KeyModifiers::CONTROL,
+            code: Key::Char('n'),
+            modifiers: KeyModifiers::NONE,
         }),
         &mut ctx,
     );

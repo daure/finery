@@ -3855,8 +3855,8 @@ fn open_command_targets_the_highlighted_backlog_ticket() {
     tree.dispatch_event(
         &EventRoute::new(TreePath::from_keys([ChildKey::new("data")])),
         &TuiEvent::Key(KeyEvent {
-            code: Key::Char(';'),
-            modifiers: KeyModifiers::CONTROL,
+            code: Key::Char('n'),
+            modifiers: KeyModifiers::NONE,
         }),
         &mut ctx,
     );
@@ -4550,7 +4550,7 @@ fn quick_menu_right_aligns_action_hotkeys() {
         ("Set epic (", "e"),
         ("Set release (v1.4)", "r"),
         ("View description", "Enter"),
-        ("Open command", "⌃;"),
+        ("Open command", "n"),
         ("Move to top", "t"),
         ("Move to bottom", "b"),
     ] {

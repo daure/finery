@@ -157,7 +157,6 @@ fn release_header_renders_dates_forecast_and_ordered_statistics() {
     );
 
     for (start, end, warning) in [
-        (None, parse_date("2026-10-02"), "Start date missing"),
         (parse_date("2026-09-14"), None, "End date missing"),
         (None, None, "Start and end date missing"),
     ] {
@@ -173,6 +172,45 @@ fn release_header_renders_dates_forecast_and_ordered_statistics() {
         assert_eq!(
             text.lines[1].to_string(),
             "󰄰 0/1 est • 1 open • ~3 pts remaining"
+        );
+    }
+}
+
+#[test]
+fn missing_release_start_shows_muted_placeholder_and_estimates_capacity_from_today() {
+    tuicore::init();
+    let mut snapshot = release_snapshot();
+    snapshot.work_items[0].releases[0].start_date = None;
+    let mut done = snapshot.work_items[0].clone();
+    done.key = "FIN-2".into();
+    done.story_points = Some(10.0);
+    done.done = true;
+    snapshot.work_items.push(done);
+    let group = WorkItemGroup {
+        label: "v1.0".into(),
+        items: snapshot.work_items.iter().collect(),
+        root_count: 2,
+    };
+    for (today, summary) in [
+        ("2026-09-12", "󰑮 3 todo 󰸁 ~1.5 left"),
+        ("2026-09-28", "󰑮 3 todo 󰸁 ~0.5 left"),
+        ("2026-10-02", "󰑮 3 todo 󰸁 ~0.1 left"),
+        ("2026-10-03", "󰑮 3 unfinished 󰸁 1d overdue"),
+    ] {
+        let text = title(&snapshot, &group, parse_date(today).unwrap(), false);
+        assert_eq!(
+            text.lines[0].to_string(),
+            format!(" v1.0 • (no start date) – 2 Oct • {summary}")
+        );
+        let placeholder = text.lines[0]
+            .spans
+            .iter()
+            .find(|span| span.content == "(no start date)")
+            .unwrap();
+        assert_eq!(placeholder.style.fg, Some(tuicore::theme().muted_fg()));
+        assert_eq!(
+            text.lines[1].to_string(),
+            "✓ 2/2 est • 1 open • 30 pts remaining"
         );
     }
 }
