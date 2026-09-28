@@ -31,6 +31,7 @@ enum SettingChange {
     JiraCompanyManagedUrls(bool),
     JiraStoryPointsFieldId(String),
     BacklogUseJiraVelocity(bool),
+    EstimateReleaseDates(bool),
     BacklogJiraVelocitySprints(String),
     BacklogFixedSprintCapacity(String),
     BacklogUseAverageTicketSize(bool),
@@ -63,6 +64,7 @@ impl SettingsDialog {
         let company_managed_urls_changes = Rc::clone(&changes);
         let story_points_changes = Rc::clone(&changes);
         let velocity_changes = Rc::clone(&changes);
+        let release_date_changes = Rc::clone(&changes);
         let velocity_sprints_changes = Rc::clone(&changes);
         let sprint_capacity_changes = Rc::clone(&changes);
         let average_ticket_size_changes = Rc::clone(&changes);
@@ -270,6 +272,17 @@ impl SettingsDialog {
                 FlexItem::fixed(7),
             )
             .child(
+                "backlog-estimate-release-dates",
+                Toggle::new("Estimate missing release dates")
+                    .checked(values.estimate_release_dates)
+                    .on_change(move |value| {
+                        release_date_changes
+                            .borrow_mut()
+                            .push(SettingChange::EstimateReleaseDates(value));
+                    }),
+                FlexItem::fixed(1),
+            )
+            .child(
                 "speed-reader-wpm",
                 TextInput::new()
                     .value(values.speed_reader.wpm.to_string())
@@ -386,6 +399,10 @@ impl SettingsDialog {
                 }
                 SettingChange::BacklogUseJiraVelocity(value) => {
                     settings.backlog_runway.use_jira_velocity = value;
+                    changed = true;
+                }
+                SettingChange::EstimateReleaseDates(value) => {
+                    settings.estimate_release_dates = value;
                     changed = true;
                 }
                 SettingChange::BacklogJiraVelocitySprints(value) => {

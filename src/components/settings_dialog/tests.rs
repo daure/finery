@@ -89,6 +89,44 @@ fn backlog_runway_changes_apply_to_live_settings() {
 }
 
 #[test]
+fn release_estimation_toggle_saves_settings_and_requests_refresh() {
+    use tuicore::{
+        AnimationSettings, ChildKey, EventRoute, FocusCtx, Key, LayoutCtx, TuiEvent, TuiNode,
+    };
+
+    let service = AppService::for_tests();
+    let settings = service.settings();
+    assert!(settings.read().unwrap().estimate_release_dates);
+    let mut dialog = SettingsDialog::new(settings.clone(), service.clone());
+    let mut layout = LayoutCtx::new();
+    dialog.layout(ratatui::layout::Rect::new(0, 0, 100, 90), &mut layout);
+    let target = layout
+        .focus_targets()
+        .iter()
+        .find(|target| {
+            target.path.keys().last() == Some(&ChildKey::new("backlog-estimate-release-dates"))
+        })
+        .unwrap();
+    dialog.dispatch_focus(
+        target,
+        true,
+        &mut FocusCtx::new(AnimationSettings::default()),
+    );
+    let revision = service.settings_revision();
+    for expected in [false, true] {
+        dialog.dispatch_event(
+            &EventRoute::new(target.path.clone()),
+            &TuiEvent::Key(Key::Char(' ').into()),
+            &mut EventCtx::default(),
+        );
+        service.flush().unwrap();
+        assert_eq!(settings.read().unwrap().estimate_release_dates, expected);
+        assert!(service.take_errors().is_empty());
+    }
+    assert_eq!(service.settings_revision(), revision + 2);
+}
+
+#[test]
 fn excluded_sprint_name_fragments_apply_to_live_settings() {
     let service = AppService::for_tests();
     let settings = service.settings();

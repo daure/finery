@@ -2,12 +2,32 @@ use chrono::{Datelike, NaiveDate};
 
 use super::{BacklogSnapshot, WorkItem, is_done_status};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct ReleaseVersion {
     pub id: String,
     pub name: String,
     pub start_date: Option<NaiveDate>,
     pub end_date: Option<NaiveDate>,
+    pub estimated_start: Option<ReleaseDateEstimate>,
+    pub estimated_end: Option<ReleaseDateEstimate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReleaseDateEstimate {
+    pub date: NaiveDate,
+    pub source_version_id: String,
+}
+
+impl ReleaseVersion {
+    fn start(&self) -> Option<NaiveDate> {
+        self.start_date
+            .or_else(|| self.estimated_start.as_ref().map(|estimate| estimate.date))
+    }
+
+    fn end(&self) -> Option<NaiveDate> {
+        self.end_date
+            .or_else(|| self.estimated_end.as_ref().map(|estimate| estimate.date))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +46,8 @@ pub(crate) enum ReleaseStatus {
 pub(crate) struct ReleaseForecast {
     pub start: Option<NaiveDate>,
     pub end: Option<NaiveDate>,
+    pub estimated_start: bool,
+    pub estimated_end: bool,
     pub completed_points: f64,
     pub total_points: f64,
     pub assumed: bool,
@@ -43,8 +65,13 @@ pub(crate) fn forecast(
 ) -> ReleaseForecast {
     let version = release_version(snapshot, label);
     let mut forecast = ReleaseForecast {
-        start: version.and_then(|version| version.start_date),
-        end: version.and_then(|version| version.end_date),
+        start: version.and_then(ReleaseVersion::start),
+        end: version.and_then(ReleaseVersion::end),
+        estimated_start: version.is_some_and(|version| {
+            version.start_date.is_none() && version.estimated_start.is_some()
+        }),
+        estimated_end: version
+            .is_some_and(|version| version.end_date.is_none() && version.estimated_end.is_some()),
         completed_points: 0.0,
         total_points: 0.0,
         assumed: false,
@@ -120,7 +147,7 @@ pub(crate) fn scheduled_dates(
     label: &str,
 ) -> Option<(NaiveDate, NaiveDate)> {
     let version = release_version(snapshot, label)?;
-    Some((version.start_date?, version.end_date?))
+    Some((version.start()?, version.end()?))
 }
 
 fn release_version<'a>(snapshot: &'a BacklogSnapshot, label: &str) -> Option<&'a ReleaseVersion> {

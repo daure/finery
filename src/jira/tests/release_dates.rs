@@ -9,10 +9,19 @@ fn load_with_project_versions(
     status: &str,
     versions: Value,
 ) -> (super::super::BacklogLoad, Vec<String>) {
+    load_with_estimation(status, versions, true)
+}
+
+fn load_with_estimation(
+    status: &str,
+    versions: Value,
+    enabled: bool,
+) -> (super::super::BacklogLoad, Vec<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let mut settings = jira_settings(format!("http://{}", listener.local_addr().unwrap()));
     settings.jira_default_board = "42".into();
     settings.backlog_runway.use_jira_velocity = false;
+    settings.estimate_release_dates = enabled;
     listener.set_nonblocking(true).unwrap();
     let finished = Arc::new(AtomicBool::new(false));
     let stop = finished.clone();
@@ -132,4 +141,49 @@ fn release_date_lookup_failure_keeps_backlog_and_reports_warning() {
             .iter()
             .any(|warning| warning.contains("release dates") && warning.contains("FIN"))
     );
+}
+
+#[test]
+fn release_estimation_uses_unloaded_history_and_respects_the_setting() {
+    use crate::store::work_items::release::parse_date;
+
+    for enabled in [true, false] {
+        let (loaded, _) = load_with_estimation(
+            "200 OK",
+            json!([
+                {"id":"history","name":"old","releaseDate":"2026-09-11","archived":true},
+                {"id":"1","name":"v1.0","releaseDate":"2026-09-25"},
+                {"id":"2","name":"v1.0","startDate":"2026-09-28"},
+                {"id":"future","name":"next","startDate":"2026-10-12"}
+            ]),
+            enabled,
+        );
+        for item in loaded
+            .snapshot
+            .sprints
+            .iter()
+            .flat_map(|sprint| &sprint.work_items)
+            .chain(&loaded.snapshot.work_items)
+        {
+            let version = &item.releases[0];
+            if version.id == "1" {
+                assert_eq!(version.start_date, None);
+                assert_eq!(version.end_date, parse_date("2026-09-25"));
+                assert_eq!(
+                    version
+                        .estimated_start
+                        .as_ref()
+                        .map(|estimate| estimate.date),
+                    enabled.then(|| parse_date("2026-09-12").unwrap())
+                );
+            } else {
+                assert_eq!(version.start_date, parse_date("2026-09-28"));
+                assert_eq!(version.end_date, None);
+                assert_eq!(
+                    version.estimated_end.as_ref().map(|estimate| estimate.date),
+                    enabled.then(|| parse_date("2026-10-11").unwrap())
+                );
+            }
+        }
+    }
 }

@@ -77,11 +77,12 @@ pub(super) fn title(
     ];
     if let Some(end) = forecast.end {
         heading.push(match forecast.start {
-            Some(start) => Span::styled(start.format("%-d %b").to_string(), text),
+            Some(start) => date_span(start, forecast.estimated_start, text, muted),
             None => Span::styled("(no start date)", muted),
         });
         heading.extend([
-            Span::styled(format!(" – {}", end.format("%-d %b")), text),
+            Span::styled(" – ", text),
+            date_span(end, forecast.estimated_end, text, muted),
             separator(),
         ]);
         if forecast.status == ReleaseStatus::Delivered {
@@ -104,7 +105,12 @@ pub(super) fn title(
             } else {
                 ("todo", "left")
             };
-            let assumption = if forecast.start.is_none() { "~" } else { "" };
+            let assumption =
+                if forecast.start.is_none() || forecast.estimated_start || forecast.estimated_end {
+                    "~"
+                } else {
+                    ""
+                };
             heading.push(Span::styled(
                 format!("󰑮 {} {work_label} ", points_label(needed)),
                 text,
@@ -150,4 +156,12 @@ pub(super) fn title(
             ),
         ]),
     ])
+}
+
+fn date_span(date: NaiveDate, estimated: bool, text: Style, muted: Style) -> Span<'static> {
+    let prefix = if estimated { "~" } else { "" };
+    Span::styled(
+        format!("{prefix}{}", date.format("%-d %b")),
+        if estimated { muted } else { text },
+    )
 }

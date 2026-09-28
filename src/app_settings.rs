@@ -18,6 +18,7 @@ pub(crate) const JIRA_STORY_POINTS_BOARD_ID_SETTING: &str = "jira.story_points_b
 pub(crate) const JIRA_STORY_POINTS_DISCOVERY_COMPLETE_SETTING: &str =
     "jira.story_points_discovery_complete";
 pub(crate) const BACKLOG_USE_JIRA_VELOCITY_SETTING: &str = "backlog.use_jira_velocity";
+pub(crate) const BACKLOG_ESTIMATE_RELEASE_DATES_SETTING: &str = "backlog.estimate_release_dates";
 pub(crate) const BACKLOG_JIRA_VELOCITY_SPRINTS_SETTING: &str = "backlog.jira_velocity_sprints";
 pub(crate) const BACKLOG_FIXED_SPRINT_CAPACITY_SETTING: &str = "backlog.fixed_sprint_capacity";
 pub(crate) const BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING: &str = "backlog.use_average_ticket_size";
@@ -438,6 +439,7 @@ pub(crate) struct AppSettings {
     pub(crate) jira_story_points_board_id: String,
     pub(crate) jira_story_points_discovery_complete: bool,
     pub(crate) backlog_runway: BacklogRunwaySettings,
+    pub(crate) estimate_release_dates: bool,
     pub(crate) excluded_sprint_name_fragments: Vec<String>,
     pub(crate) saved_backlog_filters: Vec<SavedBacklogFilter>,
     pub(crate) backlog_keys: BacklogKeyBindings,
@@ -462,6 +464,7 @@ impl Default for AppSettings {
             jira_story_points_board_id: String::new(),
             jira_story_points_discovery_complete: false,
             backlog_runway: BacklogRunwaySettings::default(),
+            estimate_release_dates: true,
             excluded_sprint_name_fragments: Vec::new(),
             saved_backlog_filters: Vec::new(),
             backlog_keys: BacklogKeyBindings::default(),
@@ -531,6 +534,10 @@ impl AppSettings {
             jira_story_points_discovery_complete: values
                 .get(JIRA_STORY_POINTS_DISCOVERY_COMPLETE_SETTING)
                 .is_some_and(|value| value == "true"),
+            estimate_release_dates: values
+                .get(BACKLOG_ESTIMATE_RELEASE_DATES_SETTING)
+                .and_then(|value| value.parse::<bool>().ok())
+                .unwrap_or(defaults.estimate_release_dates),
             backlog_runway: BacklogRunwaySettings {
                 use_jira_velocity: values
                     .get(BACKLOG_USE_JIRA_VELOCITY_SETTING)
@@ -636,6 +643,10 @@ impl AppSettings {
             (
                 BACKLOG_USE_JIRA_VELOCITY_SETTING,
                 self.backlog_runway.use_jira_velocity.to_string(),
+            ),
+            (
+                BACKLOG_ESTIMATE_RELEASE_DATES_SETTING,
+                self.estimate_release_dates.to_string(),
             ),
             (
                 BACKLOG_JIRA_VELOCITY_SPRINTS_SETTING,

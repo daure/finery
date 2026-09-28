@@ -30,6 +30,14 @@ Jira credentials and defaults are configured in the TUI settings and stored in F
 
 Jira description conversion support and its safety contract are documented in [docs/jira-description-support.md](docs/jira-description-support.md).
 
+## Release date estimates
+
+**Estimate missing release dates** in Settings is enabled by default (`backlog.estimate_release_dates`). Finery treats each project's dated versions as a sequential planning stream, ordered by end date or, when absent, start date. Historical versions participate even when their tickets are outside the loaded backlog.
+
+A release with only an end date can start the calendar day after its preceding version's explicit end. A release with only a start date can end the day before its following version's explicit start. Estimates require an unambiguous adjacent boundary and a valid window without overlapping explicit release windows; fully undated versions remain undated. Estimates use explicit boundaries rather than chaining other estimates.
+
+Estimated dates appear with `~` in semantic muted grey and drive release ordering and capacity forecasts. Explicit dates retain their normal styling. These are local planning assumptions; Jira dates stay authoritative and unchanged. Disable the toggle for projects with parallel release streams. Saving the toggle refreshes the backlog.
+
 ## Ticket open command
 
 **Open command** in Settings stores a trusted host shell command. Press `n` while a ticket row is focused in Jira Search (`Ctrl+F`), Recent Tickets (`Ctrl+E`), Backlog, or change-set detail to run it in the background through `sh -c`. An empty or whitespace-only command does nothing. Saving the setting does not execute it.

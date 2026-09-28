@@ -18,6 +18,7 @@ fn planned(points: f64) -> BacklogSnapshot {
         name: "v1.0".into(),
         start_date: Some(date("2026-09-14")),
         end_date: Some(date("2026-10-02")),
+        ..Default::default()
     }];
     snapshot.work_items = vec![story];
     apply_capacity(

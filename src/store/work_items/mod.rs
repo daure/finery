@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 pub(crate) mod content;
 pub(crate) mod release;
+pub(crate) mod release_dates;
 pub(crate) mod saved_filter;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

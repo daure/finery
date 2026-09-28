@@ -573,6 +573,7 @@ fn backlog_groups_releases_by_scheduled_dates_before_version_names() {
         name: "zeta".into(),
         start_date: parse_date("2026-09-14"),
         end_date: parse_date("2026-09-28"),
+        ..Default::default()
     }];
     snapshot.work_items[0].fix_versions = vec!["alpha".into()];
     snapshot.work_items[0].releases = vec![ReleaseVersion {
@@ -580,6 +581,7 @@ fn backlog_groups_releases_by_scheduled_dates_before_version_names() {
         name: "alpha".into(),
         start_date: parse_date("2026-10-12"),
         end_date: parse_date("2026-10-26"),
+        ..Default::default()
     }];
     let mut undated = work_item("FIN-9", "Undated release work");
     undated.fix_versions = vec!["beta".into()];
@@ -588,6 +590,7 @@ fn backlog_groups_releases_by_scheduled_dates_before_version_names() {
         name: "beta".into(),
         start_date: None,
         end_date: None,
+        ..Default::default()
     }];
     snapshot
         .work_items

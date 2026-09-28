@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use super::{
-    AppSettings, BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING,
-    BACKLOG_FIXED_SPRINT_CAPACITY_SETTING, BACKLOG_FIXED_TICKET_SIZE_SETTING,
-    BACKLOG_HOME_KEY_SETTING, BACKLOG_MOVE_TO_BOTTOM_KEY_SETTING, BACKLOG_MOVE_TO_TOP_KEY_SETTING,
+    AppSettings, BACKLOG_ESTIMATE_RELEASE_DATES_SETTING,
+    BACKLOG_EXCLUDED_SPRINT_NAME_FRAGMENTS_SETTING, BACKLOG_FIXED_SPRINT_CAPACITY_SETTING,
+    BACKLOG_FIXED_TICKET_SIZE_SETTING, BACKLOG_HOME_KEY_SETTING,
+    BACKLOG_MOVE_TO_BOTTOM_KEY_SETTING, BACKLOG_MOVE_TO_TOP_KEY_SETTING,
     BACKLOG_SAVED_FILTERS_SETTING, BACKLOG_SPRINT_TOLERANCE_PERCENT_SETTING,
     BACKLOG_USE_AVERAGE_TICKET_SIZE_SETTING, BACKLOG_USE_JIRA_VELOCITY_SETTING,
     COMPOSER_ADD_CHILD_KEY_SETTING, COMPOSER_ADD_SIBLING_KEY_SETTING, COMPOSER_COMMIT_KEY_SETTING,
@@ -300,6 +301,31 @@ fn backlog_runway_settings_round_trip_and_reject_invalid_values() {
     .unwrap();
     assert_eq!(defaults.backlog_runway.fixed_sprint_capacity, 20.0);
     assert_eq!(defaults.backlog_runway.sprint_tolerance_percent, 20);
+}
+
+#[test]
+fn release_date_estimation_defaults_on_and_round_trips_disabled() {
+    assert!(AppSettings::default().estimate_release_dates);
+    assert!(
+        AppSettings::resolve(&HashMap::new())
+            .unwrap()
+            .estimate_release_dates
+    );
+    let settings = AppSettings::resolve(&HashMap::from([(
+        BACKLOG_ESTIMATE_RELEASE_DATES_SETTING.into(),
+        "false".into(),
+    )]))
+    .unwrap();
+    let values = settings
+        .values()
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect();
+    assert!(
+        !AppSettings::resolve(&values)
+            .unwrap()
+            .estimate_release_dates
+    );
 }
 
 #[test]

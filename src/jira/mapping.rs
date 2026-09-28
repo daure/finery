@@ -288,6 +288,7 @@ fn to_work_item_fields(key: &str, fields: &Value, story_points_field_id: Option<
                         .get("releaseDate")
                         .and_then(Value::as_str)
                         .and_then(crate::store::work_items::release::parse_date),
+                    ..Default::default()
                 })
             })
             .collect(),

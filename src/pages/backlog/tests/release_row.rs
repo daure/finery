@@ -11,6 +11,7 @@ fn release_snapshot() -> BacklogSnapshot {
         name: "v1.0".into(),
         start_date: parse_date("2026-09-14"),
         end_date: parse_date("2026-10-02"),
+        ..Default::default()
     };
     let story = WorkItem {
         key: "FIN-1".into(),
@@ -211,6 +212,72 @@ fn missing_release_start_shows_muted_placeholder_and_estimates_capacity_from_tod
         assert_eq!(
             text.lines[1].to_string(),
             "✓ 2/2 est • 1 open • 30 pts remaining"
+        );
+    }
+}
+
+#[test]
+fn estimated_release_boundaries_are_muted_and_drive_planning_dates() {
+    use crate::store::work_items::release_dates::estimate_dates;
+
+    tuicore::init();
+    for missing_start in [true, false] {
+        let mut snapshot = release_snapshot();
+        let mut version = snapshot.work_items[0].releases[0].clone();
+        if missing_start {
+            version.start_date = None;
+        } else {
+            version.end_date = None;
+        }
+        let mut versions = vec![
+            ReleaseVersion {
+                id: "previous".into(),
+                end_date: parse_date("2026-09-13"),
+                ..Default::default()
+            },
+            version,
+            ReleaseVersion {
+                id: "next".into(),
+                start_date: parse_date("2026-10-03"),
+                ..Default::default()
+            },
+        ];
+        estimate_dates(&mut versions);
+        snapshot.work_items[0].releases[0] = versions[1].clone();
+        let group = WorkItemGroup {
+            label: "v1.0".into(),
+            items: snapshot.work_items.iter().collect(),
+            root_count: 1,
+        };
+        let text = title(&snapshot, &group, parse_date("2026-09-12").unwrap(), false);
+        let dates = if missing_start {
+            "~14 Sep – 2 Oct"
+        } else {
+            "14 Sep – ~2 Oct"
+        };
+        assert_eq!(
+            text.lines[0].to_string(),
+            format!(" v1.0 • {dates} • 󰑮 3 planned 󰸁 ~1.5 available")
+        );
+        let estimated = if missing_start { "~14 Sep" } else { "~2 Oct" };
+        let explicit = if missing_start { "2 Oct" } else { "14 Sep" };
+        for (label, color) in [
+            (estimated, tuicore::theme().muted_fg()),
+            (explicit, tuicore::theme().text_fg()),
+        ] {
+            let span = text.lines[0]
+                .spans
+                .iter()
+                .find(|span| span.content == label)
+                .unwrap();
+            assert_eq!(span.style.fg, Some(color));
+        }
+        assert_eq!(
+            release::scheduled_dates(&snapshot, "v1.0"),
+            Some((
+                parse_date("2026-09-14").unwrap(),
+                parse_date("2026-10-02").unwrap()
+            ))
         );
     }
 }

@@ -666,7 +666,14 @@ pub(crate) fn backlog(settings: &AppSettings) -> Result<BacklogLoad, String> {
         ticket_comments,
     };
     descriptions::hydrate(&client, &base_url, &email, &token, &mut snapshot);
-    release_dates::hydrate(&client, &base_url, &email, &token, &mut snapshot);
+    release_dates::hydrate(
+        &client,
+        &base_url,
+        &email,
+        &token,
+        &mut snapshot,
+        settings.estimate_release_dates,
+    );
     if let Some(warning) = discovery_warning {
         snapshot.warnings.push(warning);
     }

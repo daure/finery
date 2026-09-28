@@ -1,7 +1,10 @@
 use std::collections::{BTreeSet, HashMap};
 
 use super::{BacklogSnapshot, Client, JiraFixVersion, response_json};
-use crate::store::work_items::release::parse_date;
+use crate::store::work_items::{
+    release::{ReleaseVersion, parse_date},
+    release_dates::estimate_dates,
+};
 
 pub(super) fn project_versions(
     client: &Client,
@@ -24,6 +27,7 @@ pub(super) fn hydrate(
     email: &str,
     token: &str,
     snapshot: &mut BacklogSnapshot,
+    estimate_missing_dates: bool,
 ) {
     let projects = snapshot
         .sprints
@@ -48,17 +52,22 @@ pub(super) fn hydrate(
                 continue;
             }
         };
+        let mut versions = versions
+            .into_iter()
+            .map(|version| ReleaseVersion {
+                id: version.id,
+                name: version.name.trim().into(),
+                start_date: version.start_date.as_deref().and_then(parse_date),
+                end_date: version.release_date.as_deref().and_then(parse_date),
+                ..ReleaseVersion::default()
+            })
+            .collect::<Vec<_>>();
+        if estimate_missing_dates {
+            estimate_dates(&mut versions);
+        }
         let dates = versions
             .into_iter()
-            .map(|version| {
-                (
-                    version.id,
-                    (
-                        version.start_date.as_deref().and_then(parse_date),
-                        version.release_date.as_deref().and_then(parse_date),
-                    ),
-                )
-            })
+            .map(|version| (version.id.clone(), version))
             .collect::<HashMap<_, _>>();
         for item in snapshot
             .sprints
@@ -72,9 +81,8 @@ pub(super) fn hydrate(
             })
         {
             for version in &mut item.releases {
-                if let Some(&(start, end)) = dates.get(&version.id) {
-                    version.start_date = start;
-                    version.end_date = end;
+                if let Some(hydrated) = dates.get(&version.id) {
+                    *version = hydrated.clone();
                 }
             }
         }
