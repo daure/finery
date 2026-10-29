@@ -15,6 +15,24 @@ Browse your backlog, plan sprints, and prepare ticket changes in Composer before
 - Local Composer change sets for drafting and editing related tickets.
 - MCP access so agents can prepare changes for review in the TUI.
 
+## Screenshots
+
+![Backlog with sprint groups and tickets showing estimates, status, and labels](docs/screenshots/backlog.png)
+
+<sub>Backlog — browse sprint groups and tickets with estimates, status, and labels.</sub>
+
+![Tickets grouped by release version with estimates and remaining work](docs/screenshots/release-planning.png)
+
+<sub>Release planning — group tickets by version and track estimates and remaining work.</sub>
+
+![Composer ticket editor with a description, properties, and attachments](docs/screenshots/composer.png)
+
+<sub>Composer — prepare ticket descriptions and properties in a local change set.</sub>
+
+![Sequence diagram attachment displayed inside the Composer terminal view](docs/screenshots/attachment-preview.png)
+
+<sub>Attachments — inspect images alongside the tickets in a change set.</sub>
+
 ## Install
 
 Prebuilt binaries support **Ubuntu 24.04+ on x86_64**. Rust is not required.
