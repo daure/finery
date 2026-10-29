@@ -1,13 +1,13 @@
 # Finery
 
-Keyboard-first Jira planning with reviewable local change sets.
+MCP-driven Jira planning with a keyboard-first TUI and reviewable local change sets.
 
 [![Release](https://img.shields.io/github/v/release/daure/finery)](https://github.com/daure/finery/releases/latest)
 [![Build](https://github.com/daure/finery/actions/workflows/release.yml/badge.svg)](https://github.com/daure/finery/actions/workflows/release.yml)
 
 [Install](#install) · [Get started](#get-started) · [MCP](#connect-an-agent) · [Reference](docs/reference.md)
 
-Browse your backlog, plan sprints, and prepare ticket changes in Composer before submitting them to Jira.
+Agents use Model Context Protocol (MCP) to query backlog and sprint data, reorder work, and create, edit, or delete local Composer change sets. They can draft and update ticket descriptions, properties, and attachments within those sets. Review proposed changes in the TUI before authorizing submission to Jira.
 
 ## Features
 
